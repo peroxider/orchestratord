@@ -27,6 +27,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .paths import SESSIONS_DIR
+
 logger = logging.getLogger(__name__)
 
 _MAX_QUEUE_SIZE = 1000
@@ -69,14 +71,12 @@ def read_history_direct(run_id: str) -> list[dict[str, Any]]:
     Best-effort: returns an empty list if the transcript file is
     missing or unreadable.
     """
-    transcript_path = (
-        Path.home()
-        / ".cache"
-        / "orchestratord"
-        / "sessions"
-        / run_id
-        / "transcript.jsonl"
-    )
+    transcript_path = SESSIONS_DIR / run_id / "transcript.jsonl"
+    if not transcript_path.exists():
+        # Read-only compatibility for sessions written by older releases.
+        transcript_path = (
+            Path.home() / ".cache" / "orchestratord" / "sessions" / run_id / "transcript.jsonl"
+        )
     if not transcript_path.exists():
         return []
 

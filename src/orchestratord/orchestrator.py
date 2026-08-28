@@ -91,6 +91,7 @@ from .tracker import (
     supports,
 )
 from .workspace import WorkspaceManager
+from .paths import AUDIT_LOG, ORCHESTRATORD_BASE
 
 if TYPE_CHECKING:
     from .tracker import CommandIntent
@@ -231,7 +232,7 @@ class Orchestrator:
 
             journal_run_id = "run_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             self._viz_journal = StateJournalWriter(
-                Path.home() / ".orchestratord" / "reports" / journal_run_id,
+                ORCHESTRATORD_BASE / "reports" / journal_run_id,
                 journal_run_id,
             )
             self._viz_journal.write_event(
@@ -1733,7 +1734,7 @@ class Orchestrator:
             import time
             from pathlib import Path
 
-            log_path = Path.home() / ".orchestratord" / "orchestrator" / "audit.jsonl"
+            log_path = AUDIT_LOG
             payload = {
                 "ts": time.time(),
                 "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

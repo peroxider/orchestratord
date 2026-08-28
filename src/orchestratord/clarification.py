@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from .clarification_queue import ClarificationQueue, ClarificationStatus
 from .tracker import Comment, CommentHistoryCapability, supports
+from .paths import ORCHESTRATORD_BASE
 
 if TYPE_CHECKING:
     from .clarification_queue import ClarificationItem
@@ -501,7 +502,7 @@ class ClarificationResolver:
         from pathlib import Path
 
         # Write notification to a well-known location for external monitors
-        notif_path = Path.home() / ".orchestratord" / ".escalation_notifications.json"
+        notif_path = ORCHESTRATORD_BASE / ".escalation_notifications.json"
         try:
             notif_path.parent.mkdir(parents=True, exist_ok=True)
             existing = []

@@ -188,6 +188,10 @@ class AgentBackend(Protocol):
         ...
 
     def get_task_registry(self) -> Any | None:
+        """Return an optional backend-owned runtime task registry."""
+        ...
+
+    def get_task_registry(self) -> Any | None:
         """Return a runtime task registry for real-time message injection.
 
         The registry enables ``queue_pending_message`` to fire at

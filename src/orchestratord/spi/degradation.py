@@ -11,7 +11,7 @@ event kind.
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orchestratord.spi.events import EventEnvelope, EventKind
 
@@ -153,3 +153,12 @@ class DegradingBackend:
         is applied at the session level, not the capability level.
         """
         return DegradingSession(self._inner.create_session(spec))
+
+    def get_task_registry(self) -> Any | None:
+        getter = getattr(self._inner, "get_task_registry", None)
+        return getter() if callable(getter) else None
+
+    def dispose(self) -> None:
+        dispose = getattr(self._inner, "dispose", None)
+        if callable(dispose):
+            dispose()

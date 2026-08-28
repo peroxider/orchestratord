@@ -19,6 +19,7 @@ from .premise_check import build_premise_block, check_issue_premise
 from .rules_learner import RuleEngine
 from .tracker import PullRequestFeedback, PullRequestRef
 from .workflow_store import get_workflow_store
+from .paths import SESSIONS_DIR
 
 if TYPE_CHECKING:
     from ..capabilities.context_protocol import ContextBuilderProtocol
@@ -238,7 +239,7 @@ class PromptBuilder:
                 rendered = f"{rendered}\n\n{build_premise_block(missing_paths)}"
 
         if previous_run_ids:
-            sessions_home = Path.home() / ".orchestratord" / "sessions"
+            sessions_home = SESSIONS_DIR
             prev_lines = "\n".join(
                 f'- `{rid}` — `Read(path="{sessions_home / rid / "transcript.jsonl"}")`'
                 for rid in previous_run_ids

@@ -80,6 +80,11 @@ class BackendRunner:
         )
         self._sleep: Callable[..., Any] = asyncio.sleep
 
+    def get_task_registry(self) -> Any | None:
+        """Return the optional registry supplied by the configured backend."""
+        getter = getattr(self.backend, "get_task_registry", None)
+        return getter() if callable(getter) else None
+
     # ------------------------------------------------------------------
     # Public API — AgentTaskRunner Protocol
     # ------------------------------------------------------------------
@@ -216,6 +221,8 @@ class BackendRunner:
         system_prompt_append, user_prompt = prompt_parts
         system_prompt_append = self._append_skill_index(system_prompt_append)
 
+        session._runtime_tasks = self.get_task_registry()
+
         # Build a SessionSpec from agent config + session context.
         spec = self._build_session_spec(session, workflow, system_prompt_append)
         session._user_prompt = user_prompt
@@ -337,6 +344,11 @@ class BackendRunner:
             env=self._build_env(session),
             resume_session_id=session.run_id or None,
             max_turns=self.max_turns,
+            extra=(
+                {"runtime_tasks": session._runtime_tasks}
+                if session._runtime_tasks is not None
+                else {}
+            ),
         )
 
     def _build_env(self, session: AgentSession) -> dict[str, str]:

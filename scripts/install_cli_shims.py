@@ -49,7 +49,9 @@ def install_cli_shims(*, parent: Path | None = None) -> Path:
     base = parent or Path(tempfile.mkdtemp(prefix="orchestratord-cli-guard-"))
     base.mkdir(parents=True, exist_ok=True)
     shim_runner_src = Path(__file__).resolve().parent / "_cli_shims" / "_shim_runner.py"
-    (base / "_shim_runner.py").write_text(shim_runner_src.read_text())
+    (base / "_shim_runner.py").write_text(
+        shim_runner_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     for cli in KNOWN_BACKEND_CLIS:
         target = base / cli.binary
         target.write_text(

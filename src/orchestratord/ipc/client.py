@@ -10,7 +10,7 @@ import logging
 from typing import Callable
 
 from .protocol import FrameType, GatewayFrame, GatewayIpcError
-from .models import InboundMessage
+from .models import InboundMessage, OutboundMessage
 
 logger = logging.getLogger(__name__)
 
@@ -124,14 +124,54 @@ class GatewayIpcClient:
             logger.debug("Gateway register failed", exc_info=True)
             return None
 
-    async def send(self, message: InboundMessage) -> None:
+    async def send(self, message: InboundMessage | OutboundMessage) -> None:
         if self._writer is None:
             raise GatewayIpcError("Not connected")
+        if isinstance(message, OutboundMessage):
+            await self.send_outbound(
+                origin=message.target or message.channel or self._origin,
+                text=message.text,
+                context_token=message.context_token,
+                metadata={**(message.metadata or {}), "level": message.level, "markdown": message.markdown},
+                semantic_tags=message.semantic_tags,
+            )
+            return
         frame = GatewayFrame.outbound(
             origin=message.origin, text=message.text,
             context_token=message.context_token,
             metadata=message.metadata if message.metadata else None,
             semantic_tags=message.semantic_tags,
+        )
+        self._writer.write(frame.encode())
+        await self._writer.drain()
+
+    async def send_outbound(self, *, origin: str, text: str,
+                            context_token: str | None = None,
+                            metadata: dict | None = None,
+                            semantic_tags: list[str] | None = None,
+                            in_reply_to: str | None = None) -> GatewayFrame | None:
+        """Write an OUTBOUND frame using the standalone gateway protocol."""
+        if self._writer is None:
+            raise GatewayIpcError("Not connected")
+        frame = GatewayFrame.outbound(
+            origin=origin, text=text, context_token=context_token,
+            metadata=metadata, semantic_tags=semantic_tags,
+            in_reply_to=in_reply_to,
+        )
+        self._writer.write(frame.encode())
+        await self._writer.drain()
+        return None
+
+    async def complete_processing(self, *, message_id: str,
+                                  outcome: str, reason: str = "") -> None:
+        """Acknowledge processing of an inbound delivery."""
+        if self._writer is None:
+            raise GatewayIpcError("Not connected")
+        frame = GatewayFrame(
+            type=FrameType.ACK if outcome == "success" else FrameType.NACK,
+            delivery_id=message_id,
+            ack_layer="processed" if outcome == "success" else None,
+            reason=reason or None,
         )
         self._writer.write(frame.encode())
         await self._writer.drain()

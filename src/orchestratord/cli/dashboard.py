@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 from ..event_tailer import EventTailerManager  # noqa: E402
 from ..chat_gateway import ChatGateway  # noqa: E402
-from ..chat_gateway import ChatGateway  # noqa: E402
+from ..paths import ORCHESTRATOR_DIR, ORCHESTRATORD_BASE
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ def _resolve_workspace_root(explicit: str | None = None) -> Path:
     if env_ws:
         return Path(env_ws).expanduser().resolve()
 
-    metadata_dir = Path.home() / ".orchestratord" / "orchestrator"
+    metadata_dir = ORCHESTRATOR_DIR
     if metadata_dir.exists():
         candidates = []
         for md_dir in metadata_dir.iterdir():
@@ -153,7 +153,7 @@ def _resolve_workspace_root(explicit: str | None = None) -> Path:
             candidates.sort(key=lambda c: c[0], reverse=True)
             return candidates[0][1]
 
-    return Path.home() / ".orchestratord" / "workspace"
+    return ORCHESTRATORD_BASE / "workspace"
 
 
 # ---------------------------------------------------------------------------
@@ -270,7 +270,7 @@ def _gather_issue_metadata(workspace: Path) -> dict[str, Any]:
 
 def _gather_metadata(workspace: Path) -> dict[str, Any]:
     """Read the orchestrator daemon metadata.json (PID, started_at, project)."""
-    metadata_dir = Path.home() / ".orchestratord" / "orchestrator"
+    metadata_dir = ORCHESTRATOR_DIR
     if not metadata_dir.exists():
         return {"found": False}
 

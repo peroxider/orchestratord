@@ -27,6 +27,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from orchestratord.paths import GATEWAY_SOCK
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -745,7 +747,7 @@ def _resolve_gateway_sock(args: argparse.Namespace) -> str:
         or os.environ.get("ORCHESTRATORD_GATEWAY_SOCK")
         or os.environ.get("ORCHESTRATORD_IM_GATEWAY_SOCK")
     )
-    return str(sock or os.path.expanduser("~/.orchestratord/gateway/gateway.sock"))
+    return str(sock or GATEWAY_SOCK)
 
 
 def _gateway_socket_available(sock: str) -> bool:
@@ -866,7 +868,7 @@ def _mount_gateway_opt_in(
         or os.environ.get("ORCHESTRATORD_GATEWAY_SOCK")
     )
     if not sock:
-        sock = os.path.expanduser("~/.orchestratord/gateway/gateway.sock")
+        sock = str(GATEWAY_SOCK)
 
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
