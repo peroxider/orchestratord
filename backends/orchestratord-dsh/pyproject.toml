@@ -1,0 +1,19 @@
+[project]
+name = "orchestratord-dsh"
+version = "0.1.0"
+description = "DeepSeek Harness SdkProcess backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+    "deepseek-harness-sdk>=0.0.0.dev0",
+]
+
+[project.entry-points."orchestratord.backends"]
+dsh = "orchestratord_dsh:DshBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+dsh = "orchestratord_dsh.descriptor:DSH_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

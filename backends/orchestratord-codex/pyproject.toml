@@ -1,0 +1,19 @@
+[project]
+name = "orchestratord-codex"
+version = "0.1.0"
+description = "Codex CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+codex = "orchestratord_codex:CodexBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+codex-cli = "orchestratord_codex.descriptor:CODEX_CLI_DESCRIPTOR"
+codex-app-server = "orchestratord_codex.descriptor:CODEX_APP_SERVER_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

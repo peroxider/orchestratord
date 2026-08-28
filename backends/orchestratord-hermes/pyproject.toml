@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-hermes"
+version = "0.1.0"
+description = "Hermes Cli backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+hermes = "orchestratord_hermes:HermesBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+hermes = "orchestratord_hermes.descriptor:HERMES_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-clawcodex"
+version = "0.1.0"
+description = "ClawCodex InProcess backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+clawcodex = "orchestratord_clawcodex:ClawcodexBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+clawcodex-dev = "orchestratord_clawcodex.descriptor:CLAWCODEX_DEV_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

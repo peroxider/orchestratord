@@ -1,0 +1,19 @@
+[project]
+name = "orchestratord-opencode"
+version = "0.1.0"
+description = "OpenCode Protocol backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+    "httpx>=0.27",
+]
+
+[project.entry-points."orchestratord.backends"]
+opencode = "orchestratord_opencode:OpenCodeBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+opencode = "orchestratord_opencode.descriptor:OPENCODE_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
