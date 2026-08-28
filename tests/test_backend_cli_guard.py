@@ -40,8 +40,9 @@ def tmp_dir(tmp_path: Path) -> Path:
 def _run_guarded(binary: str, *, guard_dir: Path) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["PATH"] = f"{guard_dir}{os.pathsep}{env.get('PATH', '')}"
+    executable = f"{binary}.cmd" if sys.platform == "win32" else binary
     return subprocess.run(
-        [binary, "--help"],
+        [executable, "--help"],
         capture_output=True,
         env=env,
         timeout=30,
@@ -97,7 +98,10 @@ def test_install_cli_shims_creates_expected_files(tmp_dir: Path) -> None:
         shim = guard_dir / cli.binary
         assert shim.exists(), f"missing shim: {shim}"
         mode = shim.stat().st_mode
-        assert mode & 0o100, f"shim not executable: {shim} (mode={oct(mode)})"
+        if sys.platform == "win32":
+            assert (guard_dir / f"{cli.binary}.cmd").exists()
+        else:
+            assert mode & 0o100, f"shim not executable: {shim} (mode={oct(mode)})"
         body = shim.read_text()
         assert "ORCHESTRATORD_GUARDED_BINARY" in body
         assert cli.binary in body
@@ -135,7 +139,7 @@ def test_shim_runner_returns_126() -> None:
 
 def test_manual_e2e_files_exempt_by_path() -> None:
     """Tests under ``tests/manual_e2e_`` are exempt by nodeid prefix."""
-    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
+    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
     assert 'nodeid.startswith("tests/manual_e2e_")' in conftest_src, (
         "conftest.py must retain the manual_e2e_ path-prefix exemption"
     )
@@ -143,7 +147,7 @@ def test_manual_e2e_files_exempt_by_path() -> None:
 
 def test_skip_env_var_disables_guard() -> None:
     """``ORCHESTRATORD_SKIP_CLI_GUARD=1`` disables the autouse fixture."""
-    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
+    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
     assert "ORCHESTRATORD_SKIP_CLI_GUARD" in conftest_src
     assert '== "1"' in conftest_src, (
         "guard skip-env check must compare to literal '1' for safety"
@@ -152,7 +156,7 @@ def test_skip_env_var_disables_guard() -> None:
 
 def test_uses_real_cli_marker_registered() -> None:
     """``pytest.mark.uses_real_cli`` is registered (no ``PytestUnknownMarkWarning``)."""
-    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text()
+    conftest_src = (Path(__file__).resolve().parent / "conftest.py").read_text(encoding="utf-8")
     assert "uses_real_cli" in conftest_src
     # ``pytest_configure`` calls ``addinivalue_line("markers", ...)``.
     assert "addinivalue_line" in conftest_src

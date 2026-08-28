@@ -58,6 +58,15 @@ def install_cli_shims(*, parent: Path | None = None) -> Path:
             _render_shim_source(cli.binary, cli.backend_package, str(base))
         )
         target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        # Windows does not resolve extensionless files through PATH. Keep the
+        # POSIX shim and add a .cmd companion that invokes the same runner.
+        (base / f"{cli.binary}.cmd").write_text(
+            "@echo off\r\n"
+            f"set \"ORCHESTRATORD_GUARDED_BINARY={cli.binary}\"\r\n"
+            f"set \"ORCHESTRATORD_GUARDED_BACKEND_PKG={cli.backend_package}\"\r\n"
+            "python \"%~dp0_shim_runner.py\" %*\r\n",
+            encoding="utf-8",
+        )
     return base
 
 
