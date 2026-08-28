@@ -761,7 +761,7 @@ def _gateway_socket_available(sock: str) -> bool:
 
 
 async def _probe_gateway_socket(sock: str) -> None:
-    from orchestratord.ipc import GatewayIpcClient
+    from orchestratord.ipc.client import GatewayIpcClient
 
     client = GatewayIpcClient(sock, instance_id="orchestrator-control-probe")
     try:
@@ -935,7 +935,7 @@ def _mount_gateway_opt_in(
         bridge_interrupt=_bridge_interrupt,
     )
 
-    from orchestratord.ipc import GatewayIpcClient
+    from orchestratord.ipc.client import GatewayIpcClient
 
     session_id = f"orchestrator-{os.getpid()}"
     ipc = GatewayIpcClient(sock, instance_id=session_id)
@@ -1261,10 +1261,16 @@ def _run_orchestrator(
         # must happen here, not outside asyncio.run().
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(
-                sig,
-                lambda sig_name=signal.Signals(sig).name: _schedule_shutdown(sig_name),
-            )
+            try:
+                loop.add_signal_handler(
+                    sig,
+                    lambda sig_name=signal.Signals(sig).name: _schedule_shutdown(sig_name),
+                )
+            except NotImplementedError:
+                # Windows ProactorEventLoop has no POSIX signal support.
+                # The daemon can still run and clean up through normal
+                # cancellation/atexit paths.
+                break
         im_task = None
         if im_client_wrapper is not None:
             im_task = asyncio.create_task(im_client_wrapper._heartbeat_loop())

@@ -92,6 +92,7 @@ class WorkflowOrchestrator:
             clarification_resolver=clarification_resolver,
             llm_client=llm_client,
             diagnostics_callback=diagnostics_callback,
+            cost_provider=lambda: self._engine.cost_tracker.total_usd,
         )
         self._stage_runner.set_bundle_path(bundle_dir)
         self._engine.set_stage_runner(self._stage_runner)

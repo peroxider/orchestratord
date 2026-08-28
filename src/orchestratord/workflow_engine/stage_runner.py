@@ -13,7 +13,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from .checkpoint import ArtifactResolver
 from .validators import ContractValidator
@@ -92,6 +92,7 @@ class StageRunner:
         diagnostics_callback: Any = None,
         *,
         task_runner: "AgentTaskRunner | None" = None,
+        cost_provider: Callable[[], float] | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._task_runner: "AgentTaskRunner | None" = task_runner
@@ -106,6 +107,7 @@ class StageRunner:
         self._progress_reporter = progress_reporter
         self._llm_client = llm_client
         self._diagnostics_callback = diagnostics_callback
+        self._cost_provider = cost_provider
         self._bundle_path: Path | None = None
         self._validator = ContractValidator(
             workspace_dir=self._workspace_dir,
@@ -522,14 +524,19 @@ class StageRunner:
 
     # ── 工具方法 ──────────────────────────────────────────────────
 
-    @staticmethod
-    def _get_total_cost_usd() -> float:
-        """从核心 bootstrap 状态获取当前累计成本。"""
-        try:
-            from src.bootstrap.state import get_total_cost_usd
+    def _get_total_cost_usd(self) -> float:
+        """Return the injected workflow cost total, if available.
 
-            return get_total_cost_usd()
-        except Exception:
+        StageRunner deliberately has no dependency on an agent runtime's
+        global bootstrap state. The workflow owner may inject a provider;
+        callers that do not have one retain the old zero-cost fallback.
+        """
+        if self._cost_provider is None:
+            return 0.0
+        try:
+            return float(self._cost_provider())
+        except Exception:  # noqa: BLE001
+            logger.debug("cost provider failed", exc_info=True)
             return 0.0
 
     @staticmethod

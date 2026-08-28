@@ -16,7 +16,7 @@ from .types import EventLevel, OrchestratorEvent, TERMINAL_REASON_LEVEL
 
 if TYPE_CHECKING:
     from ..progress_sink import ProgressSink  # noqa: F401
-    from ..api.query import SessionComplete, PhaseComplete, TurnComplete  # noqa: F401
+    from .agent_events import PhaseComplete, SessionComplete, TurnComplete
 
 logger = logging.getLogger(__name__)
 

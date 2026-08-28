@@ -30,6 +30,8 @@ from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
 
+logger = logging.getLogger(__name__)
+
 # Total wait for ``opencode serve`` to print its port. The original code
 # looped 30 times with a 1s ``wait_for``; we cap the cumulative budget
 # at 10s instead so a hung server fails fast.

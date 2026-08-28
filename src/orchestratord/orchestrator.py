@@ -3287,9 +3287,7 @@ class Orchestrator:
                                     if not _has_changes:
                                         _start_sha = getattr(session, "start_commit_sha", None)
                                         if _start_sha:
-                                            from src.utils.git import _run_git as _git
-
-                                            _head_out, _, _rc = _git(
+                                            _head_out, _, _rc = _run_git(
                                                 ["rev-parse", "HEAD"], _repo_root
                                             )
                                             _has_changes = bool(
@@ -4418,7 +4416,7 @@ class Orchestrator:
         """Process lifecycle control commands from CLI.
 
         Checks the control directory for pause/resume/stop/takeover commands
-        written by `clawcodex orchestrator pause/resume/stop/takeover`.
+        written by the orchestrator control CLI.
         """
         import os
 
@@ -4504,7 +4502,7 @@ class Orchestrator:
         if current is not None and current_origin == origin and current_sock == sock:
             return {"ok": True, "message": "already connected"}
 
-        from .ipc import GatewayIpcClient
+        from .ipc.client import GatewayIpcClient
         from .im_gateway_client import (
             OrchestratorGatewayClient,
             OrchestratorHandlers,

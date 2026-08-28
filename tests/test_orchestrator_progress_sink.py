@@ -65,7 +65,9 @@ from orchestratord.progress_sink import (
 from orchestratord.workspace import Workspace
 
 try:
-    from src.tool_system.context import ToolContext  # type: ignore[import-not-found]
+    from importlib import import_module
+
+    ToolContext = import_module("src.tool_system.context").ToolContext
 except ImportError:  # clawcodex tool system not installed (standalone orchestratord)
     ToolContext = None  # type: ignore[assignment,misc]
 
@@ -231,12 +233,13 @@ class TestCompositeProgressSink(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+@_requires_tool_context
 class TestToolContextProgressSink(unittest.TestCase):
     def _make_context(self):
         # Use a real ToolContext — ToolContextProgressSink calls
         # ``_progress_report_call`` and ``_task_update_call`` which
         # require a real ``tasks`` dict.
-        from src.tool_system.context import ToolContext
+        ToolContext = __import__("src.tool_system.context", fromlist=["ToolContext"]).ToolContext
 
         ctx = ToolContext(workspace_root="/tmp")
         # Pre-register a task so ProgressReport has something to update.

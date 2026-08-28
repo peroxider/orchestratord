@@ -50,7 +50,7 @@ class ClawcodexBackend:
         if source not in sys.path:
             sys.path.insert(0, source)
         try:
-            query = importlib.import_module("extensions.api.query")
+            query = __import__("extensions.api.query", fromlist=("query",))
         except ImportError as exc:
             raise RuntimeError(
                 f"cannot import extensions.api.query from CLAWCODEX_SOURCE: {exc}"

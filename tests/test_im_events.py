@@ -1682,13 +1682,10 @@ def test_orchestrator_build_session_sink_emits_issue_started(tmp_path) -> None:
     """A session sink creation should immediately notify IM that work started."""
     from orchestratord.config.schema import WorkflowConfig
     from orchestratord.orchestrator import Orchestrator
-    from src.tool_system.context import ToolContext
 
     received: list[tuple[str, EventLevel, str]] = []
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.workflow = WorkflowConfig()
-    orchestrator._progress_context = ToolContext(workspace_root=tmp_path)
-    orchestrator._progress_context.tasks["I1"] = {"id": "I1", "metadata": {}}
     orchestrator.im_event_deliver = lambda event, text: received.append(
         (event.event_type, event.level, text)
     )
@@ -1704,12 +1701,10 @@ def test_orchestrator_build_session_sink_emits_issue_started(tmp_path) -> None:
 def test_orchestrator_emit_im_event_reaches_issue_emitter(tmp_path) -> None:
     from orchestratord.config.schema import WorkflowConfig
     from orchestratord.orchestrator import Orchestrator
-    from src.tool_system.context import ToolContext
 
     received: list[OrchestratorEvent] = []
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.workflow = WorkflowConfig()
-    orchestrator._progress_context = ToolContext(workspace_root=tmp_path)
     orchestrator.im_event_deliver = None
     orchestrator._im_emitters = {
         "I1": OrchestratorEventEmitter("I1", sinks=[received.append]),
@@ -1730,12 +1725,10 @@ def test_orchestrator_emit_im_event_reaches_issue_emitter(tmp_path) -> None:
 def test_orchestrator_emit_im_event_can_use_daemon_deliver(tmp_path) -> None:
     from orchestratord.config.schema import WorkflowConfig
     from orchestratord.orchestrator import Orchestrator
-    from src.tool_system.context import ToolContext
 
     received: list[str] = []
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.workflow = WorkflowConfig()
-    orchestrator._progress_context = ToolContext(workspace_root=tmp_path)
     orchestrator._im_emitters = {}
     orchestrator.im_event_deliver = lambda event, text: received.append(event.event_type)
 
@@ -1943,12 +1936,10 @@ def test_orchestrator_emit_issue_detected_includes_url(tmp_path) -> None:
     """_emit_im_event for issue.detected carries the issue URL in payload."""
     from orchestratord.config.schema import WorkflowConfig
     from orchestratord.orchestrator import Orchestrator
-    from src.tool_system.context import ToolContext
 
     received: list[OrchestratorEvent] = []
     orchestrator = Orchestrator.__new__(Orchestrator)
     orchestrator.workflow = WorkflowConfig()
-    orchestrator._progress_context = ToolContext(workspace_root=tmp_path)
     orchestrator.im_event_deliver = None
     orchestrator._im_emitters = {
         "AGENTSDK-15": OrchestratorEventEmitter("AGENTSDK-15", sinks=[received.append]),

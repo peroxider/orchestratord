@@ -1094,7 +1094,7 @@ def _run_list(registry_path: Path | None, args: argparse.Namespace) -> int:
             print("No issues processed yet.")
         else:
             print("No orchestrator registry found. No issues to list.")
-            print("Hint: Start with 'clawcodex orchestrator server start --workflow WORKFLOW.md'")
+            print("Hint: Start with 'orchestratord server start --workflow WORKFLOW.md'")
         return 0  # idempotent: no-issues is a valid state
 
     from orchestratord.issue_registry import IssueRegistry
@@ -3078,7 +3078,7 @@ def _show_diff_non_git(ws_path: Path, issue_id: str, args: argparse.Namespace) -
     print(f"\n  {len(files)} files, {len(dirs)} directories")
     print("\n  Note: This workspace is not a git repository — no diff available.")
     print(
-        "  Use 'clawcodex orchestrator issue workspace --id {} --cat <file>' to view file contents.".format(
+        "  Use 'orchestratord issue workspace --id {} --cat <file>' to view file contents.".format(
             issue_id
         )
     )
@@ -3642,5 +3642,5 @@ def _run_init(args: argparse.Namespace) -> int:
     else:
         print(f"    1. Review {out.name} — all placeholders have been filled")
     print(f"    2. Move it to your local tracker's issues path")
-    print(f"    3. Start: clawcodex orchestrator server start --workflow workflow.md")
+    print(f"    3. Start: orchestratord server start --workflow workflow.md")
     return 0

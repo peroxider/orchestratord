@@ -111,7 +111,7 @@ def test_goal_judge_returns_done():
         await session._evaluate_goal()
     session._run_turn = _mock_run_turn
     original_evaluate = session._evaluate_goal
-    asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+    asyncio.run(session._evaluate_goal())
 
     events = _collect_events(session)
     kinds = [e.kind for e in events]
@@ -173,7 +173,7 @@ def test_goal_judge_returns_continue():
     original_run_turn = session._run_turn
     session._run_turn = _mock_run_turn
     try:
-        asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+        asyncio.run(session._evaluate_goal())
     finally:
         session._run_turn = original_run_turn
 
@@ -215,7 +215,7 @@ def test_goal_judge_returns_timeout():
         cleanup()
 
     import asyncio
-    asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+    asyncio.run(session._evaluate_goal())
 
     events = _collect_events(session)
     kinds = [e.kind for e in events]
@@ -256,7 +256,7 @@ def test_goal_parse_fail_triggers_pause():
         cleanup()
 
     import asyncio
-    asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+    asyncio.run(session._evaluate_goal())
 
     events = _collect_events(session)
     kinds = [e.kind for e in events]
@@ -305,7 +305,7 @@ def test_no_goal_condition_no_goal_mgr():
     assert session._goal_workspace is None
 
     import asyncio
-    asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+    asyncio.run(session._evaluate_goal())
 
     events = _collect_events(session)
     goal_events = [e for e in events if e.kind.value.startswith("goal_")]
@@ -335,7 +335,7 @@ def test_goal_set_gate_refused():
     assert session._goal_mgr is None
 
     import asyncio
-    asyncio.get_event_loop().run_until_complete(session._evaluate_goal())
+    asyncio.run(session._evaluate_goal())
 
     events = _collect_events(session)
     goal_events = [e for e in events if e.kind.value.startswith("goal_")]

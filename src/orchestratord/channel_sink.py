@@ -27,6 +27,14 @@ _LEVEL_MAP = {
 }
 
 
+async def _safe_send(gateway: Any, message: Any) -> None:
+    """Isolate asynchronous gateway failures from the orchestrator task."""
+    try:
+        await gateway.send(message)
+    except Exception:  # noqa: BLE001
+        logger.exception("channel gateway send failed")
+
+
 class ChannelProgressSink:
     """EventSink that formats + delivers events to the gateway."""
 
@@ -75,5 +83,21 @@ def build_gateway_deliver(
             logger.warning("no running loop; dropping IM event %s", event.event_type)
             return
         lp.create_task(_safe_send(gateway, msg))
+
+    return _deliver
+
+
+def build_ipc_deliver(im_client: Any) -> Callable[[OrchestratorEvent, str], None]:
+    """Build a non-blocking event callback for an async IM IPC client."""
+    loop = asyncio.get_running_loop()
+
+    async def _send(text: str) -> None:
+        try:
+            await im_client.send_outbound(text)
+        except Exception:  # noqa: BLE001
+            logger.exception("channel IPC send failed")
+
+    def _deliver(_event: OrchestratorEvent, text: str) -> None:
+        loop.create_task(_send(text))
 
     return _deliver

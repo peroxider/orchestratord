@@ -37,7 +37,7 @@ class OpenCodeBackend:
                 "and complete its provider configuration before using this backend."
             )
         try:
-            importlib.import_module("httpx")
+            __import__("httpx")
         except ImportError as exc:
             raise RuntimeError(
                 "httpx is required by the opencode backend but is not installed."
