@@ -9,7 +9,7 @@ RESULTS=0
 echo "=== Check 1: direct external extension imports ==="
 if grep -rE '^\s*(from|import)\s+extensions(\.|\s|$)' \
     src/orchestratord --include='*.py'; then
-  echo "FAIL: core files import extensions.* directly"
+  echo "FAIL: core files import backend-internal extensions directly"
   RESULTS=1
 else
   echo "OK"
