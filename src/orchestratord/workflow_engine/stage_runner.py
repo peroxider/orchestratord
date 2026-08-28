@@ -1,0 +1,546 @@
+"""StageRunner 适配器。
+
+桥接 DeclarativeWorkflowEngine 与 AgentRunner，
+将阶段执行适配为 AgentRunner 可消费的合成 Issue 工作单元。
+
+设计决策 DD-5: 方案 A（合成 Issue 适配器）优先，
+保留 AgentRunner 的全部稳健机制（停滞检测、进度上报、验证管线等）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, TYPE_CHECKING
+
+from .checkpoint import ArtifactResolver
+from .validators import ContractValidator
+from .workflow_state import StageNode, WorkflowState
+
+if TYPE_CHECKING:
+    from ..backend_runner import BackendRunner as AgentRunner
+    from ..session_state import AgentSession
+    from ..agent_task_runner import AgentTaskRunner
+    from ..config.schema import AgentConfig, SandboxConfig, WorkflowConfig
+    from ..issue import Issue
+    from ..workspace import Workspace
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StageRunResult:
+    """StageRunner 执行结果。"""
+
+    stage_id: int
+    success: bool
+    outputs: list[str] = field(default_factory=list)
+    artifacts: dict[str, str] = field(default_factory=dict)
+    cost_usd: float = 0.0
+    error: str | None = None
+    message: str = ""
+
+
+@dataclass
+class GateRunResult:
+    """GATE 阶段执行结果。"""
+
+    stage_id: int
+    approved: bool
+    reason: str = ""
+    cost_usd: float = 0.0
+
+
+@dataclass
+class DecisionRunResult:
+    """DECISION 阶段执行结果。"""
+
+    stage_id: int
+    outcome: str  # proceed | pivot | refine | rollback
+    next_stage: int | None = None
+    cost_usd: float = 0.0
+
+
+class StageRunner:
+    """阶段执行适配器。
+
+    通过合成 Issue 调用 AgentRunner，复用其全部生命周期管理能力：
+    - 停滞检测 (stagnation detection)
+    - 进度上报 (ProgressSink)
+    - 验证管线 (Verification Pipeline)
+    - 澄清队列 (ClarificationQueue)
+    - 成本追踪
+    """
+
+    MAX_RETRIES = 2
+
+    def __init__(
+        self,
+        agent_runner: "AgentRunner",
+        workflow_config: "WorkflowConfig",
+        agent_config: "AgentConfig | None" = None,
+        sandbox_config: "SandboxConfig | None" = None,
+        workspace_dir: str = "",
+        run_dir: str = "",
+        tracker: Any = None,
+        status_dashboard: Any = None,
+        clarification_resolver: Any = None,
+        progress_reporter: Any = None,
+        llm_client: Any = None,
+        diagnostics_callback: Any = None,
+        *,
+        task_runner: "AgentTaskRunner | None" = None,
+    ) -> None:
+        self._agent_runner = agent_runner
+        self._task_runner: "AgentTaskRunner | None" = task_runner
+        self._workflow_config = workflow_config
+        self._agent_config = agent_config
+        self._sandbox_config = sandbox_config
+        self._workspace_dir = workspace_dir
+        self._run_dir = run_dir
+        self._tracker = tracker
+        self._status_dashboard = status_dashboard
+        self._clarification_resolver = clarification_resolver
+        self._progress_reporter = progress_reporter
+        self._llm_client = llm_client
+        self._diagnostics_callback = diagnostics_callback
+        self._bundle_path: Path | None = None
+        self._validator = ContractValidator(
+            workspace_dir=self._workspace_dir,
+            llm_client=self._llm_client,
+        )
+
+    def set_bundle_path(self, bundle_path: Path | str | None) -> None:
+        self._bundle_path = Path(bundle_path).resolve() if bundle_path else None
+
+    # ── 公开接口 ──────────────────────────────────────────────────
+
+    async def run(self, stage_node: StageNode, state: WorkflowState) -> StageRunResult:
+        """执行 Agent 阶段。
+
+        构建合成 Issue，通过 AgentRunner 执行，支持自动重试。
+        """
+        last_error: str | None = None
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                return await self._execute_agent_stage(stage_node, state)
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Stage %s attempt %d/%d failed: %s",
+                    stage_node.id,
+                    attempt + 1,
+                    self.MAX_RETRIES + 1,
+                    exc,
+                )
+                if attempt < self.MAX_RETRIES:
+                    await asyncio.sleep(2**attempt)
+
+        return StageRunResult(
+            stage_id=stage_node.id,
+            success=False,
+            error=last_error,
+        )
+
+    async def run_gate(self, stage_node: StageNode, state: WorkflowState) -> GateRunResult:
+        """执行 GATE 阶段。"""
+        mode = stage_node.gate_mode
+        max_retries = stage_node.max_retries
+
+        for attempt in range(max_retries + 1):
+            if mode == "auto":
+                result = await self._run_auto_gate(stage_node, state)
+            elif mode == "threshold":
+                result = await self._run_threshold_gate(stage_node, state)
+            else:
+                return GateRunResult(
+                    stage_id=stage_node.id,
+                    approved=False,
+                    reason=f"GATE stage {stage_node.id} requires manual approval",
+                )
+
+            if result.approved or attempt >= max_retries:
+                return result
+
+            logger.warning(
+                "GATE stage %s attempt %d/%d rejected, retrying...",
+                stage_node.id,
+                attempt + 1,
+                max_retries + 1,
+            )
+            await asyncio.sleep(2**attempt)
+
+        return GateRunResult(
+            stage_id=stage_node.id,
+            approved=False,
+            reason=f"GATE stage {stage_node.id} failed after {max_retries + 1} attempts",
+        )
+
+    async def run_decision(self, stage_node: StageNode, state: WorkflowState) -> DecisionRunResult:
+        """执行 DECISION 阶段。"""
+        max_retries = stage_node.max_retries
+
+        for attempt in range(max_retries + 1):
+            try:
+                session = await self._run_synthetic_issue(
+                    prompt=self._build_decision_prompt(stage_node, state),
+                    stage_node=stage_node,
+                )
+                output_text = session.output_text if session else ""
+                outcome = self._parse_decision_outcome(output_text, stage_node)
+                next_stage = self._resolve_next_stage(outcome, stage_node)
+
+                if outcome != "proceed" or attempt >= max_retries:
+                    return DecisionRunResult(
+                        stage_id=stage_node.id,
+                        outcome=outcome,
+                        next_stage=next_stage,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Decision stage %s attempt %d/%d failed: %s",
+                    stage_node.id,
+                    attempt + 1,
+                    max_retries + 1,
+                    exc,
+                )
+                if attempt < max_retries:
+                    await asyncio.sleep(2**attempt)
+                else:
+                    return DecisionRunResult(stage_id=stage_node.id, outcome="proceed")
+
+        return DecisionRunResult(stage_id=stage_node.id, outcome="proceed")
+
+    # ── Agent 阶段执行 (DD-5: 合成 Issue 适配器) ─────────────────
+
+    async def _execute_agent_stage(
+        self,
+        stage_node: StageNode,
+        state: WorkflowState,
+    ) -> StageRunResult:
+        """通过合成 Issue + AgentRunner 执行 Agent 阶段。"""
+        # 记录阶段开始前的总成本，用于计算阶段增量
+        cost_before = self._get_total_cost_usd()
+
+        prompt = self._build_stage_prompt(stage_node, state)
+        session = await self._run_synthetic_issue(prompt=prompt, stage_node=stage_node)
+
+        if session is None:
+            return StageRunResult(
+                stage_id=stage_node.id,
+                success=False,
+                error="AgentRunner returned no session",
+            )
+
+        output_text = session.output_text if hasattr(session, "output_text") else ""
+        status = session.status if hasattr(session, "status") else "unknown"
+
+        # 计算阶段成本 = 总成本增量
+        cost_delta = self._get_total_cost_usd() - cost_before
+
+        return StageRunResult(
+            stage_id=stage_node.id,
+            success=status == "completed",
+            outputs=[output_text] if output_text else [],
+            message=output_text,
+            cost_usd=max(cost_delta, 0.0),
+            error=None if status == "completed" else f"Session status: {status}",
+        )
+
+    async def _run_synthetic_issue(
+        self,
+        prompt: str,
+        stage_node: StageNode,
+    ) -> "AgentSession | None":
+        """Build synthetic work unit and execute via AgentRunner or AgentTaskRunner."""
+        from ..issue import Issue
+        from ..workspace import Workspace
+        from ..session_state import AgentSession
+
+        workspace_path = Path(self._workspace_dir) if self._workspace_dir else Path(".")
+
+        # If a task_runner is available, use the new AgentTask path.
+        if self._task_runner is not None:
+            from ..agent_task import AgentTask
+
+            task = AgentTask(
+                id=f"stage-{stage_node.id:02d}",
+                kind="workflow_stage",
+                title=f"[{stage_node.phase}] {stage_node.name}",
+                description=prompt,
+                context={
+                    "stage_id": stage_node.id,
+                    "phase": stage_node.phase,
+                },
+                workspace_path=str(workspace_path),
+                labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
+                prompt_override=prompt,
+            )
+            result = await self._task_runner.run_task(task)
+
+            # Build a synthetic session for backward compat.
+            workspace = Workspace(
+                path=workspace_path,
+                issue_identifier=f"stage-{stage_node.id:02d}",
+                issue_id=f"stage-{stage_node.id:02d}",
+            )
+            synthetic_issue = Issue(
+                id=f"stage-{stage_node.id:02d}",
+                identifier=f"stage-{stage_node.id:02d}",
+                title=f"[{stage_node.phase}] {stage_node.name}",
+                description=prompt,
+                labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
+            )
+            session = AgentSession(
+                issue=synthetic_issue,
+                task=task,
+                workspace=workspace,
+                run_kind=f"workflow-stage-{stage_node.phase}",
+                run_id=f"stage-{stage_node.id:02d}",
+            )
+            session.status = result.status
+            session.output_text = result.output_text
+            session.turn_count = result.turn_count
+            session.tool_count = result.tool_count
+            session.session_end_reason = result.session_end_reason
+            session.session_end_summary = result.session_end_summary
+            return session
+
+        # Fallback: legacy synthetic Issue path.
+        synthetic_issue = Issue(
+            id=f"stage-{stage_node.id:02d}",
+            identifier=f"stage-{stage_node.id:02d}",
+            title=f"[{stage_node.phase}] {stage_node.name}",
+            description=prompt,
+            labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
+        )
+
+        workspace = Workspace(
+            path=workspace_path,
+            issue_identifier=f"stage-{stage_node.id:02d}",
+            issue_id=f"stage-{stage_node.id:02d}",
+        )
+
+        session = AgentSession(
+            issue=synthetic_issue,
+            workspace=workspace,
+            run_kind=f"workflow-stage-{stage_node.phase}",
+            run_id=f"stage-{stage_node.id:02d}",
+        )
+
+        try:
+            await self._agent_runner.run(
+                session=session,
+                workflow=self._workflow_config,
+                tracker=None,
+                status_dashboard=self._status_dashboard,
+                clarification_resolver=self._clarification_resolver,
+                progress_reporter=self._progress_reporter,
+                diagnostics_callback=self._diagnostics_callback,
+            )
+        except Exception as exc:
+            logger.exception("AgentRunner.run failed for stage %s", stage_node.id)
+            session.status = "failed"
+            session.output_text = str(exc)
+
+        return session
+
+    # ── GATE 处理 ─────────────────────────────────────────────────
+
+    async def _run_auto_gate(self, stage_node: StageNode, state: WorkflowState) -> GateRunResult:
+        """自动 GATE：基于 validator 结果判定。"""
+        if not stage_node.validators:
+            return GateRunResult(
+                stage_id=stage_node.id, approved=True, reason="no validators, auto-approved"
+            )
+
+        results = await self._validator.validate_all(stage_node.validators)
+        all_passed = all(r.passed for r in results)
+
+        return GateRunResult(
+            stage_id=stage_node.id,
+            approved=all_passed,
+            reason="All validators passed"
+            if all_passed
+            else f"Validators failed: {[r.message for r in results if not r.passed]}",
+        )
+
+    async def _run_threshold_gate(
+        self, stage_node: StageNode, state: WorkflowState
+    ) -> GateRunResult:
+        """阈值 GATE：通过合成 Issue + LLM 评分判定。"""
+        try:
+            prompt = (
+                f"Evaluate the following work output and assign a score from 0.0 to 1.0.\n"
+                f"Respond with ONLY: score: <number>\n\n"
+                f"Stage: {stage_node.name}\n"
+                f"Prompt: {stage_node.prompt}\n"
+            )
+            session = await self._run_synthetic_issue(prompt=prompt, stage_node=stage_node)
+            output_text = session.output_text if session else ""
+            score = self._extract_score(output_text)
+            approved = score >= stage_node.gate_threshold
+
+            return GateRunResult(
+                stage_id=stage_node.id,
+                approved=approved,
+                reason=f"Score {score:.2f} >= threshold {stage_node.gate_threshold}"
+                if approved
+                else f"Score {score:.2f} < threshold {stage_node.gate_threshold}",
+            )
+        except Exception as exc:
+            return GateRunResult(
+                stage_id=stage_node.id, approved=False, reason=f"Threshold gate error: {exc}"
+            )
+
+    # ── DECISION 处理 ─────────────────────────────────────────────
+
+    def _build_decision_prompt(self, stage_node: StageNode, state: WorkflowState) -> str:
+        """构建决策阶段提示词。"""
+        outcomes = list(stage_node.decision_outcomes.keys())
+        return (
+            f"Based on the completed stages, decide the next action.\n"
+            f"Available outcomes: {', '.join(outcomes)}\n"
+            f"Respond with ONE word: the chosen outcome.\n\n"
+            f"Stage: {stage_node.name}\n"
+            f"Context: {stage_node.prompt}\n"
+        )
+
+    def _parse_decision_outcome(self, output_text: str, stage_node: StageNode) -> str:
+        """从 LLM 输出中解析决策结果。"""
+        text_lower = output_text.strip().lower()
+        outcomes = list(stage_node.decision_outcomes.keys())
+        for outcome in outcomes:
+            if outcome.lower() in text_lower:
+                return outcome
+        return "proceed"
+
+    def _resolve_next_stage(self, outcome: str, stage_node: StageNode) -> int | None:
+        """根据决策结果解析下一个阶段。"""
+        decision_spec = stage_node.decision_outcomes.get(outcome, {})
+        return decision_spec.get("next")
+
+    # ── 提示词构建 ────────────────────────────────────────────────
+
+    def _build_stage_prompt(self, stage_node: StageNode, state: WorkflowState) -> str:
+        """构建阶段提示词。
+
+        结构：
+        1. WORKFLOW.md 模板（通过 PromptBuilder.render 获取，含项目上下文、编码规范等）
+        2. 当前阶段指令（stage_node.prompt）
+        3. 前序阶段输出（供后续阶段参考）
+        4. 输出验证要求
+        """
+        parts = []
+
+        # 1. WORKFLOW.md 基础 prompt（含项目上下文、编码规范、实现方法等）
+        base_prompt = self._render_base_prompt(state)
+        if base_prompt:
+            parts.append(base_prompt)
+
+        # 2. Current stage instruction
+        parts.append(f"\n## Current Stage: {stage_node.name}")
+        parts.append(f"Phase: {stage_node.phase}")
+        stage_agent = (stage_node.agent_config or {}).get("agent")
+        if stage_agent:
+            parts.append(
+                f"\n## Assigned Stage Agent\n"
+                f"Execute this stage as sub-agent `@{stage_agent}` via the Agent tool. "
+                f"That agent owns the stage skill, tools, and bridge dispatch for this step."
+            )
+        parts.append(stage_node.prompt or f"Execute stage: {stage_node.name}")
+
+        # Git 约束：允许在 issue 分支上 commit，禁止 push 和分支操作
+        # git_sync 会在 workflow 完成后统一 push 并创建 PR
+        parts.append(
+            "\n## ⚠️ Git Constraints\n"
+            "- You may use `git add` and `git commit` on the current branch.\n"
+            "- Do NOT run `git push` — the orchestrator handles push and PR creation.\n"
+            "- Do NOT run `git checkout`, `git switch`, or create new branches.\n"
+            "- Do NOT create pull requests.\n"
+            "- Use Write / Edit tools to modify source files."
+        )
+
+        # 3. 前序阶段输出
+        if state.completed_stages:
+            parts.append("\n## Completed Stages")
+            for sid in state.completed_stages:
+                sresult = state.get_stage_result(sid)
+                if sresult:
+                    parts.append(f"- Stage {sid}: {sresult.status.value}")
+                    if sresult.outputs:
+                        parts.append(f"  Output: {sresult.outputs[0][:50000]}")
+
+        # 4. 输出验证要求
+        if stage_node.validators:
+            parts.append("\n## Output Requirements")
+            for v in stage_node.validators:
+                parts.append(f"- {v.get('type', 'unknown')}: {v}")
+
+        prompt = "\n".join(parts)
+
+        # 解析跨阶段产物引用
+        prompt = ArtifactResolver.resolve(
+            prompt,
+            state=state,
+            workspace_dir=str(self._workspace_dir) if self._workspace_dir else "",
+        )
+
+        return prompt
+
+    def _render_base_prompt(self, state: WorkflowState) -> str:
+        """通过 PromptBuilder.render 获取 WORKFLOW.md 基础 prompt。
+
+        使用原始 issue 对象（存储在 state.issue_context['_issue']）
+        渲染 WORKFLOW.md 模板，保留项目上下文、编码规范等关键指令。
+        """
+        issue = state.issue_context.get("_issue") if state.issue_context else None
+        if issue is None:
+            # 降级：无 issue 对象时，用 issue_context 构建简单 prompt
+            if state.issue_context:
+                parts = ["## Issue Context"]
+                parts.append(f"Title: {state.issue_context.get('title', 'N/A')}")
+                desc = state.issue_context.get("description", "")
+                if desc:
+                    parts.append(f"Description: {desc}")
+                return "\n".join(parts)
+            return ""
+
+        try:
+            from ..prompt_builder import PromptBuilder
+
+            return PromptBuilder.render(issue=issue)
+        except Exception as exc:
+            logger.warning("PromptBuilder.render failed, using fallback: %s", exc)
+            # 降级：直接使用 issue 的 title + description
+            title = getattr(issue, "title", "") or state.issue_context.get("title", "")
+            desc = getattr(issue, "description", "") or state.issue_context.get("description", "")
+            return f"## Issue: {title}\n\n{desc}"
+
+    # ── 工具方法 ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_total_cost_usd() -> float:
+        """从核心 bootstrap 状态获取当前累计成本。"""
+        try:
+            from src.bootstrap.state import get_total_cost_usd
+
+            return get_total_cost_usd()
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _extract_score(text: str) -> float:
+        """从 LLM 输出中提取评分 (0.0-1.0)。"""
+        import re
+
+        match = re.search(r"(?:score|评分)[:\s]*([0-9]*\.?[0-9]+)", text, re.IGNORECASE)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                pass
+        return 0.0
