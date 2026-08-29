@@ -4592,6 +4592,8 @@ class Orchestrator:
                         await self._handle_review_retry_control(issue_id, extra)
                     elif cmd == "retry":
                         await self._handle_retry_control(issue_id, extra)
+                    elif cmd == "chat_followup":
+                        await self._handle_chat_followup_control(issue_id, extra)
                     else:
                         self._apply_control_command(cmd, issue_id, extra)
                 finally:
@@ -4851,6 +4853,55 @@ class Orchestrator:
             command=f"cli:reset:{reason[:64]}",
         ):
             return
+        await self._sync_tracker_issue_state(issue_id, "open")
+
+    async def _handle_chat_followup_control(self, issue_id: str, extra: str) -> None:
+        """Re-launch a completed issue with FOLLOWUP intent from chat.
+
+        Unlike ``_handle_retry_control`` this does NOT reset the PR or
+        branch — the agent reuses the existing branch and appends a
+        follow-up commit.  The follow-up prompt text is read from
+        ``.operator_hints.md`` by ``prompt_builder`` at launch time.
+        """
+        if not issue_id:
+            return
+        record = self._registry._records.get(issue_id)
+        is_known = bool(
+            record
+            or issue_id in self._state.running
+            or issue_id in self._state.pending_review
+            or issue_id in self._state.completed
+            or issue_id in self._state.claimed
+        )
+        if not is_known:
+            logger.debug("chat_followup control for unknown issue %s", issue_id)
+            return
+
+        # Clear daemon state so the issue is re-eligible for polling.
+        self._state.completed.discard(issue_id)
+        self._state.claimed.discard(issue_id)
+        self._state.pending_review.discard(issue_id)
+        failed = getattr(self._state, "failed", None)
+        if failed is not None:
+            failed.discard(issue_id)
+        retry_queue = getattr(self._state, "retry_queue", None)
+        if retry_queue is not None:
+            self._state.retry_queue = [
+                r for r in retry_queue if r.issue_id != issue_id
+            ]
+
+        if record:
+            record.status = IssueStatus.PENDING
+            record.intent = Intent.FOLLOWUP
+            record.intent_source = "chat"
+            record.last_command = f"chat:followup:{extra[:64]}"
+            record.touch()
+            self._registry._save()
+
+        logger.info(
+            "Issue %s queued for chat follow-up (intent=FOLLOWUP)",
+            issue_id,
+        )
         await self._sync_tracker_issue_state(issue_id, "open")
 
     async def _handle_review_retry_control(self, issue_id: str, feedback: str) -> None:

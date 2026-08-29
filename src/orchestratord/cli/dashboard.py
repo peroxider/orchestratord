@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 from ..event_tailer import EventTailerManager  # noqa: E402
 from ..chat_gateway import ChatGateway  # noqa: E402
 from ..paths import ORCHESTRATOR_DIR, ORCHESTRATORD_BASE
+from ..tracker import Intent  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1648,11 +1649,19 @@ async function sendMessage() {
   if (!text || !currentRunId) return;
   input.value = '';
   appendMessage('user', text);
-  const resp = await fetch('/api/runs/' + currentRunId + '/messages', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({text: text})
-  });
+  try {
+    const resp = await fetch('/api/runs/' + currentRunId + '/messages', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: text})
+    });
+    const result = await resp.json();
+    if (result.mode === 'followup_queued') {
+      appendMessage('agent', '[Follow-up queued — agent will restart shortly on the same branch]');
+    }
+  } catch(e) {
+    // Silently ignore network errors.
+  }
 }
 
 async function pauseRun() {
@@ -1689,6 +1698,92 @@ def _build_dashboard_html() -> str:
 # ---------------------------------------------------------------------------
 # HTTP server
 # ---------------------------------------------------------------------------
+
+
+def _followup_completed_run(workspace: Path, run_id: str, text: str) -> bool:
+    """Queue a follow-up for a completed session.
+
+    Writes the follow-up text to ``.operator_hints.md`` in the issue's
+    workspace, marks ``Intent.FOLLOWUP`` in the registry, and drops a
+    ``chat_followup`` control file so the daemon re-launches the issue
+    without resetting the existing PR / branch.
+
+    Returns ``True`` if the follow-up was queued successfully.
+    """
+    registry_path = workspace / ".orchestratord_issue_registry.json"
+    raw = _safe_read_json(registry_path) or {}
+
+    # Find the issue record by run_id.
+    issue_id = ""
+    issue_workspace_path = ""
+    for rid, record in raw.items():
+        if not isinstance(record, dict):
+            continue
+        if record.get("run_id") == run_id:
+            issue_id = rid
+            issue_workspace_path = record.get("workspace_path") or ""
+            break
+
+    if not issue_id:
+        logger.warning("_followup_completed_run: no issue found for run_id=%s", run_id)
+        return False
+
+    # Write the follow-up text to .operator_hints.md so prompt_builder
+    # prepends it to the agent's context on re-launch.
+    if issue_workspace_path:
+        try:
+            hints_file = Path(issue_workspace_path) / ".operator_hints.md"
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            header = f"--- Chat Follow-up (sent at {timestamp}) ---\n"
+            separator = "\n" + "-" * 50 + "\n"
+            with open(hints_file, "a", encoding="utf-8") as f:
+                f.write(header)
+                f.write(text + "\n")
+                f.write(separator)
+        except Exception:
+            logger.exception(
+                "Failed to write operator_hints for run_id=%s", run_id
+            )
+            return False
+
+    # Mark intent in the registry.
+    try:
+        from ..issue_registry import IssueRegistry
+
+        registry = IssueRegistry(registry_path)
+        registry.mark_intent(
+            issue_id,
+            Intent.FOLLOWUP,
+            source="chat",
+            command=f"chat:followup:{text[:64]}",
+        )
+    except Exception:
+        logger.exception(
+            "Failed to mark intent for issue_id=%s", issue_id
+        )
+        return False
+
+    # Write a control file so the daemon picks this up immediately
+    # instead of waiting for the next poll cycle.
+    try:
+        control_dir = workspace / ".orchestrator_control"
+        control_dir.mkdir(parents=True, exist_ok=True)
+        control_file = control_dir / f"chat_followup_{issue_id}.control"
+        control_file.write_text(
+            f"chat_followup\n{issue_id}\n{text}\n", encoding="utf-8"
+        )
+    except Exception:
+        logger.exception(
+            "Failed to write control file for issue_id=%s", issue_id
+        )
+        return False
+
+    logger.info(
+        "Chat follow-up queued for issue_id=%s run_id=%s",
+        issue_id,
+        run_id,
+    )
+    return True
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -1846,6 +1941,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "text is required"}, status=400)
                 return
             ok = gateway.send_message(run_id, text.strip())
+            if not ok:
+                # Session is not active (completed / failed / etc.).
+                # Fall back to registry-based follow-up: write the
+                # prompt to .operator_hints.md, mark Intent.FOLLOWUP,
+                # and notify the daemon via control file.
+                queued = _followup_completed_run(
+                    self.state.workspace, run_id, text.strip()
+                )
+                if not queued:
+                    self._send_json(
+                        {"error": "run not active and followup queue failed",
+                         "run_id": run_id},
+                        status=409,
+                    )
+                    return
+                self._send_json(
+                    {"accepted": True, "run_id": run_id, "mode": "followup_queued"},
+                    status=202,
+                )
+                return
         else:
             verb = suffix[1:]
             payload = body.get("message", "") if verb == "resume" else ""
