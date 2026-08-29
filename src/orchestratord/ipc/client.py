@@ -6,8 +6,9 @@ Self-contained UDS JSONL client for the IM gateway.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
-from typing import Callable
+from collections.abc import Awaitable, Callable
 
 from .protocol import FrameType, GatewayFrame, GatewayIpcError
 from .models import InboundMessage, OutboundMessage
@@ -45,7 +46,12 @@ class GatewayIpcClient:
         self._heartbeat_task: asyncio.Task | None = None
         self._read_task: asyncio.Task | None = None
 
-        self.on_deliver: Callable[[InboundMessage], None] | None = None
+        # Delivery handlers may be synchronous or asynchronous.  The latter
+        # is the normal orchestrator integration: it dispatches the message
+        # and writes the processed ACK before accepting the next delivery.
+        self.on_deliver: (
+            Callable[[InboundMessage], None | Awaitable[None]] | None
+        ) = None
 
     async def connect(self) -> None:
         self._reader, self._writer = await asyncio.open_unix_connection(self._sock)
@@ -73,10 +79,10 @@ class GatewayIpcClient:
         )
         self._writer.write(reg_frame.encode())
         await self._writer.drain()
-        self._running = True
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-        self._read_task = asyncio.create_task(self._read_loop())
-        # Read the first response line — should be ACK or NACK.
+        # Read the registration response before starting the reader task.
+        # Starting two coroutines on the same StreamReader races the ACK and
+        # can raise ``RuntimeError: readuntil() called while another coroutine
+        # is already waiting for incoming data``.
         try:
             line = await asyncio.wait_for(self._reader.readline(), timeout=10.0)
         except asyncio.TimeoutError:
@@ -84,10 +90,14 @@ class GatewayIpcClient:
         if not line:
             return None
         try:
-            return GatewayFrame.decode(line)
+            response = GatewayFrame.decode(line)
         except Exception:
             logger.warning("Failed to decode registration response", exc_info=True)
             return None
+        if response.type is FrameType.ACK:
+            self._running = True
+            self._read_task = asyncio.create_task(self._read_loop())
+        return response
 
     async def reconnect_until_registered(
         self,
@@ -176,6 +186,21 @@ class GatewayIpcClient:
         self._writer.write(frame.encode())
         await self._writer.drain()
 
+    async def heartbeat(self) -> GatewayFrame:
+        """Send a gateway heartbeat.
+
+        The reader loop owns the socket after registration, so it is not safe
+        for this method to wait for a second reader-owned ACK.  A successful
+        write means the local IPC link is alive; a broken connection raises
+        from ``drain`` and lets the daemon reconnect.  Gateway NACKs are still
+        consumed by the reader loop as diagnostic frames.
+        """
+        if self._writer is None or self._writer.is_closing():
+            raise GatewayIpcError("Not connected")
+        self._writer.write(GatewayFrame.heartbeat(session_id=self._instance_id).encode())
+        await self._writer.drain()
+        return GatewayFrame(type=FrameType.ACK, ack_layer="accepted")
+
     async def stop(self) -> None:
         self._running = False
         for task in (self._heartbeat_task, self._read_task):
@@ -198,14 +223,26 @@ class GatewayIpcClient:
         """Alias for stop() for callers using the close-style lifecycle."""
         await self.stop()
 
+    async def unregister(self, session_id: str | None = None) -> None:
+        """Best-effort unregister before closing the IPC connection."""
+        if self._writer is not None and not self._writer.is_closing():
+            frame = GatewayFrame(
+                type=FrameType.UNREGISTER,
+                session_id=session_id or self._instance_id,
+            )
+            self._writer.write(frame.encode())
+            try:
+                await self._writer.drain()
+            except (ConnectionError, OSError):
+                logger.debug("Gateway unregister skipped while disconnected")
+        await self.stop()
+
     async def _heartbeat_loop(self) -> None:
         while self._running:
             try:
                 await asyncio.sleep(self._heartbeat_interval)
                 if self._writer and not self._writer.is_closing():
-                    frame = GatewayFrame.heartbeat(session_id=self._instance_id)
-                    self._writer.write(frame.encode())
-                    await self._writer.drain()
+                    await self.heartbeat()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -237,6 +274,8 @@ class GatewayIpcClient:
                     metadata=frame.metadata or {},
                 )
                 try:
-                    self.on_deliver(msg)
+                    result = self.on_deliver(msg)
+                    if inspect.isawaitable(result):
+                        await result
                 except Exception:
                     logger.exception("on_deliver callback failed")

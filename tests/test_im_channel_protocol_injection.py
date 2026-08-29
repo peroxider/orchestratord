@@ -17,6 +17,9 @@ from orchestratord.im_gateway_client import (
     OrchestratorGatewayClient,
     OrchestratorHandlers,
 )
+from orchestratord.ipc.client import GatewayIpcClient
+from orchestratord.ipc.models import InboundMessage
+from orchestratord.ipc.protocol import GatewayFrame
 
 
 @dataclass
@@ -125,3 +128,39 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
         outcome="success",
         reason="followup_queued",
     )
+
+
+@pytest.mark.asyncio
+async def test_ipc_client_awaits_async_delivery_handler() -> None:
+    """The normalized IPC delivery reaches an async orchestrator callback."""
+    client = GatewayIpcClient("unused.sock", "test-instance")
+    delivered: list[InboundMessage] = []
+
+    async def on_deliver(message: InboundMessage) -> None:
+        delivered.append(message)
+
+    class Reader:
+        def __init__(self) -> None:
+            self._lines = iter((
+                GatewayFrame.deliver(
+                    delivery_id="DEL-42",
+                    session_id="test-instance",
+                    origin="im:direct:test:room",
+                    text="continue",
+                    semantic="followUp",
+                ).encode(),
+                b"",
+            ))
+
+        async def readline(self) -> bytes:
+            return next(self._lines)
+
+    client._reader = Reader()  # type: ignore[assignment]
+    client._running = True
+    client.on_deliver = on_deliver
+
+    await client._read_loop()
+
+    assert [(message.message_id, message.text, message.semantic) for message in delivered] == [
+        ("DEL-42", "continue", "followUp"),
+    ]

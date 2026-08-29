@@ -174,21 +174,8 @@ class AgentBackend(Protocol):
         """
         ...
 
-    def preflight(self, spec: SessionSpec) -> None:
-        """Validate local dependencies and configuration before a session starts.
-
-        Raise ``RuntimeError`` with actionable guidance when the backend cannot
-        run in the supplied environment. The check must not contact an LLM
-        provider or create a long-lived session.
-        """
-        ...
-
     def create_session(self, spec: SessionSpec) -> AgentSession:
         """Create a new session (or resume one if spec.resume_session_id is set)."""
-        ...
-
-    def get_task_registry(self) -> Any | None:
-        """Return an optional backend-owned runtime task registry."""
         ...
 
     def get_task_registry(self) -> Any | None:

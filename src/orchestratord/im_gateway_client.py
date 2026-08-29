@@ -360,19 +360,31 @@ class OrchestratorGatewayClient:
             # Route server-pushed DELIVER frames through dispatch.
             ipc_client.on_deliver = self._on_pushed_deliver
 
-    async def _on_pushed_deliver(self, frame) -> None:
+    async def _on_pushed_deliver(self, message: InboundMessage) -> None:
         """Server-pushed DELIVER (gateway→orchestrator): classify + dispatch."""
+        # ``GatewayIpcClient`` always supplies ``InboundMessage``.  Accept a
+        # frame-shaped object as well for compatibility with integrations that
+        # previously invoked this private callback directly.
+        if not isinstance(message, InboundMessage):
+            message = InboundMessage(
+                origin=getattr(message, "origin", "") or self._origin,
+                text=getattr(message, "text", "") or "",
+                message_id=getattr(message, "delivery_id", "") or "",
+                channel_type="gateway",
+                semantic=getattr(message, "semantic", None),
+                context_token=getattr(message, "context_token", None),
+                semantic_tags=list(getattr(message, "semantic_tags", []) or []),
+                metadata=dict(getattr(message, "metadata", {}) or {}),
+            )
         semantic = None
-        if frame.semantic:
+        if message.semantic:
             with contextlib.suppress(ValueError):
-                semantic = MessageSemantics(frame.semantic)
-        message = InboundMessage(
-            origin=frame.origin or self._origin,
-            text=frame.text or "",
-            message_id=frame.delivery_id or "",
-            channel_type="",
-            semantic=semantic.value if isinstance(semantic, MessageSemantics) else semantic,
-        )
+                semantic = MessageSemantics(message.semantic)
+        # Keep the normalized message supplied by GatewayIpcClient.  Its
+        # metadata/context token are part of the routing contract and must not
+        # be discarded while crossing the IPC boundary.
+        if not message.origin:
+            message.origin = self._origin
         if semantic is None:
             message.semantic = self._classify(message)
             semantic = message.semantic
@@ -380,18 +392,18 @@ class OrchestratorGatewayClient:
             status = self.dispatch(message, semantic)
             await self._flush_pending_outbound(force=True)
             await self._complete_processing(
-                frame.delivery_id or "",
+                message.message_id,
                 "failure" if status in {"not_dispatched", "command_unroutable"} else "success",
                 status,
             )
             logger.info(
                 "orchestrator IM push dispatched: delivery_id=%s status=%s",
-                (frame.delivery_id or "")[:16],
+                message.message_id[:16],
                 status,
             )
         except Exception:  # noqa: BLE001
             await self._complete_processing(
-                frame.delivery_id or "",
+                message.message_id,
                 "failure",
                 "orchestrator dispatch failed",
             )
