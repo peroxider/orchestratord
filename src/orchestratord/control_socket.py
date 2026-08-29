@@ -1,4 +1,4 @@
-"""Unix domain socket for live control of an agent run.
+"""Local control transport for live control of an agent run.
 
 Path: ``{workspace}/.run_control/{run_id}.sock``. The socket accepts
 multiple concurrent clients. Incoming lines are newline-delimited JSON
@@ -11,8 +11,8 @@ multiple concurrent clients. Incoming lines are newline-delimited JSON
     now (Phase 2 wires ``inject`` to ``operator_hints.md``; ``detach`` is
     a Phase 3 hook).
   * No auth: workspace filesystem permissions are the only gate.
-  * No Windows support: Unix-domain-socket only; a TCP localhost
-    fallback is planned for a later phase.
+  * Unix uses a Unix-domain socket. Windows uses a randomly assigned
+    loopback TCP port; neither transport is reachable from the network.
   * Long content (transcript, large tool outputs) does NOT flow over
     this socket — that lives in ``transcript.jsonl``. The socket carries
     small control + small event frames only (typical < 1 KB).
@@ -31,7 +31,7 @@ import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import AsyncIterator, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +69,7 @@ class EventFrame:
 
 
 class ControlSocket:
-    """Bidirectional control via Unix domain socket.
+    """Bidirectional control via a local Unix socket or loopback TCP.
 
     Lifecycle: ``start()`` → ``poll_commands()`` / ``send_event()`` →
     ``stop()``. ``start()`` is idempotent: a stale socket file from a
@@ -86,8 +86,12 @@ class ControlSocket:
     try/except as well.
     """
 
-    def __init__(self, sock_path: Path) -> None:
-        self._path = Path(sock_path)
+    def __init__(self, sock_path: Path | None = None, *, tcp: bool = False) -> None:
+        if not tcp and sock_path is None:
+            raise ValueError("sock_path is required for Unix-domain transport")
+        self._path = Path(sock_path) if sock_path is not None else None
+        self._tcp = tcp
+        self._endpoint: str | None = None
         self._server: asyncio.AbstractServer | None = None
         self._clients: set[asyncio.StreamWriter] = set()
         # Per-connection read-loop tasks. Tracked so ``stop()`` can
@@ -97,6 +101,13 @@ class ControlSocket:
         self._command_queue: asyncio.Queue[ControlCommand] = asyncio.Queue()
         self._stopped = False
         self._stale_unlinked = False
+
+    @property
+    def endpoint(self) -> str:
+        """Stable discovery value consumed by local control clients."""
+        if self._endpoint is None:
+            raise RuntimeError("control socket has not been started")
+        return self._endpoint
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -110,6 +121,15 @@ class ControlSocket:
         the socket but non-fatal for the agent — wrap in try/except
         and set ``session.control_socket = None`` on failure.
         """
+        if self._tcp:
+            self._server = await asyncio.start_server(
+                self._on_client_connected, host="127.0.0.1", port=0
+            )
+            port = self._server.sockets[0].getsockname()[1]
+            self._endpoint = f"tcp://127.0.0.1:{port}"
+            return
+
+        assert self._path is not None
         self._path.parent.mkdir(parents=True, exist_ok=True)
         if self._path.exists() and not self._stale_unlinked:
             try:
@@ -125,6 +145,7 @@ class ControlSocket:
             self._on_client_connected,
             path=str(self._path),
         )
+        self._endpoint = str(self._path)
 
     async def stop(self) -> None:
         """Stop listening and remove the socket file. Idempotent."""
@@ -158,15 +179,16 @@ class ControlSocket:
             except (asyncio.CancelledError, Exception):
                 pass
         self._read_tasks.clear()
-        try:
-            if self._path.exists():
-                self._path.unlink()
-        except OSError as exc:
-            logger.warning(
-                "control_socket: could not unlink %s on stop: %s",
-                self._path,
-                exc,
-            )
+        if self._path is not None:
+            try:
+                if self._path.exists():
+                    self._path.unlink()
+            except OSError as exc:
+                logger.warning(
+                    "control_socket: could not unlink %s on stop: %s",
+                    self._path,
+                    exc,
+                )
 
     # ------------------------------------------------------------------
     # Inbound: control commands
@@ -266,7 +288,7 @@ class ControlSocket:
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     logger.warning(
                         "control_socket: malformed command on %s: %s",
-                        self._path,
+                        self._path or self._endpoint,
                         exc,
                     )
                     continue

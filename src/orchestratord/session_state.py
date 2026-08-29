@@ -48,14 +48,14 @@ class AgentSession:
     clarification_answer: str | None = None
     clarification_source: str | None = None
     coordinator_mode: bool | None = None
-    # Unix domain socket for live operator control. None if
+    # Local Unix-domain socket or loopback TCP listener for live operator control. None if
     # the socket failed to start (or was disabled by configuration). When
     # set, the runner broadcasts every dispatched event and polls for
     # control commands at turn boundaries. Defensive: all socket ops
     # are wrapped in try/except so a broken socket never kills the
     # agent run.
     control_socket: Any | None = None
-    # Public path of the listening socket. Stored on the session so the
+    # Public Unix path or ``tcp://127.0.0.1:PORT`` endpoint. Stored on the session so the
     # CLI control commands (pause/resume/stop/inject/takeover) can
     # discover it via the registry without scanning the workspace tree.
     control_socket_path: str | None = None

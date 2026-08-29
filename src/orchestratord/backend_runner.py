@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import time
@@ -477,13 +478,23 @@ class BackendRunner:
         # The control socket is an optional observability/control surface.
         # Its failure must never prevent the backend from running.
         owns_control_socket = False
-        if session.control_socket is None and hasattr(asyncio, "start_unix_server"):
+        if session.control_socket is None:
             try:
-                sock_path = session.workspace.path / ".run_control" / f"{session.run_id}.sock"
-                control_socket = ControlSocket(sock_path)
+                control_dir = session.workspace.path / ".run_control"
+                is_windows = os.name == "nt"
+                sock_path = None if is_windows else control_dir / f"{session.run_id}.sock"
+                control_socket = ControlSocket(sock_path, tcp=is_windows)
                 await control_socket.start()
                 session.control_socket = control_socket
-                session.control_socket_path = str(sock_path)
+                session.control_socket_path = control_socket.endpoint
+                # TCP endpoints have ephemeral ports, so a separately
+                # launched dashboard needs a local discovery record.
+                if is_windows:
+                    control_dir.mkdir(parents=True, exist_ok=True)
+                    endpoint_file = control_dir / f"{session.run_id}.endpoint.json"
+                    endpoint_file.write_text(
+                        json.dumps({"endpoint": control_socket.endpoint}), encoding="utf-8"
+                    )
                 owns_control_socket = True
             except Exception:
                 logger.debug("control socket unavailable for run_id=%s", session.run_id, exc_info=True)
@@ -553,6 +564,11 @@ class BackendRunner:
                 except Exception:
                     logger.debug("control_socket.stop() failed", exc_info=True)
                 session.control_socket = None
+                endpoint_file = session.workspace.path / ".run_control" / f"{session.run_id}.endpoint.json"
+                try:
+                    endpoint_file.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("control endpoint cleanup failed", exc_info=True)
 
     @staticmethod
     async def _probe_resume_or_log(

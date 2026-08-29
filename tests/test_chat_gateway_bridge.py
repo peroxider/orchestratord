@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import time
@@ -9,6 +10,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 from orchestratord.chat_gateway import ChatGateway, _truncate_tool_result
+from orchestratord.control_socket import ControlSocket
 from orchestratord.runner_utils import _broadcast_to_socket
 from orchestratord.spi.events import EventEnvelope, EventKind
 
@@ -133,3 +135,33 @@ class TestChatGatewayLifecycle(IsolatedAsyncioTestCase):
                 self.assertEqual(history, [])
         finally:
             gw.stop()
+
+    async def test_tcp_endpoint_streams_events_and_controls(self):
+        """The dashboard bridge works with the Windows loopback transport."""
+        control = ControlSocket(tcp=True)
+        await control.start()
+        gateway = ChatGateway()
+        try:
+            gateway.sync_active_run_ids({"run-tcp": control.endpoint})
+            for _ in range(30):
+                if control._clients:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                self.fail("gateway did not connect to the TCP control endpoint")
+            queue = gateway.subscribe("run-tcp")
+            self.assertIsNotNone(queue)
+
+            await control.send_event({"type": "TextDelta", "data": {"content": "hello"}})
+            assert queue is not None
+            frame = await asyncio.to_thread(queue.get, True, 1)
+            self.assertEqual(frame["type"], "TextDelta")
+
+            self.assertTrue(gateway.send_message("run-tcp", "continue"))
+            command = await asyncio.wait_for(
+                control._command_queue.get(), timeout=1
+            )
+            self.assertEqual((command.cmd, command.payload), ("followup", "continue"))
+        finally:
+            gateway.stop()
+            await control.stop()

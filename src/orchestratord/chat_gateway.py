@@ -10,11 +10,12 @@ back to the socket.
 Design constraints:
 - Pure stdlib (asyncio, threading, queue, json, pathlib).
 - Internal asyncio event loop in a dedicated thread manages all
-  UDS connections; HTTP threads exchange frames via thread-safe
+  local control connections; HTTP threads exchange frames via thread-safe
   queues.  This mirrors ``event_tailer.py``'s thread model.
 - ToolResult payloads > 4 KB are truncated with ``truncated: true``.
   The full content is available via a separate GET endpoint.
-- UDS only — no Windows support (inherits control_socket constraint).
+- Supports Unix-domain sockets and loopback TCP endpoints. TCP is used
+  on Windows and always binds only to 127.0.0.1.
 - Gateway crash must never affect agent runs (all socket ops are
   wrapped in try/except).
 """
@@ -22,12 +23,13 @@ Design constraints:
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import queue
 import threading
-from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -51,15 +53,15 @@ class _RunConnection:
     def __init__(
         self,
         run_id: str,
-        sock_path: Path,
+        endpoint: str,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.run_id = run_id
-        self._sock_path = sock_path
+        self._endpoint = endpoint
         self._loop = loop
         self._subscribers: list[queue.Queue[dict[str, Any]]] = []
         self._writer: asyncio.StreamWriter | None = None
-        self._reader_task: asyncio.Task[None] | None = None
+        self._reader_task: concurrent.futures.Future[None] | None = None
 
     # -- subscriber management (thread-safe) -------------------------------
 
@@ -84,6 +86,10 @@ class _RunConnection:
     def stop(self) -> None:
         if self._reader_task is not None:
             self._reader_task.cancel()
+            try:
+                self._reader_task.result(timeout=2.0)
+            except (concurrent.futures.CancelledError, TimeoutError):
+                pass
             self._reader_task = None
         self._broadcast_nowait(
             {"type": "RunEnded", "data": {"run_id": self.run_id}}
@@ -93,14 +99,18 @@ class _RunConnection:
 
     async def _read_loop(self) -> None:
         try:
-            reader, writer = await asyncio.open_unix_connection(
-                str(self._sock_path)
-            )
+            if self._endpoint.startswith("tcp://"):
+                parsed = urlparse(self._endpoint)
+                reader, writer = await asyncio.open_connection(
+                    parsed.hostname, parsed.port
+                )
+            else:
+                reader, writer = await asyncio.open_unix_connection(self._endpoint)
             self._writer = writer
         except (OSError, asyncio.TimeoutError) as exc:
             logger.debug(
                 "chat_gateway: cannot connect to %s: %s",
-                self._sock_path,
+                self._endpoint,
                 exc,
             )
             self._broadcast_nowait(
@@ -244,6 +254,15 @@ class ChatGateway:
                 conn.stop()
             self._connections.clear()
         if self._loop is not None:
+            # ``Future.cancel()`` acknowledges cancellation before the loop
+            # has unwound the underlying coroutine. Give it one loop turn so
+            # closing a dashboard does not leave a pending reader task.
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    asyncio.sleep(0), self._loop
+                ).result(timeout=2.0)
+            except (concurrent.futures.CancelledError, TimeoutError, RuntimeError):
+                pass
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._loop_thread is not None:
             self._loop_thread.join(timeout=2.0)
@@ -252,18 +271,18 @@ class ChatGateway:
 
     def sync_active_run_ids(
         self,
-        run_id_to_sock: dict[str, Path],
+        run_id_to_endpoint: dict[str, str],
     ) -> None:
         with self._lock:
             for run_id in list(self._connections):
-                if run_id not in run_id_to_sock:
+                if run_id not in run_id_to_endpoint:
                     self._connections[run_id].stop()
                     del self._connections[run_id]
-            for run_id, sock_path in run_id_to_sock.items():
-                if run_id not in self._connections and sock_path.exists():
+            for run_id, endpoint in run_id_to_endpoint.items():
+                if run_id not in self._connections:
                     conn = _RunConnection(
                         run_id=run_id,
-                        sock_path=sock_path,
+                        endpoint=endpoint,
                         loop=self._loop,  # type: ignore[arg-type]
                     )
                     self._connections[run_id] = conn

@@ -376,11 +376,21 @@ class DashboardState:
                 self.tailer_manager.sync_active_run_ids(run_id_map)
 
                 # 2c. Sync chat gateway connections for active runs.
-                run_id_to_sock: dict[str, Path] = {}
+                run_id_to_endpoint: dict[str, str] = {}
                 for rid, (_, ws_path) in run_id_map.items():
                     sock_path = Path(ws_path) / ".run_control" / f"{rid}.sock"
-                    run_id_to_sock[rid] = sock_path
-                self.chat_gateway.sync_active_run_ids(run_id_to_sock)
+                    endpoint_file = sock_path.with_suffix(".endpoint.json")
+                    if endpoint_file.exists():
+                        try:
+                            endpoint = json.loads(endpoint_file.read_text(encoding="utf-8"))["endpoint"]
+                            if isinstance(endpoint, str) and endpoint.startswith("tcp://127.0.0.1:"):
+                                run_id_to_endpoint[rid] = endpoint
+                                continue
+                        except (OSError, ValueError, KeyError, TypeError):
+                            pass
+                    if sock_path.exists():
+                        run_id_to_endpoint[rid] = str(sock_path)
+                self.chat_gateway.sync_active_run_ids(run_id_to_endpoint)
 
                 # 2b. One-shot historical load for completed issues with run_id
                 # that haven't been loaded yet AND were never actively tailed.
