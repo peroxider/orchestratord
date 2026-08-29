@@ -190,6 +190,7 @@ class StageRunner:
                 session = await self._run_synthetic_issue(
                     prompt=self._build_decision_prompt(stage_node, state),
                     stage_node=stage_node,
+                    parent_issue=state.issue_context.get("_issue"),
                 )
                 output_text = session.output_text if session else ""
                 outcome = self._parse_decision_outcome(output_text, stage_node)
@@ -228,7 +229,11 @@ class StageRunner:
         cost_before = self._get_total_cost_usd()
 
         prompt = self._build_stage_prompt(stage_node, state)
-        session = await self._run_synthetic_issue(prompt=prompt, stage_node=stage_node)
+        session = await self._run_synthetic_issue(
+            prompt=prompt,
+            stage_node=stage_node,
+            parent_issue=state.issue_context.get("_issue"),
+        )
 
         if session is None:
             return StageRunResult(
@@ -256,6 +261,7 @@ class StageRunner:
         self,
         prompt: str,
         stage_node: StageNode,
+        parent_issue: Any = None,
     ) -> "AgentSession | None":
         """Build synthetic work unit and execute via AgentRunner or AgentTaskRunner."""
         from ..issue import Issue
@@ -276,12 +282,16 @@ class StageRunner:
                 context={
                     "stage_id": stage_node.id,
                     "phase": stage_node.phase,
+                    "parent_issue": parent_issue,
                 },
                 workspace_path=str(workspace_path),
                 labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
                 prompt_override=prompt,
             )
-            result = await self._task_runner.run_task(task)
+            result = await self._task_runner.run_task(
+                task,
+                progress_callback=self._forward_progress_event,
+            )
 
             # Build a synthetic session for backward compat.
             workspace = Workspace(
@@ -349,6 +359,30 @@ class StageRunner:
             session.output_text = str(exc)
 
         return session
+
+    async def _forward_progress_event(self, event: Any) -> None:
+        """Forward generic task progress to the legacy workflow sink.
+
+        The workflow engine still owns its dashboard sink.  Keeping this
+        translation here prevents the capability runner from importing any
+        workflow or dashboard code.
+        """
+        sink = self._progress_reporter
+        if sink is None:
+            return
+        from ..agent_task import ProgressEventKind
+
+        try:
+            if event.kind is ProgressEventKind.TEXT and hasattr(sink, "on_text"):
+                sink.on_text(event.text)
+            elif event.kind is ProgressEventKind.TEXT_DELTA and hasattr(sink, "on_text_delta"):
+                sink.on_text_delta(event.text)
+            elif event.kind is ProgressEventKind.TOOL_CALL and hasattr(sink, "on_tool_call"):
+                sink.on_tool_call(event.tool_name, event.call_id)
+            elif event.kind is ProgressEventKind.TOOL_RESULT and hasattr(sink, "on_tool_result"):
+                sink.on_tool_result(event.call_id)
+        except Exception:
+            logger.debug("workflow progress sink failed", exc_info=True)
 
     # ── GATE 处理 ─────────────────────────────────────────────────
 

@@ -12,6 +12,7 @@ Phase B design:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -26,7 +27,8 @@ from orchestratord.events.agent_events import SessionComplete, TurnComplete
 
 from .session_state import AgentSession
 from .runner_utils import _broadcast_to_socket, _drain_control_commands
-from .agent_task import AgentTask, AgentTaskResult
+from .control_socket import ControlSocket
+from .agent_task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
 from .approval_policy import (
     ApprovalPolicy,
     ToolCallEvent,
@@ -42,6 +44,70 @@ logger = logging.getLogger(__name__)
 
 # Reuse the same noop-detection threshold as AgentRunner.
 _NOOP_DETECTION_MAX_TURNS = 5
+
+
+class _TaskProgressBridge:
+    """Adapt legacy synchronous progress-sink calls to ``ProgressEvent``.
+
+    The SPI event loop predates ``AgentTaskRunner`` and deliberately calls
+    sink methods synchronously.  This adapter keeps that loop unchanged while
+    delivering the new callback contract in event order.  Callback failures
+    are isolated from agent execution, just like the legacy progress sinks.
+    """
+
+    def __init__(self, task_id: str, callback: Any | None) -> None:
+        self._task_id = task_id
+        self._callback = callback
+        self._pending: list[asyncio.Task[Any]] = []
+
+    def _emit(self, kind: ProgressEventKind, **kwargs: Any) -> None:
+        if self._callback is None:
+            return
+        event = ProgressEvent(kind=kind, task_id=self._task_id, **kwargs)
+        try:
+            value = self._callback(event)
+            if inspect.isawaitable(value):
+                self._pending.append(asyncio.create_task(value))
+        except Exception:
+            logger.debug("progress_callback failed", exc_info=True)
+
+    def on_text(self, text: str) -> None:
+        self._emit(ProgressEventKind.TEXT, text=text)
+
+    def on_text_delta(self, text: str) -> None:
+        self._emit(ProgressEventKind.TEXT_DELTA, text=text)
+
+    def on_tool_call(self, tool_name: str, call_id: str) -> None:
+        self._emit(ProgressEventKind.TOOL_CALL, tool_name=tool_name, call_id=call_id)
+
+    def on_tool_result(self, call_id: str) -> None:
+        self._emit(ProgressEventKind.TOOL_RESULT, call_id=call_id)
+
+    def on_turn_complete(self, event: TurnComplete, session: AgentSession) -> None:
+        self._emit(
+            ProgressEventKind.TURN_COMPLETE,
+            turn_number=getattr(event, "turn", session.turn_count),
+            tool_count=session.tool_count,
+        )
+
+    def on_session_complete(self, event: SessionComplete, session: AgentSession) -> None:
+        self._emit(
+            ProgressEventKind.SESSION_COMPLETE,
+            turn_number=session.turn_count,
+            tool_count=session.tool_count,
+            message=getattr(event, "reason", ""),
+        )
+
+    def on_error(self, message: str) -> None:
+        self._emit(ProgressEventKind.ERROR, message=message)
+
+    async def flush(self) -> None:
+        if not self._pending:
+            return
+        outcomes = await asyncio.gather(*self._pending, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                logger.debug("progress_callback failed", exc_info=outcome)
 
 
 class BackendRunner:
@@ -99,7 +165,9 @@ class BackendRunner:
         from .issue import Issue
         from .workspace import Workspace
 
-        # Build workspace + issue from the task.
+        # Build workspace + issue from the task.  ``Issue`` is retained as
+        # private compatibility state for the existing SPI session runner;
+        # callers of this API never need to construct or consume one.
         workspace = Workspace(
             path=Path(task.workspace_path) if task.workspace_path else Path("."),
             issue_identifier=task.context.get("issue_identifier", task.id),
@@ -139,12 +207,16 @@ class BackendRunner:
         workflow.agent = copy.copy(self.agent_config)
         if task.max_turns is not None:
             workflow.agent.max_turns = task.max_turns
+        if task.timeout_seconds is not None:
+            workflow.agent.run_timeout_ms = int(task.timeout_seconds * 1000)
+
+        bridge = _TaskProgressBridge(task.id, progress_callback)
 
         # Run the session using the existing path.
         await self.run(
             session,
             workflow,
-            progress_reporter=progress_callback,
+            progress_reporter=bridge,
             diagnostics_callback=None,
         )
 
@@ -162,8 +234,15 @@ class BackendRunner:
             verification_output=session.verification_output,
             report_path=session.report_path,
             run_id=session.run_id,
-            cost_usd=0.0,
+            cost_usd=float(getattr(session, "cost_usd", 0.0) or 0.0),
+            error=(
+                session.session_end_summary or session.session_end_reason
+                if session.status == "failed"
+                else None
+            ),
         )
+
+        await bridge.flush()
 
         if diagnostics_callback is not None:
             try:
@@ -296,7 +375,17 @@ class BackendRunner:
         Returns (system_prompt_append, user_prompt) split by the
         USER_MESSAGE_MARKER in the workflow template.
         """
-        return PromptBuilder.render_parts(issue)
+        if session.prompt_override:
+            return "", session.prompt_override
+
+        task = session.task or issue
+        return PromptBuilder.render_parts(
+            task,
+            attempt=session.attempt,
+            session=session,
+            previous_run_ids=session.previous_run_ids,
+            conflict_files=session.conflict_files,
+        )
 
     @staticmethod
     def _append_skill_index(system_prompt_append: str) -> str:
@@ -385,6 +474,20 @@ class BackendRunner:
             ]},
         )
 
+        # The control socket is an optional observability/control surface.
+        # Its failure must never prevent the backend from running.
+        owns_control_socket = False
+        if session.control_socket is None and hasattr(asyncio, "start_unix_server"):
+            try:
+                sock_path = session.workspace.path / ".run_control" / f"{session.run_id}.sock"
+                control_socket = ControlSocket(sock_path)
+                await control_socket.start()
+                session.control_socket = control_socket
+                session.control_socket_path = str(sock_path)
+                owns_control_socket = True
+            except Exception:
+                logger.debug("control socket unavailable for run_id=%s", session.run_id, exc_info=True)
+
         # Create the SPI session.
         spi_session = self.backend.create_session(spec)
         session_context = {
@@ -444,6 +547,12 @@ class BackendRunner:
                 await spi_session.close()
             except Exception:
                 logger.debug("spi_session.close() failed", exc_info=True)
+            if owns_control_socket and session.control_socket is not None:
+                try:
+                    await session.control_socket.stop()
+                except Exception:
+                    logger.debug("control_socket.stop() failed", exc_info=True)
+                session.control_socket = None
 
     @staticmethod
     async def _probe_resume_or_log(
@@ -517,6 +626,11 @@ class BackendRunner:
         )
 
         async for event in spi_session.events():
+            # Commands are drained before handling the event so an operator
+            # request arriving at a turn boundary is available immediately.
+            if _drain_control_commands(session):
+                session.status = "failed"
+                break
             kind = event.kind
             payload = event.payload
 
@@ -574,6 +688,21 @@ class BackendRunner:
                         TurnComplete(turn=session.turn_count), session
                     )
 
+                # SPI sessions are bidirectional.  At a turn boundary,
+                # deliver all queued follow-ups as a single explicit
+                # operator message.  This works for every backend without
+                # replacing the original task prompt.
+                pending_followups = getattr(session, "_pending_followups", None) or []
+                if pending_followups:
+                    followups = "\n".join(f"- {message}" for message in pending_followups)
+                    followup_prompt = f"[Operator follow-up]\n{followups}"
+                    try:
+                        await spi_session.send(followup_prompt)
+                    except Exception:
+                        logger.exception("followup delivery failed run_id=%s", session.run_id)
+                    else:
+                        pending_followups.clear()
+
                 # Check if issue is still active via tracker.
                 if tracker is not None and not await self._should_continue(
                     session, tracker
@@ -589,6 +718,11 @@ class BackendRunner:
                     progress_reporter.on_session_complete(
                         SessionComplete(reason=reason), session
                     )
+                # ``break`` below would bypass the common broadcast tail.
+                # Emit the terminal lifecycle frame explicitly so connected
+                # chat clients can settle the final assistant bubble before
+                # the socket closes and they receive RunEnded.
+                await _broadcast_to_socket(session, event)
                 break
 
             elif kind == EventKind.ERROR:

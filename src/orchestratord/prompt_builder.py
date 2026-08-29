@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 from jinja2 import Environment, StrictUndefined, TemplateError
 
 from .agent_task import AgentTask
-from .agent_task import AgentTask
 from .premise_check import build_premise_block, check_issue_premise
 from .rules_learner import RuleEngine
 from .tracker import PullRequestFeedback, PullRequestRef
@@ -31,16 +30,19 @@ _jinja_env = Environment(undefined=StrictUndefined)
 
 _DEFAULT_PROMPT = """You are an autonomous software engineering agent.
 
-Issue: {{ issue.identifier }} - {{ issue.title }}
-{% if issue.description %}
+Task: {{ task.title }}
+{% if task.kind == "issue" and task.context.issue_identifier %}
+Issue: {{ task.context.issue_identifier }}
+{% endif %}
+{% if task.description %}
 Description:
-{{ issue.description }}
+{{ task.description }}
 {% endif %}
-{% if issue.priority %}
-Priority: {{ issue.priority }}
+{% if task.priority %}
+Priority: {{ task.priority }}
 {% endif %}
-{% if issue.state %}
-State: {{ issue.state }}
+{% if task.context.issue_state %}
+State: {{ task.context.issue_state }}
 {% endif %}
 
 Please analyze the issue, implement the necessary changes, and ensure all tests pass.
@@ -171,7 +173,21 @@ class PromptBuilder:
         if isinstance(task, AgentTask):
             task_dict = task.to_template_dict()
         elif hasattr(task, "to_dict"):
-            task_dict = task.to_dict()
+            # Keep the legacy ``issue`` namespace intact, but expose a
+            # task-shaped value as well.  This matters for templates which
+            # have already moved to ``task.title`` while callers still pass
+            # an Issue to the compatibility API.
+            issue_dict = task.to_dict()
+            task_dict = {
+                "id": issue_dict.get("id", ""),
+                "kind": "issue",
+                "title": issue_dict.get("title", ""),
+                "description": issue_dict.get("description", ""),
+                "labels": issue_dict.get("labels", []),
+                "priority": issue_dict.get("priority"),
+                "attempt": attempt,
+                "context": issue_dict,
+            }
         else:
             task_dict = dict(task)
 

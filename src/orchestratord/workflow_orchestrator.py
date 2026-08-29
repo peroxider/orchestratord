@@ -29,6 +29,7 @@ from .state_journal import StateJournalWriter
 if TYPE_CHECKING:
     from .backend_runner import BackendRunner as AgentRunner
     from .agent_task import AgentTask
+    from .agent_task_runner import AgentTaskRunner
     from .issue import Issue
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class WorkflowOrchestrator:
         clarification_resolver: Any = None,
         llm_client: Any = None,
         diagnostics_callback: Any = None,
+        task_runner: "AgentTaskRunner | None" = None,
     ) -> None:
         self._workflow_config = workflow_config
         self._yaml_path = Path(workflow_yaml_path)
@@ -83,6 +85,7 @@ class WorkflowOrchestrator:
         bundle_dir = self._yaml_path.parent.resolve()
         self._stage_runner = StageRunner(
             agent_runner=agent_runner,
+            task_runner=task_runner or agent_runner,
             workflow_config=workflow_config,
             agent_config=workflow_config.agent,
             sandbox_config=workflow_config.sandbox,

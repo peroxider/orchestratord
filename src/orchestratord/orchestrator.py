@@ -26,7 +26,6 @@ from .git_utils import (
 )
 from .session_state import AgentSession, RetryItem
 from .runner_utils import _apply_pause_session, _apply_resume_session
-from .backend_runner import BackendRunner
 from .config.schema import WorkflowConfig
 from .debug_log import append_debug_event
 from .events import EventLevel
@@ -3169,7 +3168,45 @@ class Orchestrator:
                 ) from exc
         return self.stage_runners.get(session.run_kind, self.agent_runner)
 
-    async def run_task(self, task: AgentTask) -> AgentTaskResult:
+    def _resolve_runner(self, task: AgentTask) -> AgentTaskRunner:
+        """Resolve the capability runner for a generic task.
+
+        ``stage_runners`` remains a compatibility registry for legacy
+        issue-runner overrides.  A registered entry is used only when it
+        implements the generic protocol; otherwise generic callers always
+        get the configured backend runner.
+        """
+        candidate = self.stage_runners.get(task.kind, self.agent_runner)
+        if callable(getattr(candidate, "run_task", None)):
+            return candidate
+        return self.agent_runner
+
+    async def _run_agent_task(
+        self,
+        task: AgentTask,
+        *,
+        progress_callback: Any | None = None,
+        diagnostics_callback: Any | None = None,
+    ) -> AgentTaskResult:
+        """Run a generic task through the capability layer only.
+
+        No tracker, Git, PR, or dashboard dependency crosses this boundary.
+        Business pipelines are responsible for consuming the returned result.
+        """
+        runner = self._resolve_runner(task)
+        return await runner.run_task(
+            task,
+            progress_callback=progress_callback,
+            diagnostics_callback=diagnostics_callback,
+        )
+
+    async def run_task(
+        self,
+        task: AgentTask,
+        *,
+        progress_callback: Any | None = None,
+        diagnostics_callback: Any | None = None,
+    ) -> AgentTaskResult:
         """Execute a backend-neutral work unit through the configured runner.
 
         This is the public Layer-2 entry point for callers that do not
@@ -3177,11 +3214,11 @@ class Orchestrator:
         tracker and Git lifecycle, while direct task callers receive the
         structured Layer-1 result without inheriting Issue-specific hooks.
         """
-        runner = self.stage_runners.get(task.kind, self.agent_runner)
-        run_task = getattr(runner, "run_task", None)
-        if not callable(run_task):
-            raise TypeError(f"runner for task kind {task.kind!r} does not implement run_task()")
-        return await run_task(task)
+        return await self._run_agent_task(
+            task,
+            progress_callback=progress_callback,
+            diagnostics_callback=diagnostics_callback,
+        )
 
     async def _run_issue(self, session: AgentSession) -> None:
         """Run agent for one issue with concurrency control."""
@@ -3192,6 +3229,23 @@ class Orchestrator:
                 await self.workspace.run_before_run_hook(
                     session.workspace,
                     session.issue,
+                )
+                # The Issue-to-PR pipeline owns the mapping from tracker
+                # data to generic work.  Legacy runners still receive the
+                # session for lifecycle compatibility, but prompt building
+                # and all new capability code consume ``session.task``.
+                session.task = issue_to_agent_task(
+                    session.issue,
+                    attempt=session.attempt,
+                    previous_run_ids=session.previous_run_ids,
+                    workspace_path=str(session.workspace.path),
+                    max_turns=self.workflow.agent.max_turns,
+                    timeout_seconds=self.workflow.agent.run_timeout_ms / 1000.0,
+                    clarification_question=session.clarification_question,
+                    clarification_answer=session.clarification_answer,
+                    clarification_source=session.clarification_source,
+                    conflict_files=session.conflict_files,
+                    prompt_override=session.prompt_override,
                 )
                 ran_agent = True
                 try:
