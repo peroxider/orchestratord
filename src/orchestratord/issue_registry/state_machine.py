@@ -294,7 +294,14 @@ class StateMachineMixin:
         if workspace_dirty is not None:
             record.run_workspace_dirty = workspace_dirty
         record.touch()
-        self._save_diagnostics()
+        # When the run_id transitions from None to a concrete value we
+        # must persist immediately — the dashboard discovers active runs
+        # by reading the registry JSON from disk, and a throttled save
+        # would keep the run invisible for up to one interval window.
+        if run_id is not None:
+            self._save()
+        else:
+            self._save_diagnostics()
         return record
 
     def mark_pending_review(self, issue_id: str) -> IssueRecord | None:

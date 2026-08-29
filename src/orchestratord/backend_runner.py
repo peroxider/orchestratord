@@ -281,6 +281,16 @@ class BackendRunner:
         if session.run_id is None:
             session.run_id = self._build_run_id(session)
 
+        # Publish the run_id to the registry immediately so the dashboard
+        # (and ChatGateway) can discover the active run before the session
+        # completes.  Without this the run_id only lands in the registry
+        # inside the ``finally`` block at the end of the run.
+        if diagnostics_callback is not None:
+            try:
+                diagnostics_callback(session)
+            except Exception:
+                logger.debug("early diagnostics_callback failed", exc_info=True)
+
         # Stash provider/model for snapshot consumers.
         session._snapshot_provider = self.agent_config.provider or ""
         session._snapshot_model = self.agent_config.model or ""
