@@ -46,6 +46,25 @@ logger = logging.getLogger(__name__)
 # Reuse the same noop-detection threshold as AgentRunner.
 _NOOP_DETECTION_MAX_TURNS = 5
 
+# Read-only spiral guard: after this many consecutive turns with only
+# read-only tool calls and no workspace changes, the session is terminated
+# with reason "read_only_loop". The threshold is generous because genuine
+# development also involves exploration.
+_MAX_READ_ONLY_TURNS = 8
+
+# Graded intervention thresholds. Instead of killing at the first hint of
+# exploration, inject an operator-style hint so the agent gets a chance to
+# correct course before the hard kill.
+_READ_ONLY_SOFT_HINT_TURNS = 3
+_READ_ONLY_STRONG_HINT_TURNS = 6
+
+# Tool names that modify workspace files. Only these count toward
+# distinguishing "exploring" turns from "producing" turns.
+_MODIFYING_TOOL_NAMES: frozenset[str] = frozenset({
+    "Write", "Edit", "FileWrite", "FileWriteTool",
+    "FileEdit", "FileEditTool", "WriteTool", "EditTool",
+})
+
 
 class _TaskProgressBridge:
     """Adapt legacy synchronous progress-sink calls to ``ProgressEvent``.
@@ -652,6 +671,11 @@ class BackendRunner:
         consecutive_noop_turns = 0
         last_file_status_snapshot: dict[str, Any] | None = None
 
+        # Read-only spiral guard tracking
+        read_only_streak = 0
+        turn_has_tool_calls = False
+        turn_has_modifying_tool = False
+
         run_start = time.monotonic()
         last_event_monotonic = run_start
         handshake_complete = False
@@ -697,6 +721,9 @@ class BackendRunner:
 
             elif kind == EventKind.TOOL_CALL:
                 session.tool_count += 1
+                turn_has_tool_calls = True
+                if payload.get("name", "") in _MODIFYING_TOOL_NAMES:
+                    turn_has_modifying_tool = True
                 self._handle_tool_call_envelope(event, session_context)
                 if progress_reporter is not None and hasattr(progress_reporter, "on_tool_call"):
                     progress_reporter.on_tool_call(
@@ -729,6 +756,62 @@ class BackendRunner:
                     session.status = "completed"
                     session.session_end_reason = "noop_detected"
                     break
+
+                # --- Read-only spiral guard ---
+                if session.turn_count > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
+                    try:
+                        from orchestratord.git_utils import get_file_status
+                        statuses = get_file_status(str(session.workspace.path))
+                        ws_dirty = any(
+                            s.status not in ("unmodified", "ignored")
+                            for s in statuses
+                        )
+                    except Exception:
+                        ws_dirty = False
+                    if not ws_dirty:
+                        read_only_streak += 1
+                    else:
+                        read_only_streak = 0
+                else:
+                    read_only_streak = 0
+
+                if read_only_streak in (_READ_ONLY_SOFT_HINT_TURNS, _READ_ONLY_STRONG_HINT_TURNS):
+                    hint = (
+                        f"You have spent {read_only_streak} consecutive turns "
+                        "only reading/exploring without changing any files. "
+                        "If you understand the task, START WRITING now: modify "
+                        "files (Write/Edit) or run commands (Bash) to produce "
+                        "actual changes."
+                    )
+                    try:
+                        from orchestratord.runner_utils import _write_operator_hint
+                        _write_operator_hint(session, hint)
+                    except Exception:
+                        logger.debug("read-only hint delivery failed", exc_info=True)
+                    logger.warning(
+                        "Read-only spiral hint issue_id=%s — %d consecutive "
+                        "read-only turns, injecting course-correction hint",
+                        session.issue.id, read_only_streak,
+                    )
+
+                if read_only_streak >= _MAX_READ_ONLY_TURNS:
+                    session.session_end_reason = "read_only_loop"
+                    session.session_end_summary = (
+                        f"{read_only_streak} consecutive turns with only "
+                        "read-only tool calls and no code changes"
+                    )
+                    logger.warning(
+                        "Read-only loop detected issue_id=%s — %d consecutive "
+                        "read-only turns, breaking event loop",
+                        session.issue.id, read_only_streak,
+                    )
+                    session.status = "failed"
+                    break
+
+                # Reset per-turn trackers
+                turn_has_tool_calls = False
+                turn_has_modifying_tool = False
+                # --- End read-only spiral guard ---
 
                 if progress_reporter is not None and hasattr(progress_reporter, "on_turn_complete"):
                     progress_reporter.on_turn_complete(
