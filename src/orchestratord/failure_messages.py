@@ -268,6 +268,137 @@ def issue_summary_guidance(status: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# User-facing failure guidance keyed by session_end_reason
+# ---------------------------------------------------------------------------
+
+_END_REASON_USER_GUIDANCE: dict[str, tuple[str, str]] = {
+    "read_only_loop": (
+        "Agent 只读探索未产生代码修改",
+        "请检查 issue 描述是否清晰（补充具体实现要求）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "no_changes_produced": (
+        "Agent 未产生任何文件修改",
+        "请检查 issue 描述是否清晰（补充具体改动要求）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "rate_limited": (
+        "请求频率超限（限流）",
+        "请检查模型 API 额度/限流是否正常（余额、每分钟请求数上限）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "stagnation": (
+        "处理停滞（模型响应慢或无输出）",
+        "请检查网络连接与模型服务状态是否正常（是否过载/超时）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "llm_gave_up": (
+        "模型判断无法完成该任务",
+        "请检查 issue 信息是否充分（补充上下文或拆分需求）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "budget_exhausted": (
+        "轮次/预算耗尽",
+        "请检查 workflow.md 轮次/预算配置是否合理（调大或拆分任务）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "loop_detected": (
+        "Agent 重复循环无进展",
+        "请检查 issue 上下文是否充分（补充信息）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "megaturn_workspace_idle": (
+        "长时间无工作区变化",
+        "请检查模型服务与网络是否正常；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "noop_completed": (
+        "无文件变化但被判定为完成",
+        "请确认需求是否已满足；若未满足可评论 `/agent follow-up` 继续处理。",
+    ),
+    "empty_branch_no_commits": (
+        "分支为空，未产生任何提交",
+        "请检查 issue 描述是否清晰（补充具体实现要求）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "not_reproducible": (
+        "问题无法复现",
+        "请检查 issue 描述是否清晰（补充复现步骤）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "premise_not_met": (
+        "前提条件不满足",
+        "请检查前置条件是否满足（环境/依赖/前置状态）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "operator_stopped": ("被操作者手动停止", "无需处理（人工主动停止）。"),
+    "operator_stop": ("被操作者手动停止", "无需处理（人工主动停止）。"),
+    "operator_takeover": ("被操作者接管", "无需处理（人工主动接管）。"),
+    "task_complete": ("任务正常完成", "无需处理。"),
+    "already_completed": ("该 issue 已处理完成", "无需处理。"),
+    "agent_timeout": (
+        "Agent 执行超时",
+        "请检查模型服务/网络是否正常，或拆分任务降低规模；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "max_turns_exceeded": (
+        "轮次上限超限",
+        "请检查 workflow.md 轮次上限配置是否合理（调大或拆分任务）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "rate_limit_circuit_open": (
+        "限流熔断（连续请求被限）",
+        "请检查模型 API 额度/限流是否正常（余额、并发限制）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "verification_failed": (
+        "本地验证未通过",
+        "请检查测试命令与环境配置是否正确（test_command、依赖）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "before_run_failed": (
+        "运行前失败（环境/配置问题）",
+        "请检查环境与配置是否正确（token 权限、workflow 配置、网络）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+    ),
+    "cancelled": ("被取消", "无需处理（人工取消或系统取消）。"),
+}
+
+
+def end_reason_guidance(
+    end_reason: str | None,
+    hook_error: str | None = None,
+    end_summary: str | None = None,
+    output_text: str | None = None,
+) -> tuple[str, str] | None:
+    """Return (readable_reason, suggested_action) for a session end reason.
+
+    Handles dynamic reasons (exit_code=N, salvaged_after_*) and
+    unknown reasons with a generic fallback.
+    """
+    import re
+    if not end_reason:
+        return None
+    guidance = _END_REASON_USER_GUIDANCE.get(end_reason)
+    if guidance is None and end_reason.startswith("exit_code="):
+        code = end_reason.split("=", 1)[1]
+        _err_blob = (
+            f"{hook_error or ''} {end_summary or ''} "
+            f"{(output_text or '')[:2000]}"
+        )
+        if re.search(
+            r"401|Invalid Authentication|invalid_authentication|"
+            r"Unauthorized|API key|authentication error",
+            _err_blob,
+            re.IGNORECASE,
+        ):
+            guidance = (
+                f"模型 API 认证失败（退出码 {code}）",
+                "请检查模型 API key 是否正确/有效（provider 的 api_key 配置）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+            )
+        else:
+            guidance = (
+                f"工具/命令执行失败（退出码 {code}）",
+                f"请检查对应命令/环境是否正确（退出码 {code}）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+            )
+    elif guidance is None and end_reason.startswith("salvaged_after_"):
+        guidance = (
+            "恢复处理失败",
+            "请检查环境与配置是否正常；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry。",
+        )
+    elif guidance is None:
+        guidance = (
+            "未知错误",
+            "请检查环境与配置是否正确（token 权限、workflow 配置、网络）；编排器会自动重试，如需立即重试可在 issue 评论 /agent retry，仍失败请附运行日志（含上方 `Run` 的 run_id）。",
+        )
+    return guidance
+
+
+# ---------------------------------------------------------------------------
 # ADR-003: ResumeStatus + error_code routing (DESIGN §4)
 # ---------------------------------------------------------------------------
 
