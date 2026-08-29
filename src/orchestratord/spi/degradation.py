@@ -26,21 +26,21 @@ def _split_chunks(text: str, chunk_size: int = _CHUNK_CHARS) -> list[str]:
     """Split *text* into chunks of roughly *chunk_size* characters.
 
     Splits at newline boundaries first; lines longer than *chunk_size*
-    are hard-cut at the limit.  Returns an empty list when *text* is
-    empty or whitespace-only.
+    are hard-cut at the limit.  Chunk concatenation always reconstructs
+    *text* exactly (including blank lines and whitespace).
     """
     if not text or not text.strip():
         return []
     chunks: list[str] = []
-    for line in text.split("\n"):
-        if not line:
-            continue
+    # ``splitlines(keepends=True)`` makes each line independently visible
+    # while retaining separators.  A final unterminated line is included.
+    for line in text.splitlines(keepends=True):
         while len(line) > chunk_size:
             chunks.append(line[:chunk_size])
             line = line[chunk_size:]
         if line:
             chunks.append(line)
-    return chunks or [text]
+    return chunks
 
 
 class DegradingSession:

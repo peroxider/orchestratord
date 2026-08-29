@@ -7,9 +7,13 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
+
 from orchestratord.control_socket import ControlCommand, ControlSocket
+from orchestratord.runner_utils import _drain_control_commands
 from orchestratord.session_state import AgentSession
 
 
@@ -54,6 +58,7 @@ class TestFollowupInjection(IsolatedAsyncioTestCase):
         ws = Workspace(path=Path("/tmp"), issue_identifier="test-1")
         session = AgentSession(issue=issue, workspace=ws)
         self.assertEqual(session._pending_followups, [])
+
         session._pending_followups.append("test message")
         self.assertEqual(session._pending_followups, ["test message"])
 
@@ -81,3 +86,32 @@ class TestFollowupInjection(IsolatedAsyncioTestCase):
         self.assertEqual(len(session._pending_followups), 2)
         session._pending_followups.clear()
         self.assertEqual(session._pending_followups, [])
+
+
+@pytest.mark.asyncio
+async def test_followup_is_queued_and_confirmed_once():
+    """The control drain must not duplicate a follow-up command."""
+
+    class _Socket:
+        def __init__(self) -> None:
+            self._command_queue: asyncio.Queue[ControlCommand] = asyncio.Queue()
+            self.frames: list[dict] = []
+
+        async def send_event(self, frame: dict) -> None:
+            self.frames.append(frame)
+
+    socket = _Socket()
+    socket._command_queue.put_nowait(ControlCommand("followup", "use plan B"))
+    session = SimpleNamespace(
+        control_socket=socket,
+        _pending_followups=[],
+        _transcript_storage=None,
+        run_id="run-1",
+    )
+
+    assert _drain_control_commands(session) is False
+    await asyncio.sleep(0)
+    assert session._pending_followups == ["use plan B"]
+    assert socket.frames == [
+        {"type": "FollowupQueued", "data": {"snippet": "use plan B"}}
+    ]

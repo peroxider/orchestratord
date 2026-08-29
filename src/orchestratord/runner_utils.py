@@ -31,6 +31,32 @@ def _event_to_broadcast_dict(event: Any) -> dict:
     Event types are imported from orchestratord's own event model. Unknown
     events fall back to duck-typing for SPI ``EventEnvelope`` objects.
     """
+    # BackendRunner feeds this helper SPI EventEnvelope values.  Convert
+    # them to the stable control-socket vocabulary rather than exposing the
+    # SPI implementation class name to the browser.
+    kind = getattr(event, "kind", None)
+    payload = getattr(event, "payload", None)
+    if kind is not None and isinstance(payload, dict):
+        kind_value = getattr(kind, "value", kind)
+        if kind_value in ("text", "text_delta"):
+            return {"content": str(payload.get("text", payload.get("delta", "")))}
+        if kind_value == "tool_call":
+            return {
+                "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
+                "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
+                "params": dict(payload.get("arguments", payload.get("params", {})) or {}),
+            }
+        if kind_value == "tool_result":
+            return {
+                "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
+                "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
+                "result": payload.get("result", payload),
+            }
+        if kind_value == "turn_complete":
+            return {"turn": payload.get("turn", 0)}
+        if kind_value == "session_complete":
+            return {"reason": str(payload.get("reason", ""))}
+
     try:
         from orchestratord.events.agent_events import (
             PhaseComplete,
@@ -85,9 +111,19 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
     if session.control_socket is None:
         return
     try:
+        kind = getattr(event, "kind", None)
+        kind_value = getattr(kind, "value", kind)
+        type_map = {
+            "text": "TextDelta",
+            "text_delta": "TextDelta",
+            "tool_call": "ToolCallEvent",
+            "tool_result": "ToolResultEvent",
+            "turn_complete": "TurnComplete",
+            "session_complete": "SessionComplete",
+        }
         await session.control_socket.send_event(
             {
-                "type": event.__class__.__name__,
+                "type": type_map.get(kind_value, event.__class__.__name__),
                 "data": _event_to_broadcast_dict(event),
             }
         )
@@ -316,57 +352,6 @@ def _drain_control_commands(session: Any) -> bool:
                     "control_socket detach received run_id=%s",
                     session.run_id,
                 )
-            elif cmd.cmd == "followup":
-                # Write the message to the transcript as a UserMessage
-                # so it appears in conversation history (chat replay).
-                if session._transcript_storage is not None:
-                    try:
-                        from orchestratord.events.agent_events import (
-                            TextBlock,
-                            create_user_message,
-                        )
-
-                        session._transcript_storage.write_message(
-                            create_user_message(
-                                content=[TextBlock(text=cmd.payload)],
-                                origin="followup",
-                            ),
-                        )
-                        session._transcript_storage.flush()
-                    except ImportError:
-                        logger.debug(
-                            "followup: transcript storage unavailable"
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to write followup to transcript run_id=%s",
-                            session.run_id,
-                        )
-
-                # Queue for backend-agnostic prompt injection next turn.
-                session._pending_followups.append(cmd.payload)
-
-                # Broadcast FollowupQueued confirmation frame.
-                if session.control_socket is not None:
-                    try:
-                        import asyncio as _followup_asyncio
-
-                        _snippet = cmd.payload[:80] if cmd.payload else ""
-                        _coro = session.control_socket.send_event(
-                            {
-                                "type": "FollowupQueued",
-                                "data": {
-                                    "snippet": _snippet,
-                                },
-                            },
-                        )
-                        try:
-                            _loop = _followup_asyncio.get_running_loop()
-                            _loop.create_task(_coro)
-                        except RuntimeError:
-                            _followup_asyncio.run(_coro)
-                    except Exception:
-                        logger.exception("Failed to emit FollowupQueued")
             elif cmd.cmd == "followup":
                 # Write the message to the transcript as a UserMessage
                 # so it appears in conversation history (chat replay).

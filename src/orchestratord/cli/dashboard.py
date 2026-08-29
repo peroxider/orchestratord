@@ -1785,10 +1785,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         path = parsed.path or "/"
+        prefix = "/api/runs/"
+        if not path.startswith(prefix):
+            self.send_error(404, "Not Found")
+            return
 
-        
+        suffixes = ("/messages", "/pause", "/resume", "/stop")
+        suffix = next((item for item in suffixes if path.endswith(item)), None)
+        if suffix is None:
+            self.send_error(404, "Not Found")
+            return
+        run_id = path[len(prefix) : -len(suffix)]
+        if not run_id or "/" in run_id or "\\" in run_id:
+            self._send_json({"error": "invalid run id"}, status=400)
+            return
 
-        self.send_error(404, "Not Found")
+        body: dict[str, Any] = {}
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            if content_length > 64 * 1024:
+                self._send_json({"error": "request body too large"}, status=413)
+                return
+            if content_length:
+                raw = self.rfile.read(content_length)
+                body = json.loads(raw.decode("utf-8"))
+                if not isinstance(body, dict):
+                    raise ValueError("request body must be an object")
+        except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            self._send_json({"error": "invalid JSON body"}, status=400)
+            return
+
+        gateway: ChatGateway = self.state.chat_gateway
+        if suffix == "/messages":
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                self._send_json({"error": "text is required"}, status=400)
+                return
+            ok = gateway.send_message(run_id, text.strip())
+        else:
+            verb = suffix[1:]
+            payload = body.get("message", "") if verb == "resume" else ""
+            if not isinstance(payload, str):
+                self._send_json({"error": "message must be a string"}, status=400)
+                return
+            ok = gateway.control(run_id, verb, payload)
+
+        if not ok:
+            self._send_json({"error": "run not active", "run_id": run_id}, status=409)
+            return
+        self._send_json({"accepted": True, "run_id": run_id}, status=202)
 
     # ----- SSE streaming ---------------------------------------------------
 
@@ -1854,20 +1899,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         gw: ChatGateway = self.state.chat_gateway
 
-        # 1. Send history frame.
-        history = gw.read_history(run_id)
-        self._write_sse({"type": "history", "messages": history})
-
-        # 2. Subscribe to live frames (after reading history to avoid races).
+        # Subscribe first so frames produced while history is being read are
+        # buffered rather than silently lost at the history/live boundary.
         live = gw.subscribe(run_id)
         if live is None:
             self._write_sse({"type": "RunEnded", "data": {"run_id": run_id}})
             return
 
-        # 3. Send boundary frame.
+        # Then replay history and mark the boundary before consuming the
+        # already-buffered live stream.
+        history = gw.read_history(run_id)
+        self._write_sse({"type": "history", "messages": history})
         self._write_sse({"type": "boundary"})
 
-        # 4. Stream live frames.
+        # Stream live frames.
         try:
             while True:
                 try:
