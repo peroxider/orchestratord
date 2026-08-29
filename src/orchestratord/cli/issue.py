@@ -3502,7 +3502,31 @@ def _run_retry(
             )
             if tracker is not None:
                 _mirror_intent_label(tracker, issue_id, "agent:follow-up", remove=False)
-            action = "marked for follow-up"
+            # Write the reason to .operator_hints.md so the agent
+            # sees it as context on re-launch (mirrors the chat
+            # followup path in dashboard.py).
+            if reason:
+                ws_path = (
+                    Path(record.workspace_path)
+                    if record.workspace_path
+                    else (Path(workspace_root) if workspace_root else None)
+                )
+                if ws_path is not None:
+                    _inject_hint(registry_issue_id, ws_path / ".operator_hints.md", reason)
+            # Notify the daemon via control file so it picks up the
+            # intent immediately instead of waiting for the next poll.
+            control_root = workspace_root or registry_path.parent
+            control_rc = _write_control(
+                "followup",
+                registry_issue_id,
+                reason,
+                workspace_root=control_root,
+            )
+            action = (
+                "marked for follow-up"
+                if control_rc == 0
+                else "followup intent persisted, but daemon notification failed"
+            )
         else:  # mode == "unblock"
             registry.unblock(registry_issue_id)
             if tracker is not None:

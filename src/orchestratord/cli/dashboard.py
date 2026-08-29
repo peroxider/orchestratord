@@ -1768,9 +1768,9 @@ def _followup_completed_run(workspace: Path, run_id: str, text: str) -> bool:
     try:
         control_dir = workspace / ".orchestrator_control"
         control_dir.mkdir(parents=True, exist_ok=True)
-        control_file = control_dir / f"chat_followup_{issue_id}.control"
+        control_file = control_dir / f"followup_{issue_id}.control"
         control_file.write_text(
-            f"chat_followup\n{issue_id}\n{text}\n", encoding="utf-8"
+            f"followup\n{issue_id}\n{text}\n", encoding="utf-8"
         )
     except Exception:
         logger.exception(

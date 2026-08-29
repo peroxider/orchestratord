@@ -382,6 +382,10 @@ def _drain_control_commands(session: Any) -> bool:
                 # Queue for backend-agnostic prompt injection next turn.
                 session._pending_followups.append(cmd.payload)
 
+                # Write .operator_hints.md as a durable fallback so the
+                # followup survives agent crashes (mirrors the inject path).
+                _write_operator_hint(session, cmd.payload)
+
                 # Broadcast FollowupQueued confirmation frame.
                 if session.control_socket is not None:
                     try:

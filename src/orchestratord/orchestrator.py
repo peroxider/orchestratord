@@ -4592,8 +4592,8 @@ class Orchestrator:
                         await self._handle_review_retry_control(issue_id, extra)
                     elif cmd == "retry":
                         await self._handle_retry_control(issue_id, extra)
-                    elif cmd == "chat_followup":
-                        await self._handle_chat_followup_control(issue_id, extra)
+                    elif cmd == "followup":
+                        await self._handle_followup_control(issue_id, extra)
                     else:
                         self._apply_control_command(cmd, issue_id, extra)
                 finally:
@@ -4855,9 +4855,10 @@ class Orchestrator:
             return
         await self._sync_tracker_issue_state(issue_id, "open")
 
-    async def _handle_chat_followup_control(self, issue_id: str, extra: str) -> None:
-        """Re-launch a completed issue with FOLLOWUP intent from chat.
+    async def _handle_followup_control(self, issue_id: str, extra: str) -> None:
+        """Re-launch a completed issue with FOLLOWUP intent.
 
+        Unified handler for both CLI ``--mode followup`` and chat follow-up.
         Unlike ``_handle_retry_control`` this does NOT reset the PR or
         branch — the agent reuses the existing branch and appends a
         follow-up commit.  The follow-up prompt text is read from
