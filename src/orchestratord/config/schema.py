@@ -382,7 +382,7 @@ def permission_mode_to_triple(
 
     Explicit overrides take precedence; missing values are inferred from the
     legacy mode. The current wiring only sets ``audit_log``; ``interactive`` and
-    ``default_decision`` are reserved for future extensions.
+    ``default_decision`` are reserved for future schema additions.
     """
     mode = str(permission_mode).strip() if permission_mode else "default"
     mapping: dict[str, dict[str, Any]] = {

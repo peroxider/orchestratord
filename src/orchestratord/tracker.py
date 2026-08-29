@@ -17,9 +17,9 @@ normalized data models, and the capability protocols.  Two sibling
 modules hold the rest of the former ``tracker.py`` contents and are
 re-exported here for back-compat:
 
-  - :mod:`extensions.orchestrator.intent` — ``Intent`` / ``Command``
+  - :mod:`orchestratord.tracker.intent` — ``Intent`` / ``Command``
     semantics, label/comment parsing, priority merging.
-  - :mod:`extensions.orchestrator.tracker_kinds` — tracker kind registry,
+  - :mod:`orchestratord.tracker.tracker_kinds` — tracker kind registry,
     config validation, and the ``create_tracker_adapter`` factory.
 """
 

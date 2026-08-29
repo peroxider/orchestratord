@@ -13,7 +13,7 @@ SessionLiveTail 模式一致。本方案接受此模式的重复（代码库中�
 
 设计约束：
 - 只用 stdlib（threading, queue, json, pathlib, time, logging）
-- 不导入 extensions.visualizer（零耦合）
+- 不导入可视化模块（零耦合）
 - 兼容 ThreadingHTTPServer 的同步线程模型
 """
 

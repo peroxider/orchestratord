@@ -94,7 +94,7 @@ _RESET = "\033[0m"
 def _shorten_logger(name: str, max_parts: int = 2) -> str:
     """Shorten a fully-qualified logger name to its last *max_parts* segments.
 
-    ``extensions.orchestrator.agent_runner`` → ``…orchestrator.agent_runner``
+    ``a.b.c.orchestrator.agent_runner`` → ``…orchestrator.agent_runner``
     """
     parts = name.split(".")
     if len(parts) <= max_parts:

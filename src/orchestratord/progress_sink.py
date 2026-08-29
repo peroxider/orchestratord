@@ -47,9 +47,8 @@ class ProgressSink(Protocol):
     :class:`AgentSession`, the protocol makes no threading guarantees —
     internal counters can be plain ints.
 
-    The three ``on_*_complete`` methods are dispatched by
-    :class:`extensions.orchestrator.agent_runner.AgentRunner` at well
-    defined points in the session lifecycle:
+    The three ``on_*_complete`` methods are dispatched by the agent
+    runner at well defined points in the session lifecycle:
 
     * :meth:`on_phase_complete` — a logical phase (one or more turns)
       finished. ``event.phase`` is the 1-based phase number.

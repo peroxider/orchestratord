@@ -1,8 +1,8 @@
 """Backend-neutral agent event types.
 
-These dataclasses mirror the clawcodex ``extensions.api.query`` event
-shapes so the orchestrator core can be backend-agnostic.  Each agent
-backend (clawcodex, codex, dsh, hermes, opencode, …) is responsible
+These dataclasses mirror the clawcodex query-event shapes so the
+orchestrator core can be backend-agnostic.  Each agent backend
+(clawcodex, codex, dsh, hermes, opencode, …) is responsible
 for producing values that match these field shapes; the orchestrator
 consumes them via :class:`agent_runner.AgentRunner` or the SPI
 :class:`orchestratord.spi.backend.AgentBackend`.
@@ -16,9 +16,9 @@ contradicting the "clawcodex is just a backend" goal.  These
 backend-neutral dataclasses break that hard coupling while preserving
 field-by-field compatibility with clawcodex's emitted events.
 
-Field shapes match :mod:`extensions.api.query` (clawcodex).  Optional
-fields default to ``None`` / empty so a backend that doesn't emit a
-particular attribute can still produce a valid value.
+Field shapes match the clawcodex query-event module.  Optional fields
+default to ``None`` / empty so a backend that doesn't emit a particular
+attribute can still produce a valid value.
 """
 
 from __future__ import annotations

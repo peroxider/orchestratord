@@ -193,8 +193,18 @@ class Orchestrator:
         agent_runner: BackendRunner,
         status_dashboard: StatusDashboard | None = None,
         *,
+        # SPI AgentBackend (added for orchestration_subsystem call-site parity).
+        # The subsystem passes ``backend=self._backend`` since the SPI refactor;
+        # origin's Orchestrator drives ``agent_runner`` directly, so this is
+        # accepted-and-ignored to keep that call site working.
+        backend: Any = None,
         stage_runners: dict[str, "BackendRunner"] | None = None,
         workflow_yaml_path: str | None = None,
+        # Issue-clarifier provider factory (added for orchestration_subsystem
+        # call-site parity).  Accepted but unused at HEAD — the subsystem wires
+        # it on its own side; Orchestrator's existing clarification path stays
+        # unchanged.
+        clarifier_provider_factory: Any = None,
         asciicast_capture: Any = None,
     ) -> None:
         self.workflow = workflow
