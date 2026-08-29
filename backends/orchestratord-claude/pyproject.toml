@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-claude"
+version = "0.1.0"
+description = "Anthropic Claude Code (CLI) backend for orchestratord — wraps the `claude` CLI or its open-source fork `ccb` (claude-code-best)"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+claude = "orchestratord_claude:ClaudeBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+claude = "orchestratord_claude.descriptor:CLAUDE_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

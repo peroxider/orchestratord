@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 backends = [
+    "orchestratord-claude",
     "orchestratord-clawcodex",
     "orchestratord-codex",
     "orchestratord-dsh",
@@ -61,6 +62,7 @@ pythonpath = [
 # what enables Scheme D's drift detector to install every backend
 # in one command.
 [tool.uv.sources]
+orchestratord-claude     = { path = "backends/orchestratord-claude",     editable = true }
 orchestratord-clawcodex  = { path = "backends/orchestratord-clawcodex",  editable = true }
 orchestratord-codex      = { path = "backends/orchestratord-codex",      editable = true }
 orchestratord-dsh        = { path = "backends/orchestratord-dsh",        editable = true }
