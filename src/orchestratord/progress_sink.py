@@ -199,11 +199,17 @@ class ToolContextProgressSink:
         task_id: str,
         workflow_phases: list[str] | None = None,
         fallback_to_phase_step: bool = False,
+        # Legacy kwarg retained for backwards compatibility with tests and
+        # older call sites that still pass ``context``. The orchestrator is
+        # not an agent and no longer needs a backend ToolContext, so the
+        # argument is accepted-and-ignored rather than rejected.
+        context: Any = None,
     ) -> None:
         self.task_id = task_id
         self._phase_count = 0
         self._workflow_phases: list[str] = list(workflow_phases or [])
         self._fallback_to_phase_step = fallback_to_phase_step
+        self._legacy_context = context
 
     # -- helpers ---------------------------------------------------------
 
