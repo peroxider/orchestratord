@@ -740,6 +740,7 @@ dependencies = [
 
 [package.optional-dependencies]
 backends = [
+    { name = "orchestratord-claude" },
     { name = "orchestratord-clawcodex" },
     { name = "orchestratord-codex" },
     { name = "orchestratord-dsh" },
@@ -747,6 +748,7 @@ backends = [
     { name = "orchestratord-opencode" },
 ]
 dev = [
+    { name = "orchestratord-claude" },
     { name = "orchestratord-clawcodex" },
     { name = "orchestratord-codex" },
     { name = "orchestratord-dsh" },
@@ -763,6 +765,8 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.14.3" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "jinja2", specifier = ">=3.1.0" },
+    { name = "orchestratord-claude", marker = "extra == 'backends'", editable = "backends/orchestratord-claude" },
+    { name = "orchestratord-claude", marker = "extra == 'dev'", editable = "backends/orchestratord-claude" },
     { name = "orchestratord-clawcodex", marker = "extra == 'backends'", editable = "backends/orchestratord-clawcodex" },
     { name = "orchestratord-clawcodex", marker = "extra == 'dev'", editable = "backends/orchestratord-clawcodex" },
     { name = "orchestratord-codex", marker = "extra == 'backends'", editable = "backends/orchestratord-codex" },
@@ -783,6 +787,17 @@ requires-dist = [
     { name = "typer", extras = ["all"], specifier = ">=0.12.0" },
 ]
 provides-extras = ["backends", "dev"]
+
+[[package]]
+name = "orchestratord-claude"
+version = "0.1.0"
+source = { editable = "backends/orchestratord-claude" }
+dependencies = [
+    { name = "orchestratord" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "orchestratord" }]
 
 [[package]]
 name = "orchestratord-clawcodex"

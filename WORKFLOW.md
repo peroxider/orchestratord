@@ -19,7 +19,7 @@ polling:
   interval_ms: 30000
 
 workspace:
-  root: /mnt/c/WorkSpace/orchestratord
+  root: /tmp/orchestratord-test
 
 agent:
   max_concurrent_agents: 1

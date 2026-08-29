@@ -15,6 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 backends = [
+    "orchestratord-claude",
     "orchestratord-clawcodex",
     "orchestratord-codex",
     "orchestratord-dsh",
@@ -22,6 +23,7 @@ backends = [
     "orchestratord-opencode",
 ]
 dev = [
+    "orchestratord-claude",
     "orchestratord-clawcodex",
     "orchestratord-codex",
     "orchestratord-dsh",
@@ -46,7 +48,10 @@ packages = ["src/orchestratord"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+testpaths = [
+    "tests",
+    "backends/orchestratord-clawcodex/tests",
+]
 # ``scripts`` lets conftest.py do ``from scripts.install_cli_shims
 # import install_cli_shims`` without requiring an editable install.
 # Per DESIGN_backend_cli_test_guard.md §3.2.
@@ -61,7 +66,8 @@ pythonpath = [
 # what enables Scheme D's drift detector to install every backend
 # in one command.
 [tool.uv.sources]
-orchestratord-clawcodex = { path = "backends/orchestratord-clawcodex", editable = true }
+orchestratord-claude     = { path = "backends/orchestratord-claude",     editable = true }
+orchestratord-clawcodex  = { path = "backends/orchestratord-clawcodex",  editable = true }
 orchestratord-codex      = { path = "backends/orchestratord-codex",      editable = true }
 orchestratord-dsh        = { path = "backends/orchestratord-dsh",        editable = true }
 orchestratord-hermes     = { path = "backends/orchestratord-hermes",     editable = true }
