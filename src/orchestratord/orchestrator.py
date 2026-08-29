@@ -51,6 +51,7 @@ from .modes.swarm import SwarmModeRunner
 from .failure_messages import (
     FailureContext,
     empty_branch_message,
+    end_reason_guidance,
     generic_failure_message,
     issue_summary_guidance,
     loop_detected_message,
@@ -100,6 +101,18 @@ logger = logging.getLogger(__name__)
 
 _CONTINUATION_RETRY_DELAY_MS = 1_000
 _FAILURE_RETRY_BASE_MS = 10_000
+
+
+def _operator_failure_detail(exc: BaseException) -> str:
+    """Return a concise failure detail suitable for IM and registry records."""
+    raw = " ".join(str(exc).split())
+    body_detail = _extract_error_message_from_body(raw)
+    if body_detail:
+        status_code = _extract_status_code(raw)
+        if raw.startswith("request_failed") and status_code:
+            return f"request_failed status={status_code}: {body_detail}"
+        return body_detail
+    return raw or exc.__class__.__name__
 
 
 def _extract_status_code(text: str) -> str | None:
@@ -1561,9 +1574,13 @@ class Orchestrator:
     ) -> bool:
         """Return True if `author_login` may trigger a retry/follow-up.
 
-        Per the design doc: "comment 命令默认要求「issue
-        作者」或「仓库 maintainer」才能触发". The check has three
-        short-circuits:
+        Only the issue author may trigger. The maintainer role is not
+        consulted: deploy tokens have heterogeneous permission levels and
+        the platform collaborators API is not reliably reachable with a
+        regular token, so a maintainer check cannot be certified
+        uniformly. Keep the check fail-closed on the issue author.
+
+        Short-circuits:
 
           1. `workflow.agent.allow_anyone_to_retry` — disables the
              role check entirely (trusted-team mode).
@@ -1572,19 +1589,13 @@ class Orchestrator:
              prevents the LLM-self-trigger risk where a bot
              accidentally writes `/agent retry` in its own reply
              and the daemon can't tell it wasn't a human.
-          3. The orchestrator service account is always allowed so the
+          3. The bot itself (`orchestratord`) is always allowed so the
              CLI fallback (`/agent retry` from a local operator
              routed through the bot) isn't rejected. NOTE: the CLI
              path doesn't actually go through this code path; this
              branch is only here to be lenient on platform quirks
              where the bot appears as the author of its own ack
              comment.
-
-        Otherwise, the author must equal the issue author login
-        (kept in `IssueRecord.author_login`, populated by the
-        clarification flow) or a maintainer login (platform
-        metadata; we fall back to None for now and rely on the
-        author check).
         """
         if getattr(self.workflow.agent, "allow_anyone_to_retry", False):
             return True
@@ -1624,6 +1635,16 @@ class Orchestrator:
                 issue_id,
                 exc,
             )
+        # Advance the command cursor past this rejected comment so the
+        # next poll does not re-scan it and re-print the rejection.
+        # Without this, an unauthorized comment is re-processed every
+        # poll until a human deletes it.
+        rejected_comment_id = command_intent.comment_id
+        if rejected_comment_id:
+            record = self._registry.get(issue_id)
+            if record is not None:
+                record.command_cursor = rejected_comment_id
+                self._registry._save()
         logger.info(
             "Issue %s command rejected: /agent %s by %s (not authorized)",
             issue_id,
@@ -4072,8 +4093,28 @@ class Orchestrator:
             f"- Turns: {getattr(session, 'turn_count', 0)}",
             f"- Tool calls: {getattr(session, 'tool_count', 0)}",
         ]
-        if getattr(session, "last_hook_error", None):
-            body_lines.append(f"- Error: `{session.last_hook_error}`")
+        # Three-level fallback: reason → summary → hook_error
+        end_reason = getattr(session, "session_end_reason", None)
+        end_summary = getattr(session, "session_end_summary", None)
+        hook_error = getattr(session, "last_hook_error", None)
+        reason_text = end_reason or end_summary or hook_error
+        if reason_text:
+            body_lines.append(f"- Error: `{reason_text}`")
+        if hook_error and hook_error != reason_text:
+            body_lines.append(f"- Detail: `{hook_error}`")
+        # User-facing guidance
+        if end_reason:
+            guidance = end_reason_guidance(
+                end_reason=end_reason,
+                hook_error=hook_error,
+                end_summary=end_summary,
+                output_text=getattr(session, "output_text", None),
+            )
+            if guidance:
+                readable, action = guidance
+                body_lines.append("")
+                body_lines.append(f"失败原因：{readable}")
+                body_lines.append(f"建议操作：{action}")
         body = "\n".join(body_lines)
         try:
             await self.tracker.update_comment(session.issue.id, comment_id, body)
