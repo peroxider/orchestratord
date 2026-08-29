@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
 from typing import Literal
 
@@ -96,35 +97,40 @@ def _detect_runtime() -> _RuntimeKind:
 class CodexBackend:
     """Cli/SdkProcess backend for the ``codex`` binary.
 
-    The :pyattr:`family` attribute and capability bits both reflect
-    the detected runtime; see Scheme A §1.4. Callers can override
-    with ``prefer={cli,as}`` via the future public API (not yet wired
-    into :func:`create_session` — TBD).
+    Runtime selection order (DESIGN_backends_hardening.md §1.2):
+
+    1. explicit ``prefer={cli,as}`` constructor argument (highest priority)
+    2. ``ORCHESTRATORD_CODEX_PREFER`` environment variable (``cli``/``as``)
+    3. runtime probe ``codex app-server --help`` (default)
+
+    The :pyattr:`family` attribute and capability bits reflect the
+    selected runtime; see Scheme A §1.4.
     """
 
     name = "codex"
     display_name = "Codex (Cli/As)"
 
-    def __init__(self) -> None:
-        self._runtime: _RuntimeKind = _detect_runtime()
+    def __init__(self, prefer: _RuntimeKind | None = None) -> None:
+        if prefer is not None:
+            if prefer not in ("cli", "as"):
+                raise ValueError(f"prefer must be 'cli' or 'as', got {prefer!r}")
+            self._runtime: _RuntimeKind = prefer
+        else:
+            env_prefer = os.environ.get("ORCHESTRATORD_CODEX_PREFER")
+            if env_prefer in ("cli", "as"):
+                logger.info("codex runtime forced by env: %s", env_prefer)
+                self._runtime = env_prefer  # type: ignore[assignment]
+            else:
+                self._runtime = _detect_runtime()
         self._sessions: list[AgentSession] = []
 
     @property
     def runtime(self) -> _RuntimeKind:
-        """Return the probed runtime: ``"cli"`` or ``"as"``.
+        """Return the selected runtime: ``"cli"`` or ``"as"``.
 
-        Exposed for diagnostics and the future ``--prefer`` override
-        (not wired into the SPI yet).
+        Exposed for diagnostics and the ``--prefer`` override.
         """
         return self._runtime
-
-    def preflight(self, spec: SessionSpec) -> None:  # noqa: ARG002
-        """Verify the Codex executable is installed before daemon startup."""
-        if shutil.which("codex") is None:
-            raise RuntimeError(
-                "codex executable was not found on PATH. Install Codex and "
-                "complete its own authentication before using this backend."
-            )
 
     def preflight(self, spec: SessionSpec) -> None:  # noqa: ARG002
         """Verify the Codex executable is installed before daemon startup."""

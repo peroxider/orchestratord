@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING, Any, Callable, Iterable
@@ -34,11 +35,19 @@ class IssueClarifierService:
         provider: Any | None = None,
         provider_factory: Callable[[], Any] | None = None,
         model: str | None = None,
+        # DESIGN_decoupling_clawcodex.md §2.6: the LLM call layer can be
+        # backed by an AgentBackend single-turn session instead of a
+        # dedicated provider. ``backend_spec_factory`` builds the
+        # SessionSpec (cwd, max_turns=1, permission_mode="plan").
+        backend: Any | None = None,
+        backend_spec_factory: Callable[[], Any] | None = None,
     ) -> None:
         self.config = config
         self.cache = cache
         self._provider = provider
         self._provider_factory = provider_factory
+        self._backend = backend
+        self._backend_spec_factory = backend_spec_factory
         self.model = model
 
     def fingerprint(self, issue: "Issue", *, prior_replies: Iterable[str] = ()) -> str:
@@ -80,9 +89,6 @@ class IssueClarifierService:
             return result
 
         try:
-            provider = self._get_provider()
-            if provider is None:
-                raise RuntimeError("clarifier provider is unavailable")
             messages = build_clarify_messages(
                 issue,
                 prior_replies=replies,
@@ -90,16 +96,24 @@ class IssueClarifierService:
                 max_input_tokens=self.config.max_input_tokens,
                 workspace_focuses=workspace_focuses,  # ★ P2
             )
-            try:
-                response = provider.chat(
-                    messages=messages,
-                    tools=None,
-                    model=self.model,
-                    max_tokens=self.config.max_output_tokens,
-                )
-            except TypeError:
-                response = provider.chat(messages=messages, tools=None, model=self.model)
-            raw = str(getattr(response, "content", "") or "")
+            if self._backend is not None:
+                # DESIGN_decoupling_clawcodex.md §2.6: single-turn analysis
+                # through the SPI AgentBackend (max_turns=1, plan-only).
+                raw = self._analyze_via_backend(messages)
+            else:
+                provider = self._get_provider()
+                if provider is None:
+                    raise RuntimeError("clarifier provider is unavailable")
+                try:
+                    response = provider.chat(
+                        messages=messages,
+                        tools=None,
+                        model=self.model,
+                        max_tokens=self.config.max_output_tokens,
+                    )
+                except TypeError:
+                    response = provider.chat(messages=messages, tools=None, model=self.model)
+                raw = str(getattr(response, "content", "") or "")
             result = parse_clarify_response(
                 raw,
                 min_confidence=self.config.min_confidence,
@@ -117,6 +131,50 @@ class IssueClarifierService:
 
         self.cache.put(result)
         return result
+
+    def _analyze_via_backend(self, messages: list[dict[str, str]]) -> str:
+        """Run a single-turn AgentBackend analysis and return its text.
+
+        ``analyze()`` is synchronous (the gate calls it via
+        ``asyncio.to_thread``), so the SPI session coroutines run on a
+        fresh event loop here.  The session is created with
+        ``max_turns=1`` + ``permission_mode="plan"`` (read-only analysis,
+        no tool execution) and the accumulated text is collected from
+        TEXT / TEXT_DELTA events.
+        """
+        if self._backend is None:
+            raise RuntimeError("clarifier backend is unavailable")
+
+        from ..spi.backend import SessionSpec
+        from ..spi.events import EventKind
+
+        spec = (
+            self._backend_spec_factory()
+            if self._backend_spec_factory is not None
+            else SessionSpec(cwd=".", max_turns=1, permission_mode="plan")
+        )
+        spec.max_turns = 1  # analysis only — never execute tools
+        spec.permission_mode = "plan"
+
+        async def _run() -> str:
+            session = self._backend.create_session(spec)
+            try:
+                await session.send(messages[-1].get("content", ""))
+                parts: list[str] = []
+                async for env in session.events():
+                    if env.kind in (EventKind.TEXT, EventKind.TEXT_DELTA):
+                        parts.append(str(env.payload.get("text") or env.payload.get("delta") or ""))
+                return "".join(parts)
+            finally:
+                await session.close()
+
+        try:
+            return asyncio.run(_run())
+        except RuntimeError:
+            # Already inside a running loop (e.g. called from an async
+            # context directly): degrade to the provider path by re-raising
+            # so the caller falls back gracefully.
+            raise
 
     def _get_provider(self) -> Any | None:
         if self._provider is None and self._provider_factory is not None:

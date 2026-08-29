@@ -82,3 +82,78 @@ class TestRunnerInjection:
     def test_empty_base_still_yields_index(self):
         out = BackendRunner._append_skill_index("")
         assert "## 可用 Skills（agent 可调用）" in out
+
+
+class TestSkillToolExposure:
+    """Scheme C §3.2: ``load_skill`` must be exposed on every SessionSpec."""
+
+    @staticmethod
+    def _fake_session() -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            workspace=SimpleNamespace(path="."),
+            run_id=None,
+            _runtime_tasks=None,
+        )
+
+    @staticmethod
+    def _build_spec(*, tools_allow: list[str] | None) -> object:
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        agent_config = AgentConfig()
+        if tools_allow is not None:
+            # ``tools_allow`` is a duck-typed runtime attribute on
+            # AgentConfig (see BackendRunner._build_session_spec).
+            agent_config.tools_allow = tools_allow  # type: ignore[attr-defined]
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=agent_config,
+            sandbox_config=SandboxConfig(),
+        )
+        session = runner._build_session_spec(
+            session=TestSkillToolExposure._fake_session(),  # type: ignore[arg-type]
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="SYS",
+        )
+        return session
+
+    def test_load_skill_appended_to_allow_list(self):
+        spec = self._build_spec(tools_allow=["Bash", "Grep"])
+        assert "load_skill" in spec.tools_allow
+        assert spec.tools_allow[:2] == ["Bash", "Grep"]
+
+    def test_no_duplicate_load_skill_when_already_present(self):
+        spec = self._build_spec(tools_allow=["load_skill", "Read"])
+        assert spec.tools_allow.count("load_skill") == 1
+
+    def test_no_allow_list_means_no_filter(self):
+        spec = self._build_spec(tools_allow=None)
+        assert spec.tools_allow is None
+
+    def test_skill_tool_description_in_extra(self):
+        spec = self._build_spec(tools_allow=None)
+        skill_tools = spec.extra["skill_tools"]
+        assert skill_tools[0]["name"] == "load_skill"
+        assert "name" in skill_tools[0]["parameters"]["required"]
+
+    def test_runtime_tasks_extra_preserved(self):
+        from types import SimpleNamespace
+
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=AgentConfig(),
+            sandbox_config=SandboxConfig(),
+        )
+        spec = runner._build_session_spec(
+            session=SimpleNamespace(
+                workspace=SimpleNamespace(path="."),
+                run_id=None,
+                _runtime_tasks={"task-1": "running"},
+            ),  # type: ignore[arg-type]
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="SYS",
+        )
+        assert spec.extra["runtime_tasks"] == {"task-1": "running"}

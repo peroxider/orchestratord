@@ -244,6 +244,47 @@ def test_family_value_is_known(
 
 
 # ---------------------------------------------------------------------------
+# resume_detection bit (DESIGN_graded_timeouts_and_resume.md §2.6 / §3.5)
+# ---------------------------------------------------------------------------
+
+# ADR-003 contract matrix for the ``resume_detection`` capability bit:
+# backends whose ``probe_resume()`` returns a meaningful verdict must
+# declare it; backends that always answer UNDETECTABLE / REJECTED must not.
+_RESUME_DETECTION_EXPECTATIONS = {
+    "clawcodex-dev": True,       # real probe (QueryRunner probe_transcript)
+    "codex-app-server": True,    # real probe (session/load JSON-RPC)
+    "opencode": True,            # real probe (session/load MCP)
+    "codex-cli": False,          # UNDETECTABLE (no cross-process state)
+    "dsh": False,                # UNDETECTABLE (SDK has no resume protocol)
+    "hermes": False,             # explicit REJECTED (no cross-process resume)
+}
+
+
+@pytest.mark.parametrize("descriptor_name", sorted(_RESUME_DETECTION_EXPECTATIONS))
+def test_resume_detection_bit_declared(
+    descriptor_name: str,
+    descriptors: dict[str, BackendDescriptor],
+) -> None:
+    """The ``resume_detection`` bit must match the ADR-003 contract matrix.
+
+    The generic ``test_capability_bit_set_matches_descriptor`` only checks
+    descriptor ↔ implementation consistency; this test pins the *intended*
+    value per backend so a backend that gains/loses probe support without
+    updating its descriptor (or the reverse) is caught at CI time.
+    """
+    desc = descriptors.get(descriptor_name)
+    if desc is None:
+        pytest.skip(f"descriptor {descriptor_name!r} not installed")
+    declared = "resume_detection" in desc.capabilities
+    expected = _RESUME_DETECTION_EXPECTATIONS[descriptor_name]
+    assert declared is expected, (
+        f"{descriptor_name}: resume_detection declared={declared} "
+        f"expected={expected} — see DESIGN_graded_timeouts_and_resume.md "
+        "§2.6 / ADR-003 §2.4"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Cross-layer completeness checks
 # ---------------------------------------------------------------------------
 

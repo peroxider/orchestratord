@@ -214,6 +214,67 @@ def test_capabilities_is_deterministic() -> None:
 
 
 # ---------------------------------------------------------------------------
+# ``prefer`` override (DESIGN_backends_hardening.md §1.2)
+# ---------------------------------------------------------------------------
+
+
+def test_prefer_as_bypasses_probe() -> None:
+    """Explicit ``prefer="as"`` wins over the probe — no subprocess spawn."""
+    with patch(
+        "orchestratord_codex.backend._detect_runtime",
+        side_effect=AssertionError("probe must not run when prefer is set"),
+    ):
+        backend = CodexBackend(prefer="as")
+    assert backend.runtime == "as"
+    caps = backend.capabilities()
+    assert caps.streaming_deltas is True
+    assert caps.interrupt is True
+    assert caps.approval_hooks is True
+
+
+def test_prefer_cli_bypasses_probe() -> None:
+    """Explicit ``prefer="cli"`` forces the Cli capability set."""
+    with patch(
+        "orchestratord_codex.backend._detect_runtime",
+        side_effect=AssertionError("probe must not run when prefer is set"),
+    ):
+        backend = CodexBackend(prefer="cli")
+    assert backend.runtime == "cli"
+    caps = backend.capabilities()
+    assert caps.resumable is True
+    assert caps.streaming_deltas is False
+
+
+def test_prefer_invalid_value_raises() -> None:
+    with pytest.raises(ValueError):
+        CodexBackend(prefer="bogus")  # type: ignore[arg-type]
+
+
+def test_env_var_forces_runtime(monkeypatch) -> None:
+    """``ORCHESTRATORD_CODEX_PREFER=as`` wins over the probe result."""
+    monkeypatch.setenv("ORCHESTRATORD_CODEX_PREFER", "as")
+    with patch("orchestratord_codex.backend._detect_runtime", return_value="cli"):
+        backend = CodexBackend()
+    assert backend.runtime == "as"
+
+
+def test_invalid_env_var_falls_back_to_probe(monkeypatch) -> None:
+    """A non-``cli``/``as`` env value is ignored and the probe runs."""
+    monkeypatch.setenv("ORCHESTRATORD_CODEX_PREFER", "bogus")
+    with patch("orchestratord_codex.backend._detect_runtime", return_value="cli"):
+        backend = CodexBackend()
+    assert backend.runtime == "cli"
+
+
+def test_create_session_respects_prefer() -> None:
+    """A ``prefer``-constructed backend picks the matching session class."""
+    backend = CodexBackend(prefer="as")
+    assert isinstance(backend.create_session(_spec()), CodexAppServerSession)
+    backend = CodexBackend(prefer="cli")
+    assert isinstance(backend.create_session(_spec()), CodexSession)
+
+
+# ---------------------------------------------------------------------------
 # Detect-runtime end-to-end (live subprocess; skipped if codex absent)
 # ---------------------------------------------------------------------------
 

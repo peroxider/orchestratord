@@ -157,7 +157,26 @@ def resolve_backend(
             f"{desc.backend_package!r} 未注册 AgentBackend 实现"
         )
 
-    backend = impl_cls()
+    # Forward descriptor-declared constructor hints (e.g. codex's
+    # ``prefer`` runtime override — DESIGN_backends_hardening.md §1.2).
+    # The implementation class accepts the hint only when it opts in;
+    # unknown hints are ignored so third-party backends keep working.
+    impl_kwargs: dict[str, object] = {}
+    prefer = desc.extra_metadata.get("prefer")
+    if prefer is not None:
+        impl_kwargs["prefer"] = prefer
+    try:
+        backend = impl_cls(**impl_kwargs)
+    except TypeError:
+        if impl_kwargs:
+            logger.warning(
+                "descriptor %s declared extra_metadata=%r but %s does not "
+                "accept those constructor kwargs — constructing without them",
+                identifier,
+                impl_kwargs,
+                impl_cls,
+            )
+        backend = impl_cls()
 
     if strict:
         actual = _capabilities_to_set(backend.capabilities())

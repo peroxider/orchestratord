@@ -107,6 +107,78 @@ def read_history_direct(run_id: str) -> list[dict[str, Any]]:
     return messages
 
 
+def read_tool_result(run_id: str, call_id: str) -> dict[str, Any] | None:
+    """Read the full, untruncated tool result for *call_id* from disk.
+
+    The live SSE frames truncate ToolResult payloads (~4KB) to keep
+    control-socket frames small; this is the lazy GET completion channel
+    for those frames (``DESIGN_chat_gateway.md`` §3.3).  The full content
+    lives in ``transcript.jsonl`` as a ``tool_result`` block on the user
+    message that follows the corresponding ``tool_use``.
+
+    Returns ``None`` when the transcript is missing or *call_id* cannot
+    be found (dashboard answers 404 in that case).
+    """
+    transcript_path = SESSIONS_DIR / run_id / "transcript.jsonl"
+    if not transcript_path.exists():
+        # Read-only compatibility for sessions written by older releases.
+        transcript_path = (
+            Path.home() / ".cache" / "orchestratord" / "sessions" / run_id / "transcript.jsonl"
+        )
+    if not transcript_path.exists():
+        return None
+
+    tool_name: str | None = None
+    found: dict[str, Any] | None = None
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                content = entry.get("content")
+                if not isinstance(content, list):
+                    continue
+                role = entry.get("role")
+                if role == "assistant":
+                    # Register tool_use_id → tool_name for result lookups.
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_use" and block.get("id") == call_id:
+                            tool_name = block.get("name")
+                elif role == "user":
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") != "tool_result":
+                            continue
+                        if block.get("tool_use_id") != call_id:
+                            continue
+                        found = {
+                            "tool_name": tool_name or call_id,
+                            "is_error": bool(block.get("is_error")),
+                            "content": _truncate_content(block.get("content"), _MAX_RESULT_CONTENT_CHARS),
+                            "full_content": block.get("content"),
+                            "ts": entry.get("ts", ""),
+                        }
+                        break
+                if found is not None:
+                    break
+    except (FileNotFoundError, OSError):
+        return None
+
+    if found is None:
+        return None
+    # The SSE completion channel serves the full payload; keep the
+    # truncated view too so the UI can render either.
+    return found
+
+
 class EventTailerManager:
     """管理 per-run_id 的文件 tailer 线程，产出事件到线程安全队列。"""
 

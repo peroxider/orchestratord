@@ -169,6 +169,30 @@ def test_codex_dual_descriptors_resolve_to_same_implementation() -> None:
     )
 
 
+def test_codex_descriptor_forces_preferred_runtime() -> None:
+    """Resolving a codex descriptor forwards ``extra_metadata["prefer"]``.
+
+    ``resolve_backend("codex-app-server")`` must construct the backend with
+    ``prefer="as"`` (streaming deltas lit) and ``resolve_backend("codex-cli")``
+    with ``prefer="cli"`` (Cli-only bits) — bypassing the runtime probe.
+    Per ``DESIGN_backends_hardening.md`` §1.2 / §3.2.
+    """
+    descs = discover_descriptors()
+    if "codex-cli" not in descs or "codex-app-server" not in descs:
+        pytest.skip("codex descriptors not installed")
+
+    as_backend = resolve_backend("codex-app-server")
+    caps_as = as_backend.capabilities()
+    assert caps_as.streaming_deltas is True
+    assert caps_as.interrupt is True
+    assert caps_as.approval_hooks is True
+
+    cli_backend = resolve_backend("codex-cli")
+    caps_cli = cli_backend.capabilities()
+    assert caps_cli.streaming_deltas is False
+    assert caps_cli.resumable is True
+
+
 def test_descriptor_entry_point_group_constant() -> None:
     """``DESCRIPTOR_ENTRY_POINT_GROUP`` matches the string used by all backend
     ``pyproject.toml`` files (drift detector relies on this)."""

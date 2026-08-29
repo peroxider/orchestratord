@@ -1783,11 +1783,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/runs/") and "/tool-results/" in path:
-            # /api/runs/{run_id}/tool-results/{call_id}
+            # /api/runs/{run_id}/tool-results/{call_id} — lazy full-text
+            # completion for truncated ToolResult SSE frames.
             parts = path[len("/api/runs/") :].split("/tool-results/")
             if len(parts) == 2:
-                run_id = parts[0]
-                self._send_json({"tool_result": "not yet available"}, status=501)
+                run_id, call_id = parts[0], parts[1]
+                try:
+                    from ..event_tailer import read_tool_result
+
+                    result = read_tool_result(run_id, call_id)
+                except Exception:
+                    logger.exception("tool-results lookup failed run_id=%s", run_id)
+                    result = None
+                if result is None:
+                    self._send_json(
+                        {"error": f"tool result {call_id!r} not found for run {run_id!r}"},
+                        status=404,
+                    )
+                    return
+                self._send_json(result)
                 return
 
         self.send_error(404, "Not Found")

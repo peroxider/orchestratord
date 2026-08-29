@@ -25,6 +25,9 @@ CODEX_CLI_DESCRIPTOR = BackendDescriptor(
     env_prefix="CODEX_",
     launch_header="Codex CLI (legacy fallback path)",
     model_discovery="user",
+    # DESIGN_backends_hardening.md §1.2: resolving this descriptor forces
+    # the Cli runtime (bypasses the `codex app-server --help` probe).
+    extra_metadata={"prefer": "cli"},
 )
 
 CODEX_APP_SERVER_DESCRIPTOR = BackendDescriptor(
@@ -46,4 +49,7 @@ CODEX_APP_SERVER_DESCRIPTOR = BackendDescriptor(
     env_prefix="CODEX_",
     launch_header="Codex AppServer (JSON-RPC over stdio)",
     model_discovery="user",
+    # DESIGN_backends_hardening.md §1.2: resolving this descriptor forces
+    # the AppServer runtime (bypasses the probe).
+    extra_metadata={"prefer": "as"},
 )

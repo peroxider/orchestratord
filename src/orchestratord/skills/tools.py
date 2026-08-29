@@ -12,7 +12,13 @@ from __future__ import annotations
 
 from orchestratord.skills.loader import _split_frontmatter, load_all_skills
 
-__all__ = ["SkillNotFoundError", "build_skill_index", "load_skill", "reset_cached_skills"]
+__all__ = [
+    "SkillNotFoundError",
+    "build_skill_index",
+    "load_skill",
+    "reset_cached_skills",
+    "skill_tool_descriptions",
+]
 
 _SKILLS: list | None = None
 _BY_NAME: dict[str, object] | None = None
@@ -79,3 +85,39 @@ def build_skill_index(*, base_append: str = "") -> str:
     parts.append(index)
     parts.append("调用方式：使用 `load_skill(name='<name>')` 工具获取完整 SKILL.md。")
     return "\n\n".join(parts)
+
+
+def skill_tool_descriptions() -> list[dict[str, object]]:
+    """Return the ``load_skill`` tool description for backend tool surfaces.
+
+    Per ``DESIGN_agent_callable_skills.md`` §3.2, every backend should
+    expose ``load_skill`` to its agent.  The SPI itself has no tool
+    *registration* interface — only the ``tools_allow`` filter and the
+    opaque ``SessionSpec.extra`` channel — so the core publishes this
+    description on every session spec (``extra["skill_tools"]``) and
+    appends ``"load_skill"`` to the allow-list when one is configured.
+    Backends that control their own tool surface (e.g. clawcodex
+    in-process) may forward the description; external-CLI backends at
+    minimum no longer filter the name out.
+    """
+    return [
+        {
+            "name": "load_skill",
+            "description": (
+                "Read the full SKILL.md body for a skill by name "
+                "(kebab-case). Returns the agent-visible Markdown "
+                "documentation without its YAML frontmatter. Raises "
+                "SkillNotFoundError for unknown names."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Skill name, e.g. 'mode-selector'.",
+                    },
+                },
+                "required": ["name"],
+            },
+        }
+    ]

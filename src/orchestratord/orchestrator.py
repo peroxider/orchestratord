@@ -211,6 +211,10 @@ class Orchestrator:
         self.workspace = workspace
         self.agent_runner = agent_runner
         self.stage_runners = stage_runners or {}
+        # SPI AgentBackend — used to back the issue clarifier's single-turn
+        # analysis (DESIGN_decoupling_clawcodex.md §2.6).  ``None`` keeps the
+        # legacy provider-factory clarifier path.
+        self._backend = backend
         # F-REC: optional asciicast capture. When set, every per-session
         # :class:`CompositeProgressSink` built by :meth:`_build_session_sink`
         # registers an :class:`AsciicastSink` so the agent's progress
@@ -381,10 +385,23 @@ class Orchestrator:
                     )
                 return self._clarifier_provider_factory()
 
+            def _build_clarifier_backend_spec() -> Any:
+                """Single-turn plan-only session for clarity analysis
+                (DESIGN_decoupling_clawcodex.md §2.6)."""
+                from .spi.backend import SessionSpec
+
+                return SessionSpec(
+                    cwd=str(workspace_root),
+                    max_turns=1,
+                    permission_mode="plan",
+                )
+
             service = IssueClarifierService(
                 config=clarifier_config,
                 cache=cache,
                 provider_factory=_build_clarifier_provider,
+                backend=self._backend,
+                backend_spec_factory=_build_clarifier_backend_spec,
                 model=getattr(workflow.agent, "model", None),
             )
             self._clarification_gate = IssueClarificationGate(
@@ -3373,6 +3390,11 @@ class Orchestrator:
                                                 and _head_out.strip()
                                                 and _head_out.strip() != _start_sha
                                             )
+                                else:
+                                    # Non-git workspace: git can't answer the
+                                    # question, so fail open rather than
+                                    # discarding a run that did produce files.
+                                    _has_changes = True
                             except Exception:
                                 _has_changes = True  # fail-open
                             if not _has_changes:

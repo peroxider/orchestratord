@@ -411,6 +411,31 @@ class BackendRunner:
         system_prompt: str,
     ) -> SessionSpec:
         """Build a SessionSpec from agent config and session context."""
+        # Expose the agent-callable skill tool to every backend
+        # (DESIGN_agent_callable_skills.md §3.2): append ``load_skill`` to
+        # the allow-list when one is configured, and publish the tool
+        # description via the opaque ``extra`` channel so backends that
+        # control their own tool surface can forward it.
+        tools_allow_cfg = getattr(self.agent_config, "tools_allow", None) or None
+        if tools_allow_cfg is not None:
+            tools_allow: list[str] | None = list(tools_allow_cfg)
+            if "load_skill" not in tools_allow:
+                tools_allow.append("load_skill")
+        else:
+            tools_allow = None
+        extra: dict[str, Any] = (
+            {"runtime_tasks": session._runtime_tasks}
+            if session._runtime_tasks is not None
+            else {}
+        )
+        try:
+            from orchestratord.skills.tools import skill_tool_descriptions
+
+            skill_tools = skill_tool_descriptions()
+            if skill_tools:
+                extra["skill_tools"] = skill_tools
+        except Exception:
+            logger.exception("skill tool description injection failed; continuing")
         return SessionSpec(
             cwd=str(session.workspace.path),
             system_prompt=system_prompt or None,
@@ -421,16 +446,12 @@ class BackendRunner:
             cordis=getattr(self.agent_config, "cordis", None) or None,
             runtime_bin=getattr(self.agent_config, "runtime_bin", None) or None,
             permission_mode=self.agent_config.permission_mode or None,
-            tools_allow=getattr(self.agent_config, "tools_allow", None) or None,
+            tools_allow=tools_allow,
             tools_deny=getattr(self.agent_config, "tools_deny", []) or [],
             env=self._build_env(session),
             resume_session_id=session.run_id or None,
             max_turns=self.max_turns,
-            extra=(
-                {"runtime_tasks": session._runtime_tasks}
-                if session._runtime_tasks is not None
-                else {}
-            ),
+            extra=extra,
         )
 
     def _build_env(self, session: AgentSession) -> dict[str, str]:

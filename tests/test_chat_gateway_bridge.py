@@ -165,3 +165,87 @@ class TestChatGatewayLifecycle(IsolatedAsyncioTestCase):
         finally:
             gateway.stop()
             await control.stop()
+
+
+class TestReadToolResult:
+    """``event_tailer.read_tool_result`` — the lazy GET completion channel.
+
+    Per ``DESIGN_chat_gateway.md`` §3.3: SSE frames truncate ToolResult
+    payloads; this function reads the full content from transcript.jsonl.
+    """
+
+    @staticmethod
+    def _write_transcript(tmp: str, run_id: str, lines: list[str]) -> Path:
+        from orchestratord.paths import SESSIONS_DIR as _unused  # noqa: F401
+        import orchestratord.event_tailer as event_tailer_mod
+
+        session_dir = Path(tmp) / run_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        transcript = session_dir / "transcript.jsonl"
+        transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return transcript
+
+    def test_returns_full_result_and_tool_name(self, tmp_path, monkeypatch):
+        import orchestratord.event_tailer as event_tailer_mod
+
+        run_id = "run-1"
+        call_id = "call-77"
+        lines = [
+            json.dumps({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": call_id, "name": "Read",
+                     "input": {"path": "src/main.py"}}
+                ],
+                "ts": "t1",
+            }),
+            json.dumps({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": call_id,
+                     "is_error": False,
+                     "content": [{"type": "text", "text": "LINE1\nLINE2"}]}
+                ],
+                "ts": "t2",
+            }),
+        ]
+        self._write_transcript(str(tmp_path), run_id, lines)
+        monkeypatch.setattr(event_tailer_mod, "SESSIONS_DIR", tmp_path)
+
+        result = event_tailer_mod.read_tool_result(run_id, call_id)
+        assert result is not None
+        assert result["tool_name"] == "Read"
+        assert result["is_error"] is False
+        assert result["full_content"] == [{"type": "text", "text": "LINE1\nLINE2"}]
+        assert "LINE1\nLINE2" in result["content"]
+
+    def test_unknown_call_id_returns_none(self, tmp_path, monkeypatch):
+        import orchestratord.event_tailer as event_tailer_mod
+
+        run_id = "run-1"
+        lines = [
+            json.dumps({
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call-1", "name": "Read",
+                     "input": {"path": "a.py"}}
+                ],
+            }),
+            json.dumps({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call-1",
+                     "is_error": False, "content": "ok"}
+                ],
+            }),
+        ]
+        self._write_transcript(str(tmp_path), run_id, lines)
+        monkeypatch.setattr(event_tailer_mod, "SESSIONS_DIR", tmp_path)
+
+        assert event_tailer_mod.read_tool_result(run_id, "call-missing") is None
+
+    def test_missing_transcript_returns_none(self, tmp_path, monkeypatch):
+        import orchestratord.event_tailer as event_tailer_mod
+
+        monkeypatch.setattr(event_tailer_mod, "SESSIONS_DIR", tmp_path)
+        assert event_tailer_mod.read_tool_result("no-such-run", "call-1") is None
