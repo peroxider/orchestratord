@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import IssueRecord
+from .models import TERMINAL_STATUSES, IssueRecord, IssueStatus
 
 
 class ClarificationMixin:
@@ -81,6 +81,15 @@ class ClarificationMixin:
         record = self._records.get(issue_id)
         if record is None:
             return None
+        # A clarification wait must NOT be a terminal status: if the issue
+        # previously failed/abandoned (e.g. agent ran out before the
+        # clarifier kicked in), leaving status terminal makes is_terminal()
+        # return True so every later poll says "already handled (registry),
+        # skipping" -- the author's clarification reply is never processed
+        # and the issue is effectively dead. Un-terminate it so the wait
+        # stays alive and the reply can resume processing.
+        if record.status in TERMINAL_STATUSES:
+            record.status = IssueStatus.PENDING
         record.clarification_status = "awaiting_author"
         record.open_questions = list(questions)
         record.clarification_round = max(1, int(round_number))
