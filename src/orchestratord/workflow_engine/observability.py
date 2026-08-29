@@ -1,6 +1,6 @@
 """工作流可观测性集成。
 
-将工作流执行事件集成到 ClawCodex 的可视化和审计体系。
+将工作流执行事件集成到编排器的可视化和审计体系。
 集成点:
 - State Journal NDJSON 事件写入
 - WorkflowProgressSink 进度报告

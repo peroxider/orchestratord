@@ -1,24 +1,9 @@
 """Backend-neutral agent event types.
 
-These dataclasses mirror the clawcodex query-event shapes so the
-orchestrator core can be backend-agnostic.  Each agent backend
-(clawcodex, codex, dsh, hermes, opencode, …) is responsible
-for producing values that match these field shapes; the orchestrator
-consumes them via :class:`agent_runner.AgentRunner` or the SPI
-:class:`orchestratord.spi.backend.AgentBackend`.
-
-Why dataclasses instead of importing clawcodex types directly
-------------------------------------------------------------
-The orchestrator's M3+ design treats clawcodex as *one* agent backend
-among several.  Importing clawcodex query-event types into orchestrator
-core would force every deployment to install the clawcodex package,
-contradicting the "clawcodex is just a backend" goal.  These
-backend-neutral dataclasses break that hard coupling while preserving
-field-by-field compatibility with clawcodex's emitted events.
-
-Field shapes match the clawcodex query-event module.  Optional fields
-default to ``None`` / empty so a backend that doesn't emit a particular
-attribute can still produce a valid value.
+These dataclasses define the backend-neutral event contract consumed by
+the orchestration core.  Backends translate their native protocol into
+these values; optional fields default to ``None`` / empty so a backend
+that does not emit an attribute can still produce a valid event.
 """
 
 from __future__ import annotations
@@ -72,9 +57,8 @@ class PhaseComplete:
     """A logical phase finished.
 
     The orchestrator does not interpret ``phase`` numerically — it is
-    opaque to the orchestrator and surfaced to sinks verbatim.  Numeric
-    values match clawcodex's "agent_run" / "tool_run" / "verification"
-    convention; backends are free to define their own strings.
+    opaque to the orchestrator and surfaced to sinks verbatim. Backends
+    are free to use numbers or strings appropriate to their protocol.
     """
 
     phase: Any = 0

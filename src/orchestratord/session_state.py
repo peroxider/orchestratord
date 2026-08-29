@@ -116,9 +116,6 @@ class AgentSession:
     _save_json_snapshot: Any = field(default=None, init=False, repr=False, compare=False)
 
     # Goal-mode state persisted alongside events for crash recovery.
-    # Serialized from GoalManager.state.to_dict() on session close;
-    # restored via GoalManager.restore() on resume.
-    goal_state: dict | None = None
 
     # Goal-mode state persisted alongside events for crash recovery.
     # Serialized from GoalManager.state.to_dict() on session close;

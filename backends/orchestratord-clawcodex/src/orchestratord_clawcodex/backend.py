@@ -1,12 +1,9 @@
 """ClawcodexBackend — InProcess backend wrapping clawcodex QueryRunner.
 
-Family: InProcess
-Capabilities: streaming_deltas approval_hooks cost_reporting tool_filtering takeover goal_mode resume_detection goal_mode
-
 This is the reference InProcess backend.  It imports ``extensions.api.query``
 directly (the ONLY place in the orchestratord ecosystem outside of
-``orchestratord.adapters.clawcodex`` where this is allowed — it is the
-backend's responsibility to bridge the clawcodex-specific types into the SPI).
+this backend package where this is allowed — it is the backend's
+responsibility to bridge its native types into the SPI).
 
 Per the strangler-fig migration (§6.1):
 - Phase B (current): this backend wraps QueryRunner directly

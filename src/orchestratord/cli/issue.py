@@ -1604,7 +1604,7 @@ def _render_message(msg: dict, turn_counter: int, pending_calls: dict) -> None:
         14:02:24  ◐ Bash pytest tests/test_lock.py · 4 passed
         14:02:24  ✓ Verification gate OK (pytest -x)
         14:02:25  ◐ Git commit -m "fix: per-key lock granularity in flush_batch"
-        14:02:26  ◐ Git push origin clawcodex/AGENTSDK-15
+        14:02:26  ◐ Git push origin orchestratord/AGENTSDK-15
         14:02:31  ✓ PR opened · auto-review-loop subscribed
 
     tool_use + tool_result pairs are merged into a single line by
@@ -2979,7 +2979,7 @@ def _get_diff_target(ws_path: Path) -> str:
 def _fetch_agent_summary(issue_id: str, ws_path: Path) -> str | None:
     """Fetch the agent's run summary from issue comments.
 
-    Returns the first "## ClawCodex Run Complete" comment if found,
+    Returns the first "## Orchestratord Run Complete" comment if found,
     otherwise returns None.
     """
     import json
@@ -3013,7 +3013,7 @@ def _fetch_agent_summary(issue_id: str, ws_path: Path) -> str | None:
                         continue
                     payload = json.loads(line)
                     body = payload.get("body", "")
-                    if "## ClawCodex Run Complete" in body:
+                    if "## Orchestratord Run Complete" in body:
                         # Extract the output excerpt section
                         if "**Output excerpt:**" in body:
                             idx = body.index("**Output excerpt:**")

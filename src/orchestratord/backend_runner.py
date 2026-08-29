@@ -1,18 +1,12 @@
 """BackendRunner — SPI AgentBackend consumer for the orchestrator.
 
 Provides the same ``run()`` interface as ``AgentRunner`` but consumes
-the ``AgentBackend`` Protocol instead of directly calling clawcodex's
-``QueryRunner``.  This is the Phase B entry point for non-clawcodex
-backends (dsh, opencode, codex, hermes, etc.).
+the ``AgentBackend`` Protocol.  It is the backend-neutral production
+entry point for every registered backend.
 
 Phase B design:
-- Does NOT modify ``agent_runner.py`` — the existing event loop is
-  complex and well-tested; rewriting it against EventEnvelope is a
-  separate concern.
-- Provides a *second* runner implementation that the Orchestrator
-  can use when a non-clawcodex backend is configured.
-- The clawcodex path (AgentRunner → QueryRunner) is unchanged and
-  remains the default for backward compatibility.
+- Provides the backend-neutral execution implementation used by the
+  orchestrator and the compatibility ``AgentRunner`` wrapper.
 """
 
 from __future__ import annotations
@@ -53,10 +47,8 @@ _NOOP_DETECTION_MAX_TURNS = 5
 class BackendRunner:
     """Execute an issue via an AgentBackend (SPI Protocol).
 
-    This is the Phase B counterpart to ``AgentRunner``.  Where
-    ``AgentRunner`` hardcodes ``QueryRunner`` from the clawcodex
-    adapter, ``BackendRunner`` accepts any ``AgentBackend``
-    implementation and drives it through the SPI.
+    ``BackendRunner`` accepts any ``AgentBackend`` implementation and
+    drives it through the SPI.
 
     The ``run()`` signature is intentionally identical to
     ``AgentRunner.run()`` so that the ``Orchestrator`` can swap

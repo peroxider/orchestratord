@@ -1,8 +1,5 @@
 """CodexBackend — Cli/SdkProcess backend wrapping the ``codex`` binary.
 
-Family: Cli
-Capabilities: streaming_deltas resumable interrupt approval_hooks parallel_sessions goal_mode resume_detection goal_mode
-
 The backend probes ``codex app-server --help`` at construction time:
 
 * exit code 0 → uses :class:`CodexAppServerSession` (SdkProcess — adds
@@ -74,7 +71,23 @@ def _detect_runtime() -> _RuntimeKind:
     exception (the historical safe default).
     """
     try:
-        return "as" if asyncio.run(_probe_app_server()) else "cli"
+        # ``asyncio.run()`` cannot be nested.  Backend construction may
+        # happen inside the daemon's event loop, in which case probing is
+        # deferred to an explicit preflight and the safe CLI runtime is used.
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            probe = _probe_app_server()
+            try:
+                return "as" if asyncio.run(probe) else "cli"
+            except Exception:
+                # A mocked or broken event-loop runner can reject before
+                # consuming the coroutine; close it to avoid an unawaited
+                # coroutine warning during error fallback.
+                probe.close()
+                raise
+        logger.debug("codex runtime probe deferred inside a running event loop")
+        return "cli"
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("codex runtime probe failed, defaulting to cli: %s", exc)
         return "cli"

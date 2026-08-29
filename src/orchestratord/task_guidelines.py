@@ -3,8 +3,8 @@
 This guidance is surfaced so agents see the same TaskCreate/TaskUpdate
 semantics whether they are running in an interactive session or were
 launched by the orchestrator. The text is internalized here rather than
-pulled from clawcodex, since it is fundamentally a prompt instruction
-that the orchestrator as "task assigner" has the right to define.
+defined by the orchestrator, since it is fundamentally a prompt instruction
+that the task assigner has the right to define.
 """
 
 from __future__ import annotations

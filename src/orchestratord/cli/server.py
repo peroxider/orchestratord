@@ -1143,7 +1143,7 @@ def _run_orchestrator(
     from orchestratord.orchestration_subsystem import OrchestrationSubsystem
 
     # Validate only the selected SPI backend. Discovery keeps legacy backend
-    # names such as ``clawcodex`` and ``codex`` stable while pre-flight runs
+    # backend names stable while pre-flight runs
     # before any session is created.
     spi_backend = None
     if backend is not None:

@@ -104,7 +104,7 @@ class Command(str, Enum):
 
 
 def parse_agent_command(body: str | None) -> Command | None:
-    """Extract a ClawCodex operator command from a comment body.
+    """Extract an orchestrator operator command from a comment body.
 
     Recognized forms (case-insensitive, anywhere in the body):
       - ``/agent retry [reason...]``

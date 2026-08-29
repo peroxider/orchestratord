@@ -2,7 +2,7 @@
 
 每个 backend 包通过 entry_point ``orchestratord.backend_descriptors``
 注册一个或多个 :class:`BackendDescriptor`。每个 descriptor 描述一个具体的
-runtime 身份（如 ``clawcodex-dev`` 这一可执行）以及它所属的协议家族。
+runtime 身份（如 ``example-backend``）以及它所属的协议家族。
 
 与 :class:`orchestratord.spi.backend.AgentBackend` 的区别：
 
@@ -43,13 +43,13 @@ class BackendDescriptor:
     """
 
     name: str
-    """全局唯一标识（descriptor key）。如 ``"clawcodex-dev"``。"""
+    """全局唯一标识（descriptor key）。如 ``"example-backend"``。"""
     display_name: str
-    """用户可见名。如 ``"Claw Codex"``。"""
+    """用户可见名。如 ``"Example Backend"``。"""
     family: BackendFamily
     """协议家族 — 取代 `_classify_family` 启发式。"""
     backend_package: str
-    """拥有此 runtime 的 orchestratord-* 包名（带连字符），如 ``"orchestratord-clawcodex"``。"""
+    """拥有此 runtime 的 orchestratord-* 包名（带连字符）。"""
     capabilities: frozenset[str]
     """声明的 capability 位名（不含 ``None`` 默认）。如 ``frozenset({"streaming_deltas"})``。"""
     cli_command: str | None = None

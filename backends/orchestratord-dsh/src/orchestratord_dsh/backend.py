@@ -1,7 +1,5 @@
 """DshBackend — SdkProcess backend wrapping deepseek-harness-sdk.
 
-Family: Cli
-Capabilities: resumable parallel_sessions cost_reporting goal_mode goal_mode
 """
 
 from __future__ import annotations
@@ -21,12 +19,7 @@ class DshBackend:
     Each ``create_session()`` spawns one harness process (1:1 mapping
     because the SDK's provider/model are process-level, not per-session).
 
-    Note: the SPI family classifier (``_classify_family``) returns
-    ``Cli`` because the reported bits do not satisfy the SdkProcess
-    heuristic. We mirror that here so the drift detector stays green;
-    a future SDK release that lights up ``interrupt + approval_hooks +
-    streaming_deltas`` would justify re-elevating the Family to
-    SdkProcess.
+    Protocol-family metadata is declared in ``descriptor.py``.
     """
 
     name = "dsh"

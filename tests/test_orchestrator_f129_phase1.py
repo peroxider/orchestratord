@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -80,6 +81,7 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
 
         await runner_broadcast_to_socket(session, PhaseComplete(phase=1, turn_count=1))
 
+    @unittest.skipIf(os.name == "nt", "Unix-domain socket transport is unavailable on Windows")
     async def test_broadcast_sends_to_connected_client(self) -> None:
         """A connected client receives the broadcast frame."""
         from orchestratord.agent_runner import AgentSession

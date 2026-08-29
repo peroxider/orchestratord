@@ -488,7 +488,7 @@ class Orchestrator:
             )
             composite.add(activity_sink)
         # F-REC: when a capture handle is wired (typically by the
-        # ``clawcodex record`` CLI or by ``report_writer.write`` dual-
+        # the report CLI or by ``report_writer.write`` dual-
         # write), attach an :class:`AsciicastSink` so phase / session
         # markers land in the .cast. Defensive try/except mirrors the
         # IM-sink block above — recording failures must never block
@@ -1351,7 +1351,7 @@ class Orchestrator:
                 if issue.id in self._state.running:
                     launched_this_poll += 1
                     # CLI retry is a one-shot. The
-                    # operator's `clawcodex-dev orchestrator issue
+                    # operator's orchestrator issue command
                     # retry --mode reset` already wrote `registry.intent`
                     # with `intent_source="cli"`; now that the launch
                     # has started, clear it so the next poll does NOT
@@ -1397,7 +1397,7 @@ class Orchestrator:
              / `agent:blocked`).
           2. Comment-based command (Sub-D: `/agent retry` / `/agent
              follow-up` / `/agent unblock`).
-          3. Registry-based CLI intent (Sub-E: `clawcodex-dev
+          3. Registry-based CLI intent (Sub-E: orchestrator
              orchestrator issue retry --mode reset|followup|unblock`
              writes `registry.intent` with `intent_source="cli"`).
 
@@ -1556,7 +1556,7 @@ class Orchestrator:
              prevents the LLM-self-trigger risk where a bot
              accidentally writes `/agent retry` in its own reply
              and the daemon can't tell it wasn't a human.
-          3. The bot itself (`clawcodex`) is always allowed so the
+          3. The orchestrator service account is always allowed so the
              CLI fallback (`/agent retry` from a local operator
              routed through the bot) isn't rejected. NOTE: the CLI
              path doesn't actually go through this code path; this
@@ -1591,7 +1591,7 @@ class Orchestrator:
 
         Per the design acceptance criteria: "用户在 issue comment 发
         `/agent retry`,且非原作者时,**daemon 拒绝执行**并发评论
-        `## ClawCodex: 仅 issue 作者或 maintainer 可触发 /agent retry`".
+        `## Orchestratord: 仅 issue 作者或 maintainer 可触发 /agent retry`".
         """
         issue_id = issue.id or ""
         body = (
@@ -2187,7 +2187,7 @@ class Orchestrator:
         ``_state.running`` and did nothing else. That left ``has_conflict``
         set on the registry record, so ``_process_pending_rebase_conflicts``
         re-launched a fresh agent_rebase run on every poll -> an infinite
-        loop (repeated "## ClawCodex Run Summary / Run in progress."
+        loop (repeated "## Orchestratord Run Summary / Run in progress."
         placeholder comments, and 任务已启动/任务完成 oscillation on IM), and
         because the rebase path never runs ``git_sync`` or emits a
         ``pr=``-bearing event, the PR link never reached Feishu/IM.
@@ -3169,6 +3169,20 @@ class Orchestrator:
                 ) from exc
         return self.stage_runners.get(session.run_kind, self.agent_runner)
 
+    async def run_task(self, task: AgentTask) -> AgentTaskResult:
+        """Execute a backend-neutral work unit through the configured runner.
+
+        This is the public Layer-2 entry point for callers that do not
+        originate from a tracker issue.  Issue polling continues to own its
+        tracker and Git lifecycle, while direct task callers receive the
+        structured Layer-1 result without inheriting Issue-specific hooks.
+        """
+        runner = self.stage_runners.get(task.kind, self.agent_runner)
+        run_task = getattr(runner, "run_task", None)
+        if not callable(run_task):
+            raise TypeError(f"runner for task kind {task.kind!r} does not implement run_task()")
+        return await run_task(task)
+
     async def _run_issue(self, session: AgentSession) -> None:
         """Run agent for one issue with concurrency control."""
         async with self._semaphore:
@@ -3473,7 +3487,7 @@ class Orchestrator:
                                     # Do NOT cleanup workspace — human needs to review it
                                     return
 
-                        # ClawCodex downstream-deviation (TODO upstream-merge):
+                        # Downstream compatibility deviation (TODO upstream-merge):
                         # salvage override — when the widened gate above let
                         # us attempt git_sync for a non-completed agent
                         # termination, but the sync actually produced a real
@@ -3996,7 +4010,7 @@ class Orchestrator:
         """确保 review commit 包含 review metadata。
 
         规则提取已从 follow-up 流水线中移除，改为 CLI 命令
-        ``clawcodex rules extract`` 手动触发。
+        ``orchestratord rules extract`` 手动触发。
         Commit message 中已由 ``GitSyncService`` 写入 review
         metadata（review-pr / review-id），供 CLI extract 命令
         扫描 commit log 时解析。

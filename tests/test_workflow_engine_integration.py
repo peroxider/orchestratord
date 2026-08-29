@@ -294,6 +294,7 @@ class TestOrchestrationSubsystemPlumbing(unittest.TestCase):
         subsystem = OrchestrationSubsystem(
             wf_config,
             workflow_yaml_path="/path/to/workflow.yaml",
+            backend=MagicMock(),
         )
         self.assertEqual(subsystem._workflow_yaml_path, "/path/to/workflow.yaml")
 
@@ -312,5 +313,5 @@ class TestOrchestrationSubsystemPlumbing(unittest.TestCase):
             }
         )
 
-        subsystem = OrchestrationSubsystem(wf_config)
+        subsystem = OrchestrationSubsystem(wf_config, backend=MagicMock())
         self.assertIsNone(subsystem._workflow_yaml_path)

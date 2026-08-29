@@ -440,7 +440,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ClawCodex Orchestrator LiveView</title>
+  <title>Orchestratord LiveView</title>
   <style>
     :root {
       --bg-0: #0b0f17;
@@ -764,7 +764,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="header">
       <div class="brand">
         <div class="logo"></div>
-        <div>ClawCodex <span class="muted">·</span> Orchestrator LiveView</div>
+        <div>Orchestratord <span class="muted">·</span> LiveView</div>
       </div>
       <div class="meta">
         <div class="kv">Workspace <b id="hdr-workspace" class="mono">…</b></div>
@@ -1684,7 +1684,7 @@ def _build_dashboard_html() -> str:
 class DashboardHandler(BaseHTTPRequestHandler):
     """HTTP handler serving the dashboard UI, JSON snapshots, and SSE events."""
 
-    server_version = "ClawCodexDashboard/1.0"
+    server_version = "OrchestratordDashboard/1.0"
     state: DashboardState  # set on the class by run()
 
     # Quieter logs — one line per request is too noisy for a polling UI.

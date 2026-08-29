@@ -211,7 +211,7 @@ def _normalize_command(command: object) -> str:
 def _is_standalone_command(body: str | None, commands: set[str]) -> bool:
     """Return whether a comment consists only of an ignored slash command.
 
-    An optional leading mention is accepted so ``@clawcodex /lgtm`` is
+    An optional leading mention is accepted so ``@orchestratord /lgtm`` is
     treated identically to ``/lgtm``. Commands embedded in prose, or with
     additional instructions, deliberately remain actionable.
     """

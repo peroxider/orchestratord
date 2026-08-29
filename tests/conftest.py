@@ -38,7 +38,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.install_cli_shims import install_cli_shims
+from install_cli_shims import install_cli_shims
 
 # Backend packages (orchestratord_codex / _opencode / _clawcodex / _dsh /
 # _hermes) live in this monorepo under ``backends/<name>/src`` but are not

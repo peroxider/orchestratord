@@ -101,8 +101,7 @@ def discover_descriptors() -> dict[str, BackendDescriptor]:
 def _resolve_implementation_class(package_name: str) -> type | None:
     """从 ``orchestratord.backends`` entry_points 表里按 *package_name* 找实现类。
 
-    *package_name* 是 descriptor 中的连字符形式（如
-    ``"orchestratord-clawcodex"``）；与 entry-point 加载后的
+    *package_name* 是 descriptor 中的连字符形式；与 entry-point 加载后的
     ``cls.__module__`` 取首段（带下划线形式）做相等性匹配。
     """
     expected_module = package_name.replace("-", "_")

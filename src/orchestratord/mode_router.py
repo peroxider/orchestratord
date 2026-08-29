@@ -42,7 +42,6 @@ class RouterResult:
     reason: str
     confidence: float = 0.5
     goal_condition: str | None = None
-    goal_condition: str | None = None
 
 
 @runtime_checkable

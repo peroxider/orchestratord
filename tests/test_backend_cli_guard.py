@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from orchestratord._backend_cli_registry import KNOWN_BACKEND_CLIS, binary_names, lookup
-from scripts.install_cli_shims import install_cli_shims
+from install_cli_shims import install_cli_shims
 
 
 @pytest.fixture

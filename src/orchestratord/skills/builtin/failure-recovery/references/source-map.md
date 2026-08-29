@@ -10,5 +10,5 @@ loader 在启动期校验：文件存在 + 行号内容 hash 匹配。
 |---|---|---|---|
 | "FailureContext 上下文字段（timeout/attempt/delay 等）" | src/orchestratord/failure_messages.py | 34-44 | 12b336de |
 | "_retry_hint 重试提示决策（自动重试 vs 人工介入）" | src/orchestratord/failure_messages.py | 47-56 | 7c555c83 |
-| "_schedule_retry 重试调度入口" | src/orchestratord/orchestrator.py | 4166-4175 | 426e6a37 |
-| "_process_retry_queue 重试队列消费" | src/orchestratord/orchestrator.py | 4358-4368 | 4fbe9db6 |
+| "_schedule_retry 重试调度入口" | src/orchestratord/orchestrator.py | 4166-4175 | 8a73d006 |
+| "_process_retry_queue 重试队列消费" | src/orchestratord/orchestrator.py | 4358-4368 | 01c8a7ca |

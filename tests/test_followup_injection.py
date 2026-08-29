@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
@@ -12,6 +13,10 @@ from orchestratord.control_socket import ControlCommand, ControlSocket
 from orchestratord.session_state import AgentSession
 
 
+@__import__("unittest").skipUnless(
+    hasattr(asyncio, "start_unix_server") or os.name != "nt",
+    "Unix-domain control transport is not available on Windows",
+)
 class TestFollowupInjection(IsolatedAsyncioTestCase):
     """Tests for the followup command in _drain_control_commands."""
 

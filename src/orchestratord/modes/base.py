@@ -62,7 +62,6 @@ class ModeDecision:
     agents: list[str] = field(default_factory=list)
     confidence: float = 1.0
     goal_condition: str | None = None
-    goal_condition: str | None = None
 
 
 @runtime_checkable

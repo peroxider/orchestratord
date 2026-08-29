@@ -51,10 +51,3 @@ class BackendCapabilities:
     # "can I create a session that resumes" bit; ``resume_detection`` is
     # the "can I tell whether the remote still has the transcript" bit.
     resume_detection: bool = False
-    # resume_detection (DESIGN_graded_timeouts_and_resume.md §2.4, ADR-003):
-    # True iff the backend can answer probe_resume() with a meaningful
-    # RESUMED / REJECTED verdict. False means the backend MUST return
-    # ResumeStatus.UNDETECTABLE.  Note: ``resumable`` is the orthogonal
-    # "can I create a session that resumes" bit; ``resume_detection`` is
-    # the "can I tell whether the remote still has the transcript" bit.
-    resume_detection: bool = False

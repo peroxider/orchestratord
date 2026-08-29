@@ -1,7 +1,7 @@
 """Backward-compatible name for the backend-neutral runner.
 
-Agent execution belongs to an :class:`AgentBackend`.  The former module
-contained a ClawCodex-specific implementation; it is intentionally gone.
+Agent execution belongs to an :class:`AgentBackend`.  This compatibility
+module intentionally contains no concrete backend implementation.
 """
 
 from __future__ import annotations
