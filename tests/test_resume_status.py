@@ -2,12 +2,15 @@
 
 DESIGN_graded_timeouts_and_resume.md §2.5 / §3.5 verification matrix:
 
-  * clawcodex   → RESUMED   (real probe via SDK)
   * codex (AS)  → RESUMED   (real probe via MCP)
   * codex (CLI) → UNDETECTABLE (no cross-process state)
   * dsh         → UNDETECTABLE (SDK has no probe)
   * hermes      → REJECTED    (explicitly unsupported)
   * opencode    → RESUMED   (real probe via session/load HTTP)
+
+The ClawcodexBackend cases live in
+``backends/orchestratord-clawcodex/tests/test_resume_status.py``
+because they stub the clawcodex SDK runtime namespace.
 
 When ``resume_session_id`` is None the session is fresh, so all
 backends return RESUMED (vacuously true).
@@ -18,80 +21,10 @@ Each test stubs the SDK call path so the test runs offline.
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
-
-
-# ---------------------------------------------------------------------------
-# ClawcodexBackend
-# ---------------------------------------------------------------------------
-
-
-class TestClawcodexProbeResume:
-    def test_no_resume_session_id_returns_resumed(self) -> None:
-        from orchestratord_clawcodex.session import ClawcodexSession
-
-        spec = SessionSpec(cwd="/tmp")
-        session = ClawcodexSession(spec)
-        try:
-            status = asyncio.run(session.probe_resume())
-            assert status is ResumeStatus.RESUMED
-        finally:
-            session.close_sync()
-
-    def test_sdk_probe_true_returns_resumed(self) -> None:
-        from orchestratord_clawcodex.session import ClawcodexSession
-
-        spec = SessionSpec(cwd="/tmp", resume_session_id="sess-x")
-        session = ClawcodexSession(spec)
-        try:
-            fake_query = SimpleNamespace(
-                QueryRunner=SimpleNamespace(
-                    probe_transcript=lambda *a, **kw: True
-                ),
-                QueryConfig=lambda **kw: None,
-            )
-            with patch.dict("sys.modules",
-                            {"extensions.api.query": fake_query}):
-                status = asyncio.run(session.probe_resume())
-                assert status is ResumeStatus.RESUMED
-        finally:
-            session.close_sync()
-
-    def test_sdk_probe_false_returns_rejected(self) -> None:
-        from orchestratord_clawcodex.session import ClawcodexSession
-
-        spec = SessionSpec(cwd="/tmp", resume_session_id="sess-gone")
-        session = ClawcodexSession(spec)
-        try:
-            fake_query = SimpleNamespace(
-                QueryRunner=SimpleNamespace(
-                    probe_transcript=lambda *a, **kw: False
-                ),
-                QueryConfig=lambda **kw: None,
-            )
-            with patch.dict("sys.modules",
-                            {"extensions.api.query": fake_query}):
-                status = asyncio.run(session.probe_resume())
-                assert status is ResumeStatus.REJECTED
-        finally:
-            session.close_sync()
-
-    def test_sdk_missing_returns_undetectable(self) -> None:
-        from orchestratord_clawcodex.session import ClawcodexSession
-
-        spec = SessionSpec(cwd="/tmp", resume_session_id="sess-x")
-        session = ClawcodexSession(spec)
-        try:
-            with patch.dict("sys.modules",
-                            {"extensions.api.query": None}):
-                status = asyncio.run(session.probe_resume())
-                assert status is ResumeStatus.UNDETECTABLE
-        finally:
-            session.close_sync()
 
 
 # ---------------------------------------------------------------------------
