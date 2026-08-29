@@ -36,8 +36,8 @@ from ..paths import ORCHESTRATOR_DIR, ORCHESTRATORD_BASE
 # ---------------------------------------------------------------------------
 # Issue status taxonomy
 # ---------------------------------------------------------------------------
-# These constants MUST stay in sync with extensions.orchestrator.issue_registry
-# .IssueStatus. We re-declare them here so the dashboard server can be loaded
+# These constants MUST stay in sync with the orchestrator core's IssueStatus
+# enum. We re-declare them here so the dashboard server can be loaded
 # even when the orchestrator is not installed in the same interpreter, and so
 # the strings are stable for the frontend.
 
