@@ -1419,8 +1419,17 @@ CHAT_HTML = r"""<!DOCTYPE html>
       border: 1px solid var(--line); border-radius: 8px; font-size: 12px;
     }
     .tool-card .tool-name { font-weight: 600; color: var(--purple); }
-    .tool-card .tool-result { color: var(--fg-2); margin-top: 4px; }
+    .tool-card .tool-params { font-size: 11px; color: var(--fg-3); margin-top: 2px; font-family: monospace; }
+    .tool-card .tool-result { color: var(--fg-2); margin-top: 4px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; }
+    .tool-card .tool-result.pending { color: var(--fg-3); font-style: italic; }
     .tool-card .tool-result.truncated { color: var(--warn); }
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; padding: 48px 24px; text-align: center; color: var(--fg-2);
+    }
+    .empty-state-icon { font-size: 40px; margin-bottom: 12px; opacity: 0.6; }
+    .empty-state-title { font-size: 15px; font-weight: 600; margin-bottom: 8px; color: var(--fg-1); }
+    .empty-state-text { font-size: 12px; max-width: 360px; line-height: 1.5; }
     .input-bar {
       padding: 12px 18px; border-top: 1px solid var(--line);
       display: flex; gap: 8px; background: var(--bg-1);
@@ -1441,16 +1450,12 @@ CHAT_HTML = r"""<!DOCTYPE html>
     }
     .status-chip.paused { background: var(--warn); color: #000; }
     .status-chip.running { background: var(--accent); color: #fff; }
-    .empty-state {
-      display: flex; align-items: center; justify-content: center;
-      height: 100%; color: var(--fg-3); font-size: 14px;
-    }
   </style>
 </head>
 <body>
 <div class="app">
   <div class="sidebar">
-    <div class="sidebar-header">Active Runs</div>
+    <div class="sidebar-header">Active Runs <span style="font-weight:400;color:var(--accent);font-size:10px" id="srv-ts">v2</span></div>
     <div class="run-list" id="run-list"></div>
   </div>
   <div class="main">
@@ -1479,10 +1484,20 @@ let eventSource = null;
 let pendingMessages = {};
 
 // ---- Run list ----
+let currentIssueId = null;
 async function loadRuns() {
   const resp = await fetch('/api/runs');
   const data = await resp.json();
   const list = document.getElementById('run-list');
+  // Check if current run was replaced by a followup (new run, same issue)
+  if (currentRunId && currentIssueId) {
+    const cur = data.runs.find(r => r.run_id === currentRunId);
+    const followup = data.runs.find(r => r.issue_id === currentIssueId && r.run_id !== currentRunId);
+    if (!cur && followup) {
+      selectRun(followup.run_id);
+      return;
+    }
+  }
   list.innerHTML = data.runs.map(r => {
     const dotClass = r.status === 'running' ? 'running' :
                      r.status === 'completed' ? 'completed' : 'failed';
@@ -1492,12 +1507,24 @@ async function loadRuns() {
       <div class="run-meta">${r.run_id.slice(0,8)}... · ${r.status}</div>
     </div>`;
   }).join('');
+  // Show server timestamp to verify page freshness
+  const tsEl = document.getElementById('srv-ts');
+  if (tsEl && data.server_ts) {
+    tsEl.textContent = 'srv:' + new Date(data.server_ts * 1000).toISOString().slice(11,19);
+  }
 }
 
 // ---- Run selection ----
-function selectRun(runId) {
+async function selectRun(runId) {
   if (eventSource) { eventSource.close(); eventSource = null; }
   currentRunId = runId;
+  // Look up issue_id for auto-switch on followup
+  try {
+    const resp = await fetch('/api/runs');
+    const data = await resp.json();
+    const run = data.runs.find(r => r.run_id === runId);
+    currentIssueId = run ? run.issue_id : null;
+  } catch(e) { currentIssueId = null; }
   document.getElementById('messages').innerHTML = '';
   currentStreamingBubble = null;
   document.getElementById('msg-input').disabled = false;
@@ -1511,7 +1538,9 @@ function selectRun(runId) {
 }
 
 // ---- SSE ----
+let sessionEnded = false;
 function connectSSE(runId) {
+  sessionEnded = false;
   eventSource = new EventSource('/api/runs/' + runId + '/events');
   eventSource.onmessage = function(e) {
     const msg = JSON.parse(e.data);
@@ -1522,13 +1551,18 @@ function connectSSE(runId) {
     } else if (msg.type === 'frame') {
       renderFrame(msg.frame);
     } else if (msg.type === 'RunEnded') {
-      document.getElementById('msg-input').disabled = true;
-      document.getElementById('btn-send').disabled = true;
+      sessionEnded = true;
+      eventSource.close();
+      document.getElementById('msg-input').disabled = false;
+      document.getElementById('btn-send').disabled = false;
+      document.getElementById('msg-input').placeholder = 'Follow-up message (Enter to send)...';
       document.getElementById('status-chip').innerHTML = '<span class="status-chip">ended</span>';
     }
   };
   eventSource.onerror = function() {
-    setTimeout(() => { if (currentRunId) connectSSE(currentRunId); }, 2000);
+    if (!sessionEnded && currentRunId) {
+      setTimeout(() => { if (currentRunId) connectSSE(currentRunId); }, 2000);
+    }
   };
 }
 
@@ -1536,12 +1570,40 @@ function connectSSE(runId) {
 function renderHistory(messages) {
   const container = document.getElementById('messages');
   container.innerHTML = '';
+  if (!messages || messages.length === 0) {
+    container.innerHTML = '<div class="empty-state">'
+      + '<div class="empty-state-icon">&#128172;</div>'
+      + '<div class="empty-state-title">No Session History</div>'
+      + '<div class="empty-state-text">The agent has not produced any output yet. '
+      + 'If the session is still running, live events will appear here shortly. '
+      + 'If the session has completed, there may be no transcript recorded.</div>'
+      + '</div>';
+    return;
+  }
   messages.forEach(m => {
     const role = m.role;
     if (role === 'user' || role === 'human') {
       appendMessage('user', formatContent(m.content));
     } else if (role === 'assistant') {
-      appendMessage('agent', formatContent(m.content));
+      // Only show text content in bubbles; tool blocks are handled below
+      const text = formatContent(m.content);
+      if (text) appendMessage('agent', text);
+    } else if (role === 'system') {
+      if (m.content) {
+        appendMessage('system', m.content);
+      }
+    }
+    // role === 'tool' — rendered as tool card only, no bubble
+    // Render tool cards from content blocks
+    if (Array.isArray(m.content)) {
+      m.content.forEach(block => {
+        if (block.type === 'tool_use') {
+          appendToolCard(block.name || '?', block.id || '', block.params || null);
+        } else if (block.type === 'tool_result') {
+          const output = block.content || '';
+          updateLastToolCard(output, output.length > 2000);
+        }
+      });
     }
   });
 }
@@ -1551,8 +1613,6 @@ function formatContent(content) {
   if (Array.isArray(content)) {
     return content.map(b => {
       if (b.type === 'text') return b.text || '';
-      if (b.type === 'tool_use') return '[Tool: ' + (b.name || '?') + ']';
-      if (b.type === 'tool_result') return '[Result]';
       return '';
     }).join('');
   }
@@ -1572,7 +1632,8 @@ function renderFrame(frame) {
     scrollToBottom();
   } else if (type === 'ToolCallEvent') {
     const toolName = frame.data?.tool_name || '?';
-    appendToolCard(toolName, null);
+    const toolId = frame.data?.tool_use_id || '';
+    appendToolCard(toolName, toolId, frame.data?.params);
   } else if (type === 'ToolResultEvent') {
     const result = frame.data?.result || {};
     const output = result.output || '';
@@ -1602,13 +1663,16 @@ function appendMessage(role, text) {
   return div;
 }
 
-function appendToolCard(toolName, result) {
+function appendToolCard(toolName, toolId, params) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'tool-card';
-  div.innerHTML = '<div class="tool-name">' + escapeHtml(toolName) + '</div>' +
-    (result ? '<div class="tool-result' + (result.length > 500 ? ' truncated' : '') + '">' +
-     escapeHtml(result.slice(0, 500)) + (result.length > 500 ? '...' : '') + '</div>' : '');
+  let html = '<div class="tool-name">' + escapeHtml(toolName) + '</div>';
+  if (params && Object.keys(params).length > 0) {
+    html += '<div class="tool-params">' + escapeHtml(JSON.stringify(params).slice(0, 200)) + '</div>';
+  }
+  html += '<div class="tool-result pending">Waiting for result...</div>';
+  div.innerHTML = html;
   container.appendChild(div);
   scrollToBottom();
   return div;
@@ -1620,12 +1684,13 @@ function updateLastToolCard(output, truncated) {
   const last = cards[cards.length - 1];
   const resultDiv = last.querySelector('.tool-result');
   if (resultDiv) {
-    resultDiv.textContent = output.slice(0, 500) + (truncated ? '...' : '');
+    resultDiv.classList.remove('pending');
+    resultDiv.textContent = output.slice(0, 2000) + (truncated ? '... (truncated)' : '');
     if (truncated) resultDiv.classList.add('truncated');
   } else if (output) {
     const div = document.createElement('div');
     div.className = 'tool-result' + (truncated ? ' truncated' : '');
-    div.textContent = output.slice(0, 500) + (truncated ? '...' : '');
+    div.textContent = output.slice(0, 2000) + (truncated ? '...' : '');
     last.appendChild(div);
   }
   scrollToBottom();
@@ -1783,6 +1848,31 @@ def _followup_completed_run(workspace: Path, run_id: str, text: str) -> bool:
         issue_id,
         run_id,
     )
+
+    # Persist the follow-up message in the old session's transcript so it
+    # survives page refreshes.  The transcript is a JSONL file at
+    # ~/.orchestratord/sessions/<run_id>/transcript.jsonl.
+    try:
+        from pathlib import Path as _Path
+
+        from ..paths import SESSIONS_DIR
+
+        transcript_path = _Path(SESSIONS_DIR) / run_id / "transcript.jsonl"
+        if transcript_path.exists():
+            entry = json.dumps(
+                {
+                    "role": "user",
+                    "content": text,
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+            )
+            with open(transcript_path, "a", encoding="utf-8") as tf:
+                tf.write(entry + "\n")
+    except Exception:
+        logger.exception(
+            "Failed to append followup to transcript run_id=%s", run_id
+        )
+
     return True
 
 
@@ -1801,7 +1891,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
@@ -1811,7 +1901,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.end_headers()
         self.wfile.write(body)
 
@@ -1868,7 +1958,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                         "status": issue["status"],
                         "workspace_path": issue.get("workspace_path", ""),
                     })
-            self._send_json({"runs": runs})
+            self._send_json({"runs": runs, "server_ts": time.time()})
             return
 
         if path.startswith("/api/runs/") and path.endswith("/events"):
@@ -2041,15 +2131,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Subscribe first so frames produced while history is being read are
         # buffered rather than silently lost at the history/live boundary.
         live = gw.subscribe(run_id)
-        if live is None:
-            self._write_sse({"type": "RunEnded", "data": {"run_id": run_id}})
-            return
 
-        # Then replay history and mark the boundary before consuming the
-        # already-buffered live stream.
+        # Always replay history — even for completed sessions where
+        # subscribe() returns None because the control socket is gone.
         history = gw.read_history(run_id)
         self._write_sse({"type": "history", "messages": history})
         self._write_sse({"type": "boundary"})
+
+        if live is None:
+            self._write_sse({"type": "RunEnded", "data": {"run_id": run_id}})
+            # Give the browser a moment to process the history + RunEnded
+            # events before closing the connection.  Without this delay,
+            # EventSource may fire onerror before onmessage, causing the
+            # history to be silently dropped.
+            time.sleep(0.5)
+            return
 
         # Stream live frames.
         try:

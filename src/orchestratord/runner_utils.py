@@ -10,6 +10,7 @@ decoupling refactor.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -121,12 +122,37 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
             "turn_complete": "TurnComplete",
             "session_complete": "SessionComplete",
         }
-        await session.control_socket.send_event(
-            {
-                "type": type_map.get(kind_value, event.__class__.__name__),
-                "data": _event_to_broadcast_dict(event),
-            }
-        )
+        frame = {
+            "type": type_map.get(kind_value, event.__class__.__name__),
+            "data": _event_to_broadcast_dict(event),
+        }
+        await session.control_socket.send_event(frame)
+        # Persist to transcript so the chat UI can replay history
+        # after a page refresh — even when the dashboard was not
+        # connected during the session.
+        _write_transcript_frame(session.run_id, frame)
+    except Exception:
+        pass
+
+
+def _write_transcript_frame(run_id: str, frame: dict) -> None:
+    """Append a frame to the session transcript JSONL file.
+
+    Best-effort: failures are silently ignored so a full disk or
+    permission error never breaks the agent run.
+    """
+    try:
+        import time as _time
+        from pathlib import Path as _Path
+
+        sessions_dir = _Path.home() / ".orchestratord" / "sessions"
+        transcript_path = sessions_dir / run_id / "transcript.jsonl"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = dict(frame)
+        entry["ts"] = _time.time()
+        line = json.dumps(entry, ensure_ascii=False, default=str)
+        with open(transcript_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
     except Exception:
         pass
 

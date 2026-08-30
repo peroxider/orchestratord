@@ -91,20 +91,57 @@ def read_history_direct(run_id: str) -> list[dict[str, Any]]:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                role = entry.get("role", "unknown")
-                content = entry.get("content", "")
-                ts = entry.get("ts", "")
-                messages.append(
-                    {
-                        "role": role,
-                        "content": content,
-                        "ts": ts,
-                    }
-                )
+                # Two formats coexist:
+                # 1. Classic transcript: {"role": "...", "content": "...", "ts": "..."}
+                # 2. Live frames:       {"type": "TextDelta|ToolCallEvent|...", "data": {...}}
+                if "role" in entry:
+                    messages.append(
+                        {
+                            "role": entry.get("role", "unknown"),
+                            "content": entry.get("content", ""),
+                            "ts": entry.get("ts", ""),
+                        }
+                    )
+                elif "type" in entry:
+                    messages.append(_frame_to_history_entry(entry))
     except (FileNotFoundError, OSError):
         return []
 
     return messages
+
+
+def _frame_to_history_entry(frame: dict[str, Any]) -> dict[str, Any]:
+    """Convert a live SSE frame to a history entry for the chat UI."""
+    frame_type = frame.get("type", "")
+    data = frame.get("data", {}) or {}
+    ts = frame.get("ts", "")
+
+    if frame_type == "TextDelta":
+        return {"role": "assistant", "content": data.get("content", ""), "ts": ts}
+    if frame_type == "ToolCallEvent":
+        return {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "name": data.get("tool_name", "?"), "id": data.get("tool_use_id", "")}],
+            "ts": ts,
+        }
+    if frame_type == "ToolResultEvent":
+        output = ""
+        result = data.get("result", {}) or {}
+        if isinstance(result, dict):
+            output = result.get("output", "") or str(result)[:500]
+        else:
+            output = str(result)[:500]
+        return {
+            "role": "tool",
+            "content": [{"type": "tool_result", "tool_use_id": data.get("tool_use_id", ""), "content": output}],
+            "ts": ts,
+        }
+    if frame_type == "TurnComplete":
+        return {"role": "system", "content": f"Turn {data.get('turn', '?')} complete", "ts": ts}
+    if frame_type == "SessionComplete":
+        return {"role": "system", "content": f"Session ended: {data.get('reason', '?')}", "ts": ts}
+    # Unknown frame type — skip.
+    return {"role": "system", "content": "", "ts": ts}
 
 
 def read_tool_result(run_id: str, call_id: str) -> dict[str, Any] | None:
