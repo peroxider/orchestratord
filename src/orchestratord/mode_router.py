@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 import httpx
 
 if TYPE_CHECKING:
-    from .tracker import Issue
+    from .issue import Issue
 
 logger = logging.getLogger(__name__)
 

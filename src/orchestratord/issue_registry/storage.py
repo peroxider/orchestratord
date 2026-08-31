@@ -10,7 +10,7 @@ from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 
-from ..tracker import Intent
+from ..intent import Intent
 from .models import IssueRecord, IssueStatus
 
 logger = logging.getLogger(__name__)

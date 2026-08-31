@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
-from ..tracker import Intent
+from ..intent import Intent
 
 
 class IssueStatus(str, Enum):

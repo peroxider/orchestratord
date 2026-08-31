@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from ..tracker import Intent
+from ..intent import Intent
 from .models import IssueRecord, IssueStatus
 
 
