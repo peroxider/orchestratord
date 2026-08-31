@@ -54,6 +54,63 @@ Different agent runtimes have very different capabilities — streaming deltas, 
 
 ## Install
 
+### One-click deploy (recommended)
+
+For new users, the bundled `install.sh` script clones the repo, creates an isolated virtualenv at `~/.orchestratord/venv`, installs the core daemon, and optionally installs any backend plugins — including auto-detecting locally-built agent runtimes (e.g. `clawcodex` source) before installing their wrapper package.
+
+```bash
+git clone https://github.com/<org>/orchestratord
+cd orchestratord
+./install.sh                              # interactive: prompts to pick backends
+./install.sh --backends clawcodex,codex   # non-interactive: specific backends
+./install.sh --no-backends                # core daemon only
+./install.sh --all-backends               # all backends
+./install.sh --dry-run                    # preview without changes
+```
+
+The script:
+
+1. Verifies prerequisites — Python ≥ 3.11, `git`, `pip`; uses `uv` automatically when available.
+2. Creates `${ORCHESTRATORD_INSTALL_PREFIX:-~/.orchestratord}/venv` (use `--no-venv` to install into the current interpreter instead).
+3. Installs orchestratord from the local checkout (editable) — or clones from `ORCHESTRATORD_REPO` / branch when invoked outside a source tree.
+4. Probes each selected backend for its native runtime:
+
+   | Backend     | Runtime check                                                   | Source / install hint                                                                  |
+   | ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+   | `clawcodex` | `extensions/api/query.py` importable from `CLAWCODEX_SOURCE`     | local checkout (auto-detects `~/clawcodex`, `~/clawcodex-ascend`, `/opt/clawcodex`)    |
+   | `claude`    | `claude` or `ccb` on `PATH`                                     | `npm i -g @anthropic-ai/claude-code`                                                   |
+   | `codex`     | `codex` on `PATH`                                               | `npm i -g @openai/codex`                                                               |
+   | `dsh`       | `import deepseek_harness_sdk` + `dsh` on `PATH`                 | `pip install deepseek-harness-sdk`                                                     |
+   | `hermes`    | `hermes` on `PATH`                                              | upstream repository                                                                    |
+   | `opencode`  | `opencode` on `PATH`                                            | `npm i -g opencode`                                                                    |
+
+   If a runtime is missing, the script prints the install hint and (in interactive mode) asks whether to install the wrapper package anyway.
+
+5. Installs each backend wrapper from `backends/orchestratord-<name>/` (editable) or from PyPI.
+6. Runs `orchestratord --help` and lists discovered backends / skills.
+
+Activate the venv afterwards:
+
+```bash
+source ~/.orchestratord/activate.sh
+# or, equivalently:
+export PATH="$HOME/.orchestratord/venv/bin:$PATH"
+```
+
+Useful environment overrides:
+
+```bash
+ORCHESTRATORD_REPO=https://github.com/<org>/orchestratord   # clone URL when no local source
+ORCHESTRATORD_BRANCH=main                                  # branch to checkout
+ORCHESTRATORD_INSTALL_PREFIX=/opt/orchestratord            # override ~/.orchestratord
+CLAWCODEX_SOURCE=/path/to/clawcodex                        # skip clawcodex auto-detection
+NO_COLOR=1                                                 # disable colored output
+```
+
+See `./install.sh --help` for the full option list (custom prefix, specific Python interpreter, dry-run, etc.).
+
+### Manual install (PyPI)
+
 The core daemon and the backends are separate PyPI packages. Pick one (or more) backends:
 
 ```bash
