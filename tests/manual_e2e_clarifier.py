@@ -22,10 +22,10 @@ from typing import Any, Generator
 
 import pytest
 
-from orchestratord.clarification import ClarificationConfig, ClarificationResolver
-from orchestratord.clarification_queue import ClarificationQueue, ClarificationStatus
+from orchestratord.issue_clarifier.resolver import ClarificationConfig, ClarificationResolver
+from orchestratord.issue_clarifier.queue import ClarificationQueue, ClarificationStatus
 from orchestratord.config.schema import ClarifierConfig
-from orchestratord.issue import Issue
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.issue_clarifier import ClarifierCache, IssueClarifierService
 from orchestratord.issue_clarifier.gate import IssueClarificationGate
 from orchestratord.issue_registry import IssueRegistry

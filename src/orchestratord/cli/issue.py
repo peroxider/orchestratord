@@ -2082,7 +2082,7 @@ def _run_clarify(
         print("error: --answer is required unless --forward-to-author is used", file=sys.stderr)
         return 2
 
-    from orchestratord.clarification_queue import ClarificationQueue
+    from orchestratord.issue_clarifier.queue import ClarificationQueue
     from orchestratord.issue_registry import IssueRegistry
 
     queue_path = (

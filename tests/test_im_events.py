@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestratord.channel_sink import (
+from orchestratord.sinks.channel import (
     ChannelProgressSink,
     build_gateway_deliver,
 )
@@ -1171,7 +1171,7 @@ def test_mount_gateway_flushes_pending_outbound_after_accepted_heartbeat(monkeyp
 @pytest.mark.asyncio
 async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
     """A server-pushed DELIVER frame dispatches to the bound handlers."""
-    from orchestratord.channel_sink import build_ipc_deliver
+    from orchestratord.sinks.channel import build_ipc_deliver
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
         OrchestratorHandlers,
@@ -1664,7 +1664,7 @@ async def test_orchestrator_pending_outbound_concurrent_flush_no_index_error() -
 @pytest.mark.asyncio
 async def test_build_ipc_deliver_sends_outbound_via_im_client() -> None:
     """build_ipc_deliver ships formatted events over the IM client."""
-    from orchestratord.channel_sink import build_ipc_deliver
+    from orchestratord.sinks.channel import build_ipc_deliver
 
     sent: list[str] = []
 
@@ -1783,7 +1783,7 @@ def test_orchestrator_control_stop_emits_im_event() -> None:
 
 @pytest.mark.asyncio
 async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path) -> None:
-    from orchestratord.clarification_queue import ClarificationQueue
+    from orchestratord.issue_clarifier.queue import ClarificationQueue
     from orchestratord.cli.issue import _run_review
     from orchestratord.issue_registry import IssueRegistry, IssueStatus
     from orchestratord.orchestrator import Orchestrator

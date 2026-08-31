@@ -22,9 +22,9 @@ from .workflow_state import StageNode, WorkflowState
 if TYPE_CHECKING:
     from ..backend_runner import BackendRunner as AgentRunner
     from ..session_state import AgentSession
-    from ..agent_task_runner import AgentTaskRunner
+    from ..agent.runner import AgentTaskRunner
     from ..config.schema import AgentConfig, SandboxConfig, WorkflowConfig
-    from ..issue import Issue
+    from ..issue_registry.issue import Issue
     from ..workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -264,7 +264,7 @@ class StageRunner:
         parent_issue: Any = None,
     ) -> "AgentSession | None":
         """Build synthetic work unit and execute via AgentRunner or AgentTaskRunner."""
-        from ..issue import Issue
+        from ..issue_registry.issue import Issue
         from ..workspace import Workspace
         from ..session_state import AgentSession
 
@@ -272,7 +272,7 @@ class StageRunner:
 
         # If a task_runner is available, use the new AgentTask path.
         if self._task_runner is not None:
-            from ..agent_task import AgentTask
+            from ..agent.task import AgentTask
 
             task = AgentTask(
                 id=f"stage-{stage_node.id:02d}",
@@ -370,7 +370,7 @@ class StageRunner:
         sink = self._progress_reporter
         if sink is None:
             return
-        from ..agent_task import ProgressEventKind
+        from ..agent.task import ProgressEventKind
 
         try:
             if event.kind is ProgressEventKind.TEXT and hasattr(sink, "on_text"):

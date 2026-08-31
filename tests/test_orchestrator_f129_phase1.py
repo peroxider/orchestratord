@@ -69,7 +69,7 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
     async def test_broadcast_no_socket_is_noop(self) -> None:
         """Broadcasting with control_socket=None must not raise."""
         from orchestratord.agent_runner import AgentSession
-        from orchestratord.issue import Issue
+        from orchestratord.issue_registry.issue import Issue
         from orchestratord.workspace import Workspace
 
         session = AgentSession(
@@ -86,7 +86,7 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
         """A connected client receives the broadcast frame."""
         from orchestratord.agent_runner import AgentSession
         from orchestratord.control_socket import ControlSocket, send_cmd  # noqa: F401
-        from orchestratord.issue import Issue
+        from orchestratord.issue_registry.issue import Issue
         from orchestratord.workspace import Workspace
         from orchestratord.events.agent_events import PhaseComplete
 

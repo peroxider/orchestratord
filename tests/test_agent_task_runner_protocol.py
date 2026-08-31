@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 
-from orchestratord.agent_task_runner import AgentTaskRunner
+from orchestratord.agent.runner import AgentTaskRunner
 from orchestratord.backend_runner import BackendRunner
 from orchestratord.orchestrator import Orchestrator
 

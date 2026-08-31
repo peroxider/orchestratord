@@ -12,8 +12,8 @@ import pytest
 
 from orchestratord import modes as mode_registry
 from orchestratord.config.schema import WorkflowConfig
-from orchestratord.git_sync import VerificationFailed
-from orchestratord.issue import Issue
+from orchestratord.git.sync import VerificationFailed
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.mode_router import HeuristicRouter
 from orchestratord.mode_selector import ModeSelector
 from orchestratord.modes.swarm import SwarmModeRunner

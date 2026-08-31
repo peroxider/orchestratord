@@ -13,7 +13,7 @@ from .parser import parse_clarify_response
 from .prompt import build_clarify_messages
 
 if TYPE_CHECKING:
-    from ..issue import Issue
+    from ..issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 

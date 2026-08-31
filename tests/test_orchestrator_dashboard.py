@@ -22,7 +22,7 @@ from orchestratord.config.schema import (
     WorkflowConfig,
     WorkspaceConfig,
 )
-from orchestratord.issue import Issue
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.orchestrator import Orchestrator
 from orchestratord.status_dashboard import SessionStatus, StatusDashboard
 from orchestratord.tracker import TrackerAdapter

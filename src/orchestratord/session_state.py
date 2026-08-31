@@ -16,12 +16,12 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .issue import Issue
-from .issue_state_cache import IssueStateCache
+from .issue_registry.issue import Issue
+from .issue_registry.cache import IssueStateCache
 from .workspace import Workspace
 
 if TYPE_CHECKING:
-    from .agent_task import AgentTask
+    from .agent.task import AgentTask
 
 
 @dataclass

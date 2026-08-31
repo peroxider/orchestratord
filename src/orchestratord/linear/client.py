@@ -8,7 +8,7 @@ from typing import Any
 
 import aiohttp
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 from ..title_prefix_filter import matches_title_prefixes, normalize_title_prefix_match, normalize_title_prefixes
 
 logger = logging.getLogger(__name__)

@@ -11,25 +11,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .git_utils import (
+from .utils import (
     get_current_branch,
     get_default_branch,
     get_file_status,
     get_repo_root,
     run_git as _run_git,
 )
-from .config.schema import AgentConfig, HooksConfig, PrTemplateConfig
-from . import report_writer
-from .issue import Issue
-from .prompt_builder import resolve_python_executable
-from .tracker import (
+from ..config.schema import AgentConfig, HooksConfig, PrTemplateConfig
+from .. import report_writer
+from ..issue_registry.issue import Issue
+from ..prompt_builder import resolve_python_executable
+from ..tracker import (
     PullRequestCapability,
     PullRequestMaintenanceCapability,
     PullRequestRef,
     TrackerAdapter,
     supports,
 )
-from .workspace import Workspace
+from ..workspace import Workspace
 
 logger = logging.getLogger(__name__)
 

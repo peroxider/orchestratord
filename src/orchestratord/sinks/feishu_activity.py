@@ -36,9 +36,9 @@ if TYPE_CHECKING:
     class CardUpdateCapability(Protocol):
         async def send_placeholder_card(self, chat_id: str, card: dict) -> str | None: ...
         async def update_progress_card(self, message_id: str, card: dict) -> bool: ...
-    from .session_state import AgentSession
-    from .progress_sink import ProgressSink
-    from .status_dashboard import SessionStatus, StatusDashboard
+    from ..session_state import AgentSession
+    from .progress import ProgressSink
+    from ..status_dashboard import SessionStatus, StatusDashboard
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +380,7 @@ def _build_card(
 
 # Protocol satisfaction at import time (helps the type checker + Stage 1 imports).
 def __build_sink_protocol_satisfaction() -> type["ProgressSink"]:
-    from .progress_sink import ProgressSink
+    from .progress import ProgressSink
 
     return ProgressSink
 

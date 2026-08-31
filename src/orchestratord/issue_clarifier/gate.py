@@ -10,8 +10,8 @@ from .models import ClarifyResult
 from .service import IssueClarifierService, format_clarification_request
 
 if TYPE_CHECKING:
-    from ..clarification import ClarificationResolver
-    from ..issue import Issue
+    from ..issue_clarifier.resolver import ClarificationResolver
+    from ..issue_registry.issue import Issue
     from ..issue_registry import IssueRegistry
     from ..tracker import TrackerAdapter
 

@@ -29,7 +29,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
-from .issue import Issue
+from .issue_registry.issue import Issue
 from .intent import (
     DEFAULT_INTENT_LABELS,
     Command,

@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 from ..title_prefix_filter import (
     matches_title_prefixes,
     normalize_title_prefix_match,

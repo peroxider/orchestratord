@@ -6,9 +6,9 @@ is the only place where Issue fields are mapped to AgentTask fields.
 
 from __future__ import annotations
 
-from orchestratord.agent_task import AgentTask
-from orchestratord.issue import Issue
-from orchestratord.issue_to_task import issue_to_agent_task
+from orchestratord.agent.task import AgentTask
+from orchestratord.issue_registry.issue import Issue
+from orchestratord.issue_registry.task_mapping import issue_to_agent_task
 
 
 def _sample_issue() -> Issue:

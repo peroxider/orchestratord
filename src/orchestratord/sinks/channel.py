@@ -13,8 +13,8 @@ import asyncio
 import logging
 from typing import Any, Callable
 
-from .events.formatter import format_event
-from .events.types import EventLevel, OrchestratorEvent
+from ..events.formatter import format_event
+from ..events.types import EventLevel, OrchestratorEvent
 
 logger = logging.getLogger(__name__)
 

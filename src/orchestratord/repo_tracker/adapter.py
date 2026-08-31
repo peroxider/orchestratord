@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 if TYPE_CHECKING:

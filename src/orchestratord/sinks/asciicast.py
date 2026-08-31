@@ -32,7 +32,7 @@ from orchestratord.events.agent_events import (
 AsciicastCapture = Any
 
 if TYPE_CHECKING:
-    from .session_state import AgentSession
+    from ..session_state import AgentSession
 
 logger = logging.getLogger(__name__)
 

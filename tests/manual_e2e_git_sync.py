@@ -24,13 +24,13 @@ import pytest
 import pytest
 
 from orchestratord.config.schema import AgentConfig, HooksConfig
-from orchestratord.git_sync import (
+from orchestratord.git.sync import (
     GitSyncPostCommitError,
     GitSyncService,
     HookFailedError,
     VerificationFailed,
 )
-from orchestratord.issue import Issue
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.local_tracker.adapter import LocalTrackerAdapter
 from orchestratord.tracker import PullRequestRef
 from orchestratord.workspace import Workspace, WorkspaceConfig, WorkspaceManager

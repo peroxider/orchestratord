@@ -77,3 +77,13 @@ class IssueRegistry(
         self._last_diagnostics_save_monotonic = 0.0
         self._pending_diagnostics_save = False
         self._load()
+
+from .issue import Issue
+from .cache import IssueStateCache
+from .task_mapping import issue_to_agent_task
+
+__all__ += [
+    "Issue",
+    "IssueStateCache",
+    "issue_to_agent_task",
+]

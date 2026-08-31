@@ -9,7 +9,7 @@ See ``DESIGN_agent_task_abstraction.md`` for the full architecture.
 
 from __future__ import annotations
 
-from .agent_task import AgentTask
+from ..agent.task import AgentTask
 from .issue import Issue
 
 

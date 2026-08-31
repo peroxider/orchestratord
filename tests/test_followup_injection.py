@@ -51,7 +51,7 @@ class TestFollowupInjection(IsolatedAsyncioTestCase):
 
     def test_session_has_pending_followups_field(self):
         """AgentSession has _pending_followups field (default factory)."""
-        from orchestratord.issue import Issue
+        from orchestratord.issue_registry.issue import Issue
         from orchestratord.workspace import Workspace
 
         issue = Issue(id="test-1", identifier="test-1", title="test")

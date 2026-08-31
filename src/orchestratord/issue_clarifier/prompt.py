@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
-    from ..issue import Issue
+    from ..issue_registry.issue import Issue
 
 
 _SYSTEM_PROMPT = """You review issue text before an automated coding agent starts.

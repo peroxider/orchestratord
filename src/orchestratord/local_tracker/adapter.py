@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 from ..title_prefix_filter import (
     matches_title_prefixes,
     normalize_title_prefix_match,

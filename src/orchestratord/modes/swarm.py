@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..git_sync import VerificationFailed
+from ..git.sync import VerificationFailed
 from ..task_decomposition import (
     TaskDecomposer,
     build_swarm_prompt,

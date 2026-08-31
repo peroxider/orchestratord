@@ -15,7 +15,7 @@ from .models import Subtask, TaskPlan
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ..issue import Issue
+    from ..issue_registry.issue import Issue
 
     # Optional async LLM client: prompt → response.
     LLMClient = Callable[[str], str | Awaitable[str]]

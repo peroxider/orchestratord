@@ -13,7 +13,7 @@ import re
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 from ..tracker import MergeableStatus, PullRequestFeedback, PullRequestRef
 
 if TYPE_CHECKING:

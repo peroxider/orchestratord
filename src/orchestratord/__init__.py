@@ -7,11 +7,11 @@ from .session_state import AgentSession
 # The public runner is backend-neutral. Keep the historical name as an alias
 # so downstream code can migrate without making a concrete backend implicit.
 AgentRunner = BackendRunner
-from .agent_task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
-from .agent_task_runner import AgentTaskRunner
+from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
+from .agent.runner import AgentTaskRunner
 from .config.schema import WorkflowConfig
-from .issue import Issue
-from .issue_to_task import issue_to_agent_task
+from .issue_registry.issue import Issue
+from .issue_registry.task_mapping import issue_to_agent_task
 from .linear.adapter import LinearAdapter
 from .linear.client import LinearGraphQLClient
 from .local_tracker.adapter import LocalTrackerAdapter

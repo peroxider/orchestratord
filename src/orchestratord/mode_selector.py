@@ -34,7 +34,7 @@ from .modes.base import DEFAULT_MODE, ModeDecision
 
 if TYPE_CHECKING:
     from .mode_router import Router
-    from .issue import Issue
+    from .issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 

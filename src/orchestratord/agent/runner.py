@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Awaitable, Callable, Protocol
 
-from .agent_task import AgentTask, AgentTaskResult, ProgressEvent
+from .task import AgentTask, AgentTaskResult, ProgressEvent
 
 
 class AgentTaskRunner(Protocol):

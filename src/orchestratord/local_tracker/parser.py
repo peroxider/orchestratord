@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 

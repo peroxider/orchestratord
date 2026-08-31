@@ -15,10 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .backend_runner import BackendRunner
-from .agent_task import AgentTask, AgentTaskResult
-from .agent_task_runner import AgentTaskRunner
-from .issue_to_task import issue_to_agent_task
-from .git_utils import (
+from .agent.task import AgentTask, AgentTaskResult
+from .agent.runner import AgentTaskRunner
+from .issue_registry.task_mapping import issue_to_agent_task
+from .git.utils import (
     get_default_branch,
     get_file_status,
     get_repo_root,
@@ -29,7 +29,7 @@ from .runner_utils import _apply_pause_session, _apply_resume_session
 from .config.schema import WorkflowConfig
 from .debug_log import append_debug_event
 from .events import EventLevel
-from .git_sync import (
+from .git.sync import (
     GitSyncPostCommitError,
     GitSyncService,
     HookFailedError,
@@ -37,7 +37,7 @@ from .git_sync import (
     VerificationFailed,
     rebase_for_pr,
 )
-from .issue import Issue
+from .issue_registry.issue import Issue
 from .issue_registry import IssueRegistry, IssueStatus
 from .mode_router import HeuristicRouter, LLMRouter, Router
 from .mode_selector import ModeSelector
@@ -346,11 +346,11 @@ class Orchestrator:
 
         # Clarification handling (three-channel flow)
         clarification_queue_path = workspace_root / ".orchestratord_clarification_queue.json"
-        from .clarification_queue import ClarificationQueue
+        from .issue_clarifier.queue import ClarificationQueue
 
         self._clarification_queue = ClarificationQueue(clarification_queue_path)
 
-        from .clarification import (
+        from .issue_clarifier.resolver import (
             ClarificationConfig,
             ClarificationResolver,
             _DEFAULT_MAX_QUESTIONS_PER_ISSUE,
@@ -462,7 +462,7 @@ class Orchestrator:
         :meth:`CompositeProgressSink.add` without touching
         :class:`AgentRunner` or ``progress_reporter.py``.
         """
-        from .progress_sink import (
+        from .sinks.progress import (
             CompositeProgressSink,
             ToolContextProgressSink,
         )
@@ -475,7 +475,7 @@ class Orchestrator:
         composite = CompositeProgressSink([inner])
         # P3: attach the IM event emitter when a deliver callback is wired.
         if getattr(self, "im_event_deliver", None) is not None:
-            from .channel_sink import ChannelProgressSink
+            from .sinks.channel import ChannelProgressSink
             from .events import OrchestratorEvent, OrchestratorEventEmitter
 
             channel_sink = ChannelProgressSink(self.im_event_deliver)
@@ -501,7 +501,7 @@ class Orchestrator:
         im_adapter = getattr(self, "im_channel_adapter", None)
         if im_adapter is not None and callable(getattr(im_adapter, "send_placeholder_card", None)) \
                 and callable(getattr(im_adapter, "update_progress_card", None)):
-            from .feishu_activity_sink import FeishuActivitySink
+            from .sinks.feishu_activity import FeishuActivitySink
 
             phases_total = (
                 len(self.workflow.agent.phases)
@@ -525,7 +525,7 @@ class Orchestrator:
         capture = getattr(self, "asciicast_capture", None)
         if capture is not None:
             try:
-                from .asciicast_sink import AsciicastSink
+                from .sinks.asciicast import AsciicastSink
 
                 phases_total = (
                     len(self.workflow.agent.phases)
@@ -563,7 +563,7 @@ class Orchestrator:
             deliver = getattr(self, "im_event_deliver", None)
             if deliver is None:
                 return
-            from .channel_sink import ChannelProgressSink
+            from .sinks.channel import ChannelProgressSink
             from .events import OrchestratorEventEmitter
 
             emitter = OrchestratorEventEmitter(issue_id, sinks=[ChannelProgressSink(deliver)])
@@ -4736,7 +4736,7 @@ class Orchestrator:
         emitters = getattr(self, "_im_emitters", {}) or {}
         if not emitters:
             return
-        from .channel_sink import ChannelProgressSink
+        from .sinks.channel import ChannelProgressSink
 
         for emitter in list(emitters.values()):
             add_sink = getattr(emitter, "add_sink", None)

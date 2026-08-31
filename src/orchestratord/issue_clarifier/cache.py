@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable
 
 if TYPE_CHECKING:
-    from ..issue import Issue
+    from ..issue_registry.issue import Issue
     from .models import ClarifyResult
 
 logger = logging.getLogger(__name__)

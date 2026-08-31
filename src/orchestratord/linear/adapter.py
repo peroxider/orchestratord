@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ..tracker import Comment, TrackerAdapter
-from ..issue import Issue
+from ..issue_registry.issue import Issue
 from .client import LinearGraphQLClient
 
 if TYPE_CHECKING:

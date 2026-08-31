@@ -7,7 +7,7 @@ import re
 import time
 from dataclasses import dataclass
 
-from .issue import Issue
+from .issue_registry.issue import Issue
 from .issue_registry import IssueRecord, IssueRegistry
 from .tracker import (
     PullRequestFeedback,

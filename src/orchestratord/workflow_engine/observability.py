@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING
 from ..state_journal import StateJournalWriter
 
 if TYPE_CHECKING:
-    from ..progress_sink import ProgressSink
+    from ..sinks.progress import ProgressSink
     from .workflow_state import WorkflowState
 
 logger = logging.getLogger(__name__)

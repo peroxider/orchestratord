@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, StrictUndefined, TemplateError
 
-from .agent_task import AgentTask
+from .agent.task import AgentTask
 from .premise_check import build_premise_block, check_issue_premise
 from .rules_learner import RuleEngine
 from .tracker import PullRequestFeedback, PullRequestRef

@@ -56,8 +56,8 @@ from orchestratord.config.schema import (
     SandboxConfig,
     WorkflowConfig,
 )
-from orchestratord.issue import Issue
-from orchestratord.progress_sink import (
+from orchestratord.issue_registry.issue import Issue
+from orchestratord.sinks.progress import (
     CompositeProgressSink,
     ProgressSink,
     ToolContextProgressSink,
@@ -485,7 +485,7 @@ class TestPerSessionIsolation(unittest.TestCase):
             self.assertEqual(len(stages_b), 1)
 
     def test_orchestrator_attaches_activity_sink_via_declared_public_capability(self) -> None:
-        from orchestratord.feishu_activity_sink import FeishuActivitySink
+        from orchestratord.sinks.feishu_activity import FeishuActivitySink
         from orchestratord.orchestrator import Orchestrator
 
         class _Cards:
@@ -514,7 +514,7 @@ class TestPerSessionIsolation(unittest.TestCase):
         assert any(isinstance(child, FeishuActivitySink) for child in sink)
 
     def test_orchestrator_rejects_undeclared_card_shape(self) -> None:
-        from orchestratord.feishu_activity_sink import FeishuActivitySink
+        from orchestratord.sinks.feishu_activity import FeishuActivitySink
         from orchestratord.orchestrator import Orchestrator
 
         class _UndeclaredCards:

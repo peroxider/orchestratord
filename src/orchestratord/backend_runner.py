@@ -29,7 +29,7 @@ from orchestratord.events.agent_events import SessionComplete, TurnComplete
 from .session_state import AgentSession
 from .runner_utils import _broadcast_to_socket, _drain_control_commands
 from .control_socket import ControlSocket
-from .agent_task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
+from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
 from .approval_policy import (
     ApprovalPolicy,
     ToolCallEvent,
@@ -37,7 +37,7 @@ from .approval_policy import (
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
 from .debug_log import append_debug_event
-from .issue import Issue
+from .issue_registry.issue import Issue
 from .prompt_builder import PromptBuilder, resolve_python_executable
 from .tool_event_log import ToolEventLog
 
@@ -182,7 +182,7 @@ class BackendRunner:
         """
         from pathlib import Path
 
-        from .issue import Issue
+        from .issue_registry.issue import Issue
         from .workspace import Workspace
 
         # Build workspace + issue from the task.  ``Issue`` is retained as
@@ -760,7 +760,7 @@ class BackendRunner:
                 # --- Read-only spiral guard ---
                 if session.turn_count > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
                     try:
-                        from orchestratord.git_utils import get_file_status
+                        from orchestratord.git.utils import get_file_status
                         statuses = get_file_status(str(session.workspace.path))
                         ws_dirty = any(
                             s.status not in ("unmodified", "ignored")
@@ -933,7 +933,7 @@ class BackendRunner:
     ) -> bool:
         """Check whether any files have changed since the last snapshot."""
         try:
-            from orchestratord.git_utils import get_file_status
+            from orchestratord.git.utils import get_file_status
 
             current = get_file_status(str(session.workspace.path))
             current_map = {s.path: s for s in current}

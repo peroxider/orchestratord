@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Protocol, runtime_checkable
 from orchestratord.events.agent_events import PhaseComplete, SessionComplete, TurnComplete
 
 if TYPE_CHECKING:
-    from .session_state import AgentSession
+    from ..session_state import AgentSession
 
 logger = logging.getLogger(__name__)
 

@@ -14,3 +14,15 @@ __all__ = [
     "build_fingerprint",
     "format_clarification_request",
 ]
+
+from .resolver import ClarificationConfig, ClarificationResolver, ClarificationResult
+from .queue import ClarificationItem, ClarificationQueue, ClarificationStatus
+
+__all__ += [
+    "ClarificationConfig",
+    "ClarificationItem",
+    "ClarificationQueue",
+    "ClarificationResolver",
+    "ClarificationResult",
+    "ClarificationStatus",
+]

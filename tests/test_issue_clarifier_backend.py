@@ -13,7 +13,7 @@ import json
 import time
 
 from orchestratord.config.schema import ClarifierConfig
-from orchestratord.issue import Issue
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.issue_clarifier import ClarifierCache, IssueClarifierService
 from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.backend import SessionSpec

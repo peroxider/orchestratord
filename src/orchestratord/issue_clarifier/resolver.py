@@ -23,13 +23,13 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .clarification_queue import ClarificationQueue, ClarificationStatus
-from .tracker import Comment, CommentHistoryCapability, supports
-from .paths import ORCHESTRATORD_BASE
+from .queue import ClarificationQueue, ClarificationStatus
+from ..tracker import Comment, CommentHistoryCapability, supports
+from ..paths import ORCHESTRATORD_BASE
 
 if TYPE_CHECKING:
-    from .clarification_queue import ClarificationItem
-    from .tracker import TrackerAdapter
+    from .queue import ClarificationItem
+    from ..tracker import TrackerAdapter
 
 logger = logging.getLogger(__name__)
 

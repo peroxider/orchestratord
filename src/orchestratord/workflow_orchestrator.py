@@ -28,9 +28,9 @@ from .state_journal import StateJournalWriter
 
 if TYPE_CHECKING:
     from .backend_runner import BackendRunner as AgentRunner
-    from .agent_task import AgentTask
-    from .agent_task_runner import AgentTaskRunner
-    from .issue import Issue
+    from .agent.task import AgentTask
+    from .agent.runner import AgentTaskRunner
+    from .issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ class WorkflowOrchestrator:
 
         DEPRECATED: use ``run_for_task()`` with an AgentTask instead.
         """
-        from .issue_to_task import issue_to_agent_task
+        from .issue_registry.task_mapping import issue_to_agent_task
 
         task = issue_to_agent_task(
             issue,

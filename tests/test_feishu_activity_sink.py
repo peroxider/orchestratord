@@ -15,7 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from orchestratord.events.agent_events import PhaseComplete, SessionComplete, TurnComplete
-from orchestratord.feishu_activity_sink import (
+from orchestratord.sinks.feishu_activity import (
     FeishuActivitySink,
     drain_pending_for_test,
 )

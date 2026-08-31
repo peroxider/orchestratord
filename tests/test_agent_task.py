@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from orchestratord.agent_task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
+from orchestratord.agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
 
 
 class TestAgentTask:

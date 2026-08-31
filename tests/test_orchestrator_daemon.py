@@ -37,8 +37,8 @@ from orchestratord.config.schema import (
     PrConflictScanConfig,
     WorkflowConfig,
 )
-from orchestratord.git_sync import PRRebaseResult
-from orchestratord.issue import Issue
+from orchestratord.git.sync import PRRebaseResult
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.issue_registry import (
     IssueRegistry,
     IssueStatus,

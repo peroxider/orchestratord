@@ -238,7 +238,7 @@ class TestWorkflowOrchestratorInit(unittest.TestCase):
         from orchestratord.workflow_orchestrator import (
             WorkflowOrchestrator,
         )
-        from orchestratord.progress_sink import (
+        from orchestratord.sinks.progress import (
             CompositeProgressSink,
             ToolContextProgressSink,
         )

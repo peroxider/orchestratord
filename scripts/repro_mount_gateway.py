@@ -1,10 +1,11 @@
 """Standalone repro for test_mount_gateway_retries_initial_register_failure."""
 
 import asyncio
+import os
 import sys
 from types import SimpleNamespace
 
-sys.path.insert(0, "src")
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from orchestratord.cli import server as server_mod  # noqa: E402
 
