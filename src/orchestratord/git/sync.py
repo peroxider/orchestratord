@@ -218,7 +218,7 @@ class GitSyncService:
             return None
 
         # Check if tracker is LocalTrackerAdapter — skip push/PR for local-only repos
-        from .local_tracker.adapter import LocalTrackerAdapter
+        from ..local_tracker.adapter import LocalTrackerAdapter
 
         is_local_tracker = isinstance(self.tracker, LocalTrackerAdapter)
         workspace_strategy = getattr(session, "workspace_strategy", "isolated")
