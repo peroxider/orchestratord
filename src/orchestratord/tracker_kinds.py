@@ -131,7 +131,7 @@ def default_active_states_for_kind(kind: str) -> list[str]:
     if normalized == "local":
         return ["open", "ready"]
     if normalized == "gitcode":
-        return ["opened"]
+        return ["open"]
     return ["open"]
 
 
