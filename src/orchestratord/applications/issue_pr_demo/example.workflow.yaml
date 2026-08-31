@@ -1,0 +1,193 @@
+# ============================================================================
+# orchestratord — Issue → PR Application Example (Layer 2 / Business Demo)
+# ============================================================================
+#
+# This workflow composes Layer 1 (templates/workflow.yaml.template) into the
+# bundled Issue-to-PR business scenario. It is an *example with annotated
+# pointers* — it documents the composition pattern but does NOT register
+# the namespaced actions itself. Action registration is the job of an
+# installed plugin (e.g. `orchestratord-issue-pr`).
+#
+# Where to register the actions referenced below:
+#   - Any installed PyPI package declaring
+#     [project.entry-points."orchestratord.actions"]
+#     tracker-fetch = "my_pkg.issue_pr:register_tracker_actions"
+#     ...
+#   - Or a process-local register_action("issue_pr.tracker.fetch", fn) call
+#     wired by the operator's startup script.
+#
+# Why namespaced actions instead of business keys in workflow.md?
+#   The core's `orchestratord.actions` entry-point group is the integration
+#   contract. Business apps register their tracker/PR/git operations there,
+#   and workflows consume them via `uses:`. This is what keeps the core
+#   decoupled from issue/PR semantics — the same engine runs ML training,
+#   release pipelines, or any other DAG without modification.
+#
+# Stage DAG:
+#
+#     [1.fetch]──┐
+#                ├──►[3.gate: review]──►[5.decision: ship or refine]──►[7.pr.create]
+#     [2.fetch]──┘                       │
+#                                        └─refine→[4.implement]──►[6.gate: ci]──┐
+#                                                                                ▼
+#                                                                          [7.pr.create]
+#
+# Equivalent legacy form: the historical `workflow.template.md` frontmatter
+# encodes the same flow as a single config blob; the modern `uses:` form
+# makes each step explicit and individually observable.
+# ============================================================================
+
+name: issue-pr-demo
+version: "1.0"
+description: |
+  Bundled Issue-to-PR workflow example. Composes generic orchestrator
+  stages with namespaced business actions. Not directly runnable without
+  an issue_pr action plugin installed.
+
+config:
+  workspace: "{{WORKSPACE_ROOT}}"
+  default_timeout_seconds: 600
+  max_concurrent_stages: 2      # fan-out fetches at stage 1-2 are independent
+  enable_snapshots: true        # required for on_error: rollback on stage 4
+  observability:
+    dashboard_enabled: true
+    refresh_ms: 1000
+
+stages:
+  # ──────────────────────────────────────────────────────────────────────
+  # Layer 2 actions (NOT registered by core). Install an issue_pr plugin
+  # or call register_action() at startup to make these resolvable.
+  # ──────────────────────────────────────────────────────────────────────
+
+  # 1. Parallel fetch — get issue + repo context concurrently.
+  - id: 1
+    name: fetch-issue
+    kind: action
+    # Provided by an installed plugin (e.g. orchestratord-issue-pr).
+    # Action contract (workflow_engine/actions.py:WorkflowAction):
+    #   (config: dict, context: ActionContext) -> ActionResult
+    uses: issue_pr.tracker.fetch
+    with:
+      # The legacy tracker block (workflow.md) tells the plugin which
+      # backend to use (linear/github/gitee/gitcode/local). Here we just
+      # reference it symbolically.
+      tracker_ref: "{{TRACKER_REF}}"
+      issue_id: "{{ISSUE_ID}}"
+      include_comments: true
+    depends_on: []
+    timeout_seconds: 120
+    on_error: fail
+
+  - id: 2
+    name: fetch-repo-context
+    kind: action
+    uses: issue_pr.workspace.clone
+    with:
+      repo_clone_url: "{{REPO_CLONE_URL}}"
+      base_branch: main
+      depth: 1
+    depends_on: []
+    timeout_seconds: 300
+    on_error: fail
+
+  # 3. Manual review gate — operator decides if the issue is clear enough
+  #    for an agent run, or whether to ask for clarification.
+  - id: 3
+    name: review-intake
+    kind: gate
+    gate_mode: manual
+    # No validators for manual gates — the queue notification is enough.
+    depends_on: [1, 2]
+    timeout_seconds: 86400       # one day to approve
+    on_error: fail
+
+  # 4. Implement — agent does the code change.
+  - id: 4
+    name: implement
+    phase: implement
+    prompt: |
+      Read the issue fetched in stage 1 and the repository cloned in
+      stage 2. Implement the smallest change that satisfies the issue's
+      acceptance criteria. Write implementation_notes.md and a one-line
+      summary to changes_summary.md before committing.
+    agent_config:
+      max_turns: 100
+    depends_on: [3]
+    timeout_seconds: 1800
+    max_retries: 2
+    on_error: rollback           # restore workspace on failure
+
+  # 5. Decision — does the agent's output need refinement, or is it ready
+  #    to ship? The `decision_outcomes` keys come from the agent's
+  #    structured response (set by the agent prompt or by a parser).
+  - id: 5
+    name: ship-or-refine
+    kind: decision
+    decision_outcomes:
+      ship:
+        next: 7
+        max_times: 1
+      refine:
+        next: 4
+        max_times: 3             # at most 3 refine cycles
+        on_exhaust: rollback
+        rollback_to: 3            # back to manual intake
+      abandon:
+        # Leave workflow with abandoned marker; no further stages.
+        next: null
+    depends_on: [4]
+    on_error: fail
+
+  # 6. CI gate — auto, runs validators against the implemented branch.
+  - id: 6
+    name: ci-gate
+    kind: gate
+    gate_mode: auto
+    validators:
+      - type: custom
+        command: "ruff check ."
+        expected_exit: 0
+      - type: custom
+        command: "pytest -x"
+        expected_exit: 0
+        timeout: 600
+    depends_on: [5]
+    on_error: rollback
+    gate_rollback_to: 4
+
+  # 7. PR create — push branch and open PR via tracker action.
+  - id: 7
+    name: pr-create
+    kind: action
+    uses: issue_pr.pr.create
+    with:
+      title: "{{ISSUE_TITLE}}"
+      body_file: changes_summary.md
+      base_branch: main
+    depends_on: [6]
+    timeout_seconds: 120
+    on_error: fail
+
+# ============================================================================
+# Companion files in this directory
+# ============================================================================
+#
+# issue-card.template.md
+#   Frontmatter-driven issue card for the local tracker. Mirrors the
+#   fields this workflow expects (tracker.fetch reads id/identifier/title/
+#   state/branch_name/base_branch/labels).
+#
+# README.md
+#   Explains how to wire the namespaced actions in this example to a real
+#   plugin (entry point or in-process register_action), and how to run
+#   the workflow locally.
+#
+# How this maps to legacy workflow.md (workflow.template.md):
+#   workflow.md's tracker/polling/workspace/agent/sandbox/modes blocks are
+#   the daemon-level defaults that drive how THIS workflow.yaml's stages
+#   interact with the outside world. The two files are loaded together:
+#     orchestratord daemon start --workflow workflow.yaml --backend codex
+#   `workflow.md` controls the daemon's polling loop + tracker polling;
+#   `workflow.yaml` controls each run's DAG. The namespaced actions above
+#   bridge the two by reading the tracker config from workflow.md.
+# ============================================================================

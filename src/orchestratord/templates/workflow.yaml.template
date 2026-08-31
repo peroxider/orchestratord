@@ -1,21 +1,241 @@
+# ============================================================================
+# orchestratord — Declarative Workflow Template (GENERIC / Layer 1)
+# ============================================================================
+#
+# This template describes the orchestrator's **declarative stage language**.
+# It is business-agnostic: the same vocabulary composes "issue → PR",
+# "model training → evaluation", "long-running inference pipeline", or any
+# other workflow the operator wants to express.
+#
+# Parsed by:
+#   src/orchestratord/workflow_engine/engine.py:WorkflowSchema.from_yaml
+#   Stage fields parsed by _parse_stage_node() in the same module.
+#
+# Layered design (see applications/issue_pr/ for the bundled business demo):
+#
+#   Layer 1 (this file)
+#     └─ The orchestrator's vocabulary: stages, actions, gates, decisions,
+#        validators, error handling, hooks, modes, observability.
+#        Has zero business assumptions — issue/PR/tracker concerns live in
+#        the legacy workflow.md frontmatter or in dedicated action plugins.
+#
+#   Layer 2 (business applications)
+#     └─ Composed examples that *use* Layer 1 to implement a specific
+#        workflow: applications/issue_pr/example.workflow.yaml shows how
+#        to drive Linear/GitHub through the namespaced uses: form.
+#
+# Generate with:
+#   orchestratord workflow init
+# ============================================================================
+
 name: "{{WORKFLOW_NAME}}"
 version: "1.0"
-description: "Declarative workflow for {{PROJECT_NAME}}"
+description: |
+  Declarative workflow for {{PROJECT_NAME}} — describes stages, validators,
+  gates, decisions, and error handling. Business-specific work is delegated
+  to namespaced actions registered through the `orchestratord.actions`
+  Python entry-point group (see applications/issue_pr/ for an example).
 
+# ────────────────────────────────────────────────────────────────────────
+# Engine-level config
+# ────────────────────────────────────────────────────────────────────────
+config:
+  # Working directory for this run (the orchestrator writes artifacts here).
+  # Each stage receives `workspace_dir` via the StageRunner; agent stages
+  # default their CWD to this path.
+  workspace: "{{WORKSPACE_ROOT}}"
+
+  # Default stage timeout when a stage omits `timeout_seconds` (seconds).
+  # 0 means "use orchestrator default" (currently 600s).
+  default_timeout_seconds: 600
+
+  # Run-stage concurrency cap. Only ACTION stages run concurrently today
+  # (engine._execute_parallel_actions); AGENT/GATE/DECISION stay sequential
+  # because they own rollback semantics. Increase this if your DAG has
+  # many independent action stages (e.g. fan-out fetches).
+  max_concurrent_stages: 1
+
+  # Enable per-stage snapshots so on_error: rollback can restore the prior
+  # workspace state. Disabled by default to keep disk usage predictable.
+  enable_snapshots: false
+
+  # Cost budget for the run (USD). Stages exceeding it raise
+  # CostExceededError; per-stage warnings emitted before the limit.
+  cost_budget:
+    total_usd: 10.00
+    warn_at_pct: 80
+
+  # Observability knobs (TUI dashboard / progress sink).
+  observability:
+    dashboard_enabled: true
+    refresh_ms: 1000
+
+  # Local HTTP control server (pause/resume/cancel endpoints).
+  server:
+    host: 127.0.0.1
+    port: 8765
+
+# ────────────────────────────────────────────────────────────────────────
+# Stages — the DAG
+# ────────────────────────────────────────────────────────────────────────
 stages:
+  # ── Stage 1: AGENT (default kind) ───────────────────────────────────
   - id: 1
-    name: implement
-    kind: agent
-    phase: implementation
-    prompt: Implement the requested work and verify the result.
-    timeout_seconds: 1800
+    name: analyze
+    # kind defaults to "agent" when "uses:" is absent. AGENT stages hand
+    # `prompt` to the selected backend (anthropic/openai/deepseek/...).
+    phase: analyze
+    prompt: |
+      Read the task description and produce a structured analysis.
+    # Agent-specific overrides; falls back to workflow.md `agent:` block.
+    agent_config:
+      max_turns: 50
+      provider: anthropic
+      model: claude-opus-4-7
+    # Validators run after the agent returns. All must pass for the stage
+    # to be marked COMPLETED. See workflow_engine/validators/__init__.py
+    # for the full registry (file_exists / file_size / regex / json_schema
+    # / line_count / llm_judge / custom).
+    validators:
+      - type: file_exists
+        path: analysis.md
+      - type: line_count
+        path: analysis.md
+        min_lines: 10
+    depends_on: []
+    timeout_seconds: 900
+    max_retries: 2
+    # on_error: how the engine reacts when this stage fails/times out.
+    #   fail     — stop the workflow (default)
+    #   skip     — mark COMPLETED so downstream deps proceed
+    #   rollback — restore workspace from snapshot, jump to depends_on[0]
+    on_error: fail
 
+  # ── Stage 2: ACTION (namespaced) ────────────────────────────────────
   - id: 2
+    name: fetch-input
+    kind: action
+    # `uses` is a namespaced action registered through
+    # `orchestratord.actions` entry points. Resolved by
+    # workflow_engine/actions.py:resolve_action. Examples (must be
+    # provided by an installed plugin — not in core):
+    #   uses: issue_pr.tracker.fetch
+    #   uses: ml.dataset.load
+    #   uses: ssh.remote.exec
+    uses: example.fetch
+    # `with` is passed verbatim to the action's `config` argument.
+    with:
+      source: "{{INPUT_SOURCE}}"
+      timeout_seconds: 60
+    depends_on: [1]
+    timeout_seconds: 300
+    on_error: fail
+
+  # ── Stage 3: AGENT (depends on the action's output) ─────────────────
+  - id: 3
+    name: implement
+    phase: implement
+    prompt: |
+      Implement the change described in analysis.md and the fetched input.
+    depends_on: [2]
+    timeout_seconds: 1800
+    max_retries: 3
+    on_error: rollback
+
+  # ── Stage 4: GATE (auto) ────────────────────────────────────────────
+  - id: 4
     name: quality-gate
     kind: gate
-    phase: verification
-    depends_on: [1]
+    # gate_mode options:
+    #   manual    — block until CLI/UI approves (ClarificationQueue)
+    #   auto      — run `validators`, approve iff all pass
+    #   threshold — LLM-as-judge; pass iff score >= gate_threshold
     gate_mode: auto
+    gate_threshold: 0.8        # used only when gate_mode=threshold
+    # When gate_mode=auto, validators list is evaluated. Failed validators
+    # cause gate rejection, which respects on_error below.
     validators:
-      - type: command
-        command: "{{TEST_COMMAND}}"
+      - type: custom
+        command: "ruff check ."
+        expected_exit: 0
+      - type: custom
+        command: "pytest -x"
+        expected_exit: 0
+        timeout: 300
+    depends_on: [3]
+    # on_error: rollback lets the engine restore stage 3's workspace and
+    # retry the implementation; "skip" lets downstream stages continue
+    # (useful for non-blocking advisory checks).
+    on_error: rollback
+    # Optional explicit rollback target (default = depends_on[0]).
+    gate_rollback_to: 3
+
+  # ── Stage 5: DECISION ───────────────────────────────────────────────
+  - id: 5
+    name: post-check
+    kind: decision
+    # DECISION stages read the prior stage's `decision_outcome` and pick
+    # one of the keys below to compute `next_stage`. Use to branch on
+    # agent output (e.g. "proceed" vs "refine" vs "pivot").
+    decision_outcomes:
+      proceed:
+        next: 6
+        # If the same outcome is hit `max_times` times in a row, abort.
+        max_times: 3
+        on_exhaust: rollback
+      refine:
+        next: 3
+        max_times: 5
+        on_exhaust: rollback
+        rollback_to: 1
+      pivot:
+        # Drop back to stage 1 entirely; convergence_check protects
+        # against degenerate loops.
+        next: 1
+        convergence_check: true
+    depends_on: [4]
+    on_error: fail
+
+  # ── Stage 6: terminal ACTION (cleanup / publish) ────────────────────
+  - id: 6
+    name: finalize
+    kind: action
+    uses: example.publish
+    with:
+      target: "{{PUBLISH_TARGET}}"
+    depends_on: [5]
+    timeout_seconds: 120
+    on_error: fail
+
+# ============================================================================
+# Stage field reference (full schema — every key `_parse_stage_node` accepts)
+# ============================================================================
+#
+# id                   int    — DAG node id; unique within stages: list
+# name                 str    — human label, surfaced in events / dashboard
+# kind                 enum   — agent (default) | gate | decision | action
+# phase                str    — semantic phase tag (analyze/implement/...)
+#                              reported in PHASE_COMPLETE events
+# prompt               str    — sent to backend (only meaningful for AGENT)
+# depends_on           list   — DAG edges; stage ids this stage waits on
+# agent_config         dict   — per-stage override of `agent:` in workflow.md
+# uses                 str    — namespaced action name (only for ACTION)
+# with / action_config dict   — passed verbatim to the action's config
+# validators           list   — ContractValidator specs; see validators/__init__
+# gate_mode            enum   — manual | auto | threshold (only for GATE)
+# gate_threshold       float  — judge-pass threshold (only for threshold mode)
+# gate_rollback_to     int    — explicit rollback target on gate rejection
+# decision_outcomes    dict   — outcome → {next, max_times, on_exhaust,
+#                                       rollback_to, convergence_check}
+# timeout_seconds      int    — stage-level timeout (0 = use default)
+# max_retries          int    — automatic retry budget for this stage
+# on_error             enum   — fail (default) | skip | rollback
+#
+# Action registration — see workflow_engine/actions.py:register_action
+#   Custom actions register via either in-process call:
+#     register_action("my.namespace", my_callable)
+#   or through the `orchestratord.actions` entry-point group declared in a
+#   plugin's pyproject.toml:
+#     [project.entry-points."orchestratord.actions"]
+#     my-action = "my_pkg.actions:register"
+# ============================================================================
