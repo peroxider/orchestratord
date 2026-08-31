@@ -120,36 +120,78 @@ class ClawcodexSession:
         """Probe whether the resume target transcript is reachable.
 
         Behavior matrix:
-          * No ``resume_session_id`` set → ``RESUMED`` (nothing to
-            resume, vacuously OK)
-          * ``resume_session_id`` set, QueryRunner not available →
-            ``UNDETECTABLE`` (cannot probe without the SDK)
-          * SDK probe returns OK → ``RESUMED``
-          * SDK probe raises / returns gone → ``REJECTED``
+          * ``resume_session_id`` empty or whitespace-only → ``RESUMED``
+            (nothing meaningful to resume, vacuously OK)
+          * SDK path: ``extensions.api.query.QueryRunner.probe_transcript``
+            exists and returns True/False → ``RESUMED`` /
+            ``REJECTED``. SDK import failure, missing attribute, or
+            probe exception → fall through to the bypass.
+          * Bypass path: ``clawcodex_ext.services.session_storage.resolve_sessions_dir``
+            exists and the directory ``<sessions_dir>/<session_id>`` is
+            present → ``RESUMED``; otherwise ``REJECTED``. Same probe
+            used by the CLI's ``--resume`` flag
+            (``clawcodex_ext/cli/dispatch.py``).
+          * Both paths unavailable → ``UNDETECTABLE``
+          * Either path times out (after ``handshake_timeout_s``,
+            default 30s) → ``UNDETECTABLE``
 
-        The probe is delegated to ``extensions.api.query.QueryRunner.probe_transcript``
-        when available. The SDK call is wrapped in a short timeout
-        (``handshake_timeout_s`` from spec, default 30s) so a hung
-        probe does not stall the orchestrator.
+        Both probes run synchronously on a thread via ``asyncio.to_thread``
+        so a hung filesystem call cannot stall the event loop.
         """
-        if not self._spec.resume_session_id:
-            # No target to probe — fresh session, treat as resumed.
+        if not (self._spec.resume_session_id or "").strip():
+            # No usable target — empty or whitespace-only is treated as
+            # "nothing to resume" and short-circuits to RESUMED. This
+            # also matches the clawcodex ``probe_transcript`` contract
+            # (whitespace-only session_id returns False) by keeping the
+            # two surfaces consistent: a blank target is never rejected.
             return ResumeStatus.RESUMED
+
+        probe_timeout = self._spec.handshake_timeout_s or 30.0
+        session_id = self._spec.resume_session_id
+
+        # --- Path 1: SDK probe (preferred) ---
+        sdk_status = await self._probe_resume_via_sdk(
+            session_id, probe_timeout
+        )
+        if sdk_status is not None:
+            return sdk_status
+
+        # --- Path 2: bypass via session_storage (CLI --resume parity) ---
+        return await self._probe_resume_via_storage(
+            session_id, probe_timeout
+        )
+
+    async def _probe_resume_via_sdk(
+        self, session_id: str, probe_timeout: float
+    ) -> ResumeStatus | None:
+        """Return the SDK probe outcome, or ``None`` to fall through to bypass.
+
+        ``None`` is returned when the SDK module is missing, the
+        ``probe_transcript`` attribute is absent (older clawcodex
+        versions), or the probe raised — in all of these cases the
+        bypass path may still resolve the question.
+        """
         try:
             from extensions.api.query import QueryRunner
         except ImportError:
             logger.debug(
-                "ClawcodexSession.probe_resume: QueryRunner not on "
-                "PYTHONPATH — returning UNDETECTABLE"
+                "ClawcodexSession._probe_resume_via_sdk: QueryRunner not on "
+                "PYTHONPATH — falling back to directory check"
             )
-            return ResumeStatus.UNDETECTABLE
-
+            return None
+        sdk_probe = getattr(QueryRunner, "probe_transcript", None)
+        if not callable(sdk_probe):
+            logger.debug(
+                "ClawcodexSession._probe_resume_via_sdk: "
+                "QueryRunner.probe_transcript missing — falling back to "
+                "directory check"
+            )
+            return None
         try:
-            probe_timeout = self._spec.handshake_timeout_s or 30.0
             ok = await asyncio.wait_for(
                 asyncio.to_thread(
-                    QueryRunner.probe_transcript,
-                    self._spec.resume_session_id,
+                    sdk_probe,
+                    session_id,
                     workspace=self._spec.cwd,
                 ),
                 timeout=probe_timeout,
@@ -157,14 +199,66 @@ class ClawcodexSession:
             return ResumeStatus.RESUMED if ok else ResumeStatus.REJECTED
         except asyncio.TimeoutError:
             logger.warning(
-                "ClawcodexSession.probe_resume: probe timed out after %.1fs — "
-                "returning UNDETECTABLE",
+                "ClawcodexSession._probe_resume_via_sdk: probe timed out "
+                "after %.1fs — falling back to directory check",
+                probe_timeout,
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "ClawcodexSession._probe_resume_via_sdk: probe raised %s — "
+                "falling back to directory check",
+                exc,
+            )
+            return None
+
+    async def _probe_resume_via_storage(
+        self, session_id: str, probe_timeout: float
+    ) -> ResumeStatus:
+        """Bypass: replicate the CLI ``--resume`` directory check.
+
+        Mirrors ``clawcodex_ext/cli/dispatch.py``: the session is
+        reachable iff ``resolve_sessions_dir() / session_id`` is a
+        directory. Workspace isolation is advisory here — clawcodex
+        session storage is global (overridable via ``CLAWCODEX_SESSIONS_DIR``).
+        """
+        try:
+            from clawcodex_ext.services.session_storage import (
+                resolve_sessions_dir,
+            )
+        except ImportError:
+            logger.debug(
+                "ClawcodexSession._probe_resume_via_storage: "
+                "session_storage not on PYTHONPATH — returning UNDETECTABLE"
+            )
+            return ResumeStatus.UNDETECTABLE
+
+        def _check_dir() -> bool:
+            try:
+                return (resolve_sessions_dir() / session_id).is_dir()
+            except Exception:
+                # resolve_sessions_dir may read CLAWCODEX_SESSIONS_DIR;
+                # surface IOError etc. as "not present" rather than
+                # raising into the caller.
+                return False
+
+        try:
+            ok = await asyncio.wait_for(
+                asyncio.to_thread(_check_dir),
+                timeout=probe_timeout,
+            )
+            return ResumeStatus.RESUMED if ok else ResumeStatus.REJECTED
+        except asyncio.TimeoutError:
+            logger.warning(
+                "ClawcodexSession._probe_resume_via_storage: directory "
+                "probe timed out after %.1fs — returning UNDETECTABLE",
                 probe_timeout,
             )
             return ResumeStatus.UNDETECTABLE
         except Exception as exc:
             logger.warning(
-                "ClawcodexSession.probe_resume: probe raised %s — returning REJECTED",
+                "ClawcodexSession._probe_resume_via_storage: directory "
+                "probe raised %s — returning REJECTED",
                 exc,
             )
             return ResumeStatus.REJECTED

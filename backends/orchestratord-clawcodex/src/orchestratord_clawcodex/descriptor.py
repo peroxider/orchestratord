@@ -21,7 +21,12 @@ CLAWCODEX_DEV_DESCRIPTOR = BackendDescriptor(
         "tool_filtering",
         "takeover",
         "goal_mode",
-        # ADR-003: QueryRunner exposes probe_transcript (see session.py).
+        # QueryRunner exposes probe_transcript (see
+        # session.py:probe_resume). The orchestrator-side probe_resume
+        # also falls back to a CLI ``--resume`` directory check via
+        # ``clawcodex_ext.services.session_storage`` when the SDK probe
+        # is unavailable (older clawcodex, broken install, etc.) — see
+        # ClawcodexSession._probe_resume_via_storage.
         "resume_detection",
     }),
     cli_command=None,
