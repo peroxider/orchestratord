@@ -1765,6 +1765,74 @@ def _build_dashboard_html() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _merge_previous_run_history(run_id: str) -> list[dict[str, Any]]:
+    """Merge transcript history from all previous runs of the same issue.
+
+    When a followup creates a new run, the new transcript starts empty.
+    This function collects the full history from every previous run for
+    the same issue so the chat UI preserves the complete conversation
+    context across followup chains.
+
+    Returns an empty list if no previous runs are found.
+    """
+    try:
+        from pathlib import Path as _Path
+
+        from ..event_tailer import read_history_direct
+        from ..paths import SESSIONS_DIR
+
+        # Extract issue_id from run_id: "<timestamp>_<issue_id>"
+        parts = run_id.split("_", 2)
+        if len(parts) < 3:
+            return []
+        issue_id = parts[2]
+
+        # Find all session directories for this issue_id.
+        previous: list[str] = []
+        sessions_dir = _Path(SESSIONS_DIR)
+        if not sessions_dir.exists():
+            return []
+        for entry in sessions_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            name = entry.name
+            if name.endswith("_" + issue_id) and name != run_id:
+                previous.append(name)
+
+        if not previous:
+            return []
+
+        # Sort by name (timestamp prefix) and take all runs older than
+        # the current run_id.
+        previous.sort()
+        candidates = [p for p in previous if p < run_id]
+        if not candidates:
+            return []
+
+        # Merge history from all previous runs in chronological order.
+        merged: list[dict[str, Any]] = []
+        for i, prev_run_id in enumerate(candidates):
+            history = read_history_direct(prev_run_id)
+            if history:
+                merged.extend(history)
+                # Add a marker between runs so the UI can show separators.
+                if i < len(candidates) - 1:
+                    merged.append({
+                        "role": "system",
+                        "content": f"--- Previous session ({prev_run_id[9:15]}) ---",
+                        "ts": "",
+                    })
+        if merged:
+            merged.append({
+                "role": "system",
+                "content": "--- New follow-up session ---",
+                "ts": "",
+            })
+        return merged
+    except Exception:
+        return []
+
+
 def _followup_completed_run(workspace: Path, run_id: str, text: str) -> bool:
     """Queue a follow-up for a completed session.
 
@@ -2135,6 +2203,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # Always replay history — even for completed sessions where
         # subscribe() returns None because the control socket is gone.
         history = gw.read_history(run_id)
+
+        # Merge the previous run's transcript so the user doesn't lose
+        # all prior context when a followup creates a new run.
+        previous = _merge_previous_run_history(run_id)
+        if previous:
+            history = previous + history
+
         self._write_sse({"type": "history", "messages": history})
         self._write_sse({"type": "boundary"})
 
