@@ -16,8 +16,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .issue_registry.issue import Issue
-from .issue_registry.cache import IssueStateCache
 from .workspace import Workspace
 
 if TYPE_CHECKING:
@@ -25,10 +23,38 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class AgentSession:
-    """One active issue run."""
+class RunSubject:
+    """Backend-neutral description of the work attached to a run.
 
-    issue: Issue  # DEPRECATED: use task instead
+    ``AgentSession.issue`` historically carried the tracker domain object all
+    the way into the capability runner.  New generic callers use this small
+    value object instead.  The deprecated ``issue`` attribute name remains on
+    :class:`RunSession` so the issue-to-PR pipeline can migrate independently.
+    """
+
+    id: str
+    identifier: str | None = None
+    title: str = ""
+    description: str = ""
+    labels: list[str] = field(default_factory=list)
+    url: str | None = None
+    state: str | None = None
+    author_login: str | None = None
+    branch_name: str | None = None
+    python_executable: str = ""
+    priority: int | None = None
+
+
+@dataclass
+class RunSession:
+    """One active backend-neutral run.
+
+    ``issue`` is a compatibility slot.  Generic execution stores a
+    :class:`RunSubject`; the issue-to-PR application may still store its
+    tracker ``Issue`` until that business pipeline is migrated.
+    """
+
+    issue: Any  # DEPRECATED compatibility alias; use task/subject data instead
     workspace: Workspace
     task: "AgentTask | None" = None  # NEW: generic task abstraction
     turn_count: int = 0
@@ -73,7 +99,7 @@ class AgentSession:
     # Initialised by ``AgentRunner.run()`` from
     # ``agent_config.perf_should_continue_skip_turns``. When ``None`` the
     # runner falls back to the pre-cache behaviour of always polling.
-    state_cache: "IssueStateCache | None" = None
+    state_cache: Any | None = None
     # List of files git left in conflict state. Populated by
     # ``Orchestrator._prepare_rebase_session`` from
     # ``IssueRecord.conflict_files`` when ``run_kind == "agent_rebase"``.
@@ -121,6 +147,10 @@ class AgentSession:
     # Serialized from GoalManager.state.to_dict() on session close;
     # restored via GoalManager.restore() on resume.
     goal_state: dict | None = None
+
+
+# Backwards-compatible public name used by the issue-to-PR application.
+AgentSession = RunSession
 
 
 @dataclass

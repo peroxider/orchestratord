@@ -29,6 +29,7 @@ class StageKind(str, Enum):
     AGENT = "agent"
     GATE = "gate"
     DECISION = "decision"
+    ACTION = "action"
 
 
 @dataclass
@@ -43,6 +44,8 @@ class StageNode:
     depends_on: list[int] = field(default_factory=list)
     # agent 配置
     agent_config: dict[str, Any] = field(default_factory=dict)
+    uses: str = ""
+    action_config: dict[str, Any] = field(default_factory=dict)
     # 验证器
     validators: list[dict[str, Any]] = field(default_factory=list)
     # GATE 配置
@@ -69,6 +72,10 @@ class StageNode:
     @property
     def is_decision_stage(self) -> bool:
         return self.kind == StageKind.DECISION
+
+    @property
+    def is_action_stage(self) -> bool:
+        return self.kind == StageKind.ACTION
 
 
 @dataclass
@@ -109,7 +116,8 @@ class WorkflowState:
     finished_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     rollback_events: list[dict[str, Any]] = field(default_factory=list)
-    issue_context: dict[str, Any] | None = None  # 来自 Orchestrator 的 issue 上下文
+    run_context: dict[str, Any] | None = None
+    issue_context: dict[str, Any] | None = None  # deprecated checkpoint compatibility
     decision_history: Any = field(default=None)  # DecisionHistory 实例，由检查点恢复时注入
 
     def is_stage_completed(self, stage_id: int) -> bool:

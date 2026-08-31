@@ -21,12 +21,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from orchestratord.spi.backend import AgentBackend, SessionSpec
-from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.session import ResumeStatus
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
 
-from .session_state import AgentSession
+from .session_state import AgentSession, RunSession, RunSubject
 from .runner_utils import _broadcast_to_socket, _drain_control_commands
 from .control_socket import ControlSocket
 from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
@@ -36,10 +35,7 @@ from .approval_policy import (
     get_approval_policy,
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
-from .debug_log import append_debug_event
-from .issue_registry.issue import Issue
-from .prompt_builder import PromptBuilder, resolve_python_executable
-from .tool_event_log import ToolEventLog
+from .prompt_builder import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -182,18 +178,16 @@ class BackendRunner:
         """
         from pathlib import Path
 
-        from .issue_registry.issue import Issue
         from .workspace import Workspace
 
-        # Build workspace + issue from the task.  ``Issue`` is retained as
-        # private compatibility state for the existing SPI session runner;
-        # callers of this API never need to construct or consume one.
+        # Build backend-neutral runtime state.  The compatibility ``issue``
+        # slot carries a RunSubject, never a tracker-domain Issue.
         workspace = Workspace(
             path=Path(task.workspace_path) if task.workspace_path else Path("."),
             issue_identifier=task.context.get("issue_identifier", task.id),
             issue_id=task.context.get("issue_id", task.id),
         )
-        issue = Issue(
+        subject = RunSubject(
             id=task.context.get("issue_id", task.id),
             identifier=task.context.get("issue_identifier"),
             title=task.title,
@@ -206,8 +200,8 @@ class BackendRunner:
             python_executable=task.context.get("issue_python_executable", ""),
             priority=task.priority,
         )
-        session = AgentSession(
-            issue=issue,
+        session = RunSession(
+            issue=subject,
             task=task,
             workspace=workspace,
             run_kind=task.kind,
@@ -397,7 +391,7 @@ class BackendRunner:
         self,
         session: AgentSession,
         workflow: WorkflowConfig,
-        issue: Issue,
+        issue: Any,
         workspace: Any,
     ) -> tuple[str, str]:
         """Build the initial prompt for the agent.

@@ -348,14 +348,17 @@ class WorkflowOrchestrator:
         self._reset_engine_state()
 
         # 将 task 上下文注入到工作流状态中
-        self._engine.state.issue_context = {
+        self._engine.state.run_context = {
             "id": task.id,
             "identifier": task.context.get("issue_identifier"),
             "title": task.title,
             "description": task.description,
             "labels": task.labels,
-            "_issue": task.context.get("parent_issue"),
+            "task": task,
         }
+        # Compatibility for old checkpoints and integrations. New engine
+        # code reads ``run_context``.
+        self._engine.state.issue_context = self._engine.state.run_context
 
         logger.info(
             "WorkflowOrchestrator: running for task %s (%s)",

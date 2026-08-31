@@ -47,10 +47,14 @@ from orchestratord.paths import SESSIONS_DIR
 # ---------------------------------------------------------------------------
 
 
-def add_issue_parser(subparsers: argparse._SubParsersAction) -> None:
+def add_issue_parser(
+    subparsers: argparse._SubParsersAction,
+    *,
+    command_name: str = "issue",
+) -> None:
     """Register ``issue`` sub-subcommands."""
     issue_parser = subparsers.add_parser(
-        "issue",
+        command_name,
         help="Manage individual issues handled by the orchestrator",
         description="List, show, tail, stop, pause, resume, clarify, "
         "inject, or view workspace of issues managed by the orchestrator. "

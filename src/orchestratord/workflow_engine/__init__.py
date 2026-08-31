@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from .actions import ActionContext, ActionResult, WorkflowAction, register_action, resolve_action
 from .checkpoint import ArtifactResolver, Checkpoint, CheckpointManager, WorkflowResumer
 from .cost import CostBudget, CostTracker
 from .decision_handler import DecisionHandler, DecisionHistory, DecisionResult
@@ -54,6 +55,11 @@ __all__ = [
     "EngineConfig",
     "WorkflowResult",
     "WorkflowSchema",
+    "ActionContext",
+    "ActionResult",
+    "WorkflowAction",
+    "register_action",
+    "resolve_action",
     # State
     "WorkflowState",
     "StageNode",

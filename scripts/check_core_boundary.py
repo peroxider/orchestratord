@@ -32,10 +32,46 @@ def _violations(root: Path) -> list[str]:
     return result
 
 
+def _business_boundary_violations(repo: Path) -> list[str]:
+    """Prevent orchestration primitives from importing business packages."""
+    targets = [
+        repo / "src" / "orchestratord" / "agent",
+        repo / "src" / "orchestratord" / "workflow_engine",
+        repo / "src" / "orchestratord" / "backend_runner.py",
+        repo / "src" / "orchestratord" / "session_state.py",
+        repo / "src" / "orchestratord" / "workflow_runtime.py",
+        repo / "src" / "orchestratord" / "run_store.py",
+    ]
+    forbidden = (
+        "issue_registry",
+        "repo_tracker",
+        "local_tracker",
+        "linear",
+        "orchestration_subsystem",
+        "orchestrator",
+    )
+    violations: list[str] = []
+    files: list[Path] = []
+    for target in targets:
+        files.extend(_python_files(target) if target.is_dir() else [target])
+    for path in files:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            module = ""
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+            elif isinstance(node, ast.Import):
+                module = ",".join(alias.name for alias in node.names)
+            if any(part in module.split(".") for part in forbidden):
+                violations.append(f"{path}:{node.lineno}: business import {module}")
+    return violations
+
+
 def main() -> int:
     repo = Path(__file__).resolve().parents[1]
     violations = _violations(repo / "src" / "orchestratord")
     violations += _violations(repo / "tests")
+    violations += _business_boundary_violations(repo)
     pyproject = (repo / "pyproject.toml").read_text(encoding="utf-8")
     if "/mnt/c/WorkSpace/" in pyproject:
         violations.append("pyproject.toml: absolute developer-machine path")

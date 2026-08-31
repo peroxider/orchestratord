@@ -1,0 +1,21 @@
+name: "{{WORKFLOW_NAME}}"
+version: "1.0"
+description: "Declarative workflow for {{PROJECT_NAME}}"
+
+stages:
+  - id: 1
+    name: implement
+    kind: agent
+    phase: implementation
+    prompt: Implement the requested work and verify the result.
+    timeout_seconds: 1800
+
+  - id: 2
+    name: quality-gate
+    kind: gate
+    phase: verification
+    depends_on: [1]
+    gate_mode: auto
+    validators:
+      - type: command
+        command: "{{TEST_COMMAND}}"

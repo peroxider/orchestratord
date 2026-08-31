@@ -14,7 +14,6 @@ Design:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -85,10 +84,10 @@ def _available_templates() -> dict[str, str]:
     templates: dict[str, str] = {}
     for p in tpl_mod.__path__:  # type: ignore[attr-defined]
         for f in Path(p).glob("*.template.md"):
-            name = f.stem  # e.g. "workflow" or "workflow-local"
+            name = f.name.removesuffix(".template.md")
             templates[name] = str(f)
         for f in Path(p).glob("*.yaml.template"):
-            name = f.stem  # e.g. "workflow.yaml"
+            name = f.name.removesuffix(".template")
             templates[name] = str(f)
     return templates
 
@@ -132,7 +131,7 @@ def _fill_placeholders(content: str, values: dict[str, str]) -> str:
 
 
 def add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``workflow`` sub-subcommands (init | list-templates)."""
+    """Register workflow definition management commands."""
     parser = subparsers.add_parser(
         "workflow",
         help="Scaffold and manage orchestrator workflow files",
@@ -165,9 +164,9 @@ def add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
     init_parser.add_argument(
         "--kind",
         "-k",
-        default="github",
+        default="",
         metavar="TRACKER",
-        help="Tracker kind: github, gitcode, gitee, linear, local (default: github)",
+        help="Tracker kind: github, gitcode, gitee, linear, local (inferred from template)",
     )
     init_parser.add_argument(
         "--owner",
@@ -244,11 +243,15 @@ def add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
     )
 
     # --- workflow list-templates ---
-    list_parser = wf_sub.add_parser(
+    wf_sub.add_parser(
         "list-templates",
         help="List available workflow template variants",
         description="Show all packaged template files and their locations.",
     )
+    validate_parser = wf_sub.add_parser("validate", help="Validate a declarative workflow")
+    validate_parser.add_argument("file", metavar="WORKFLOW_YAML")
+    show_parser = wf_sub.add_parser("show", help="Show a declarative workflow summary")
+    show_parser.add_argument("file", metavar="WORKFLOW_YAML")
 
 
 # ── Dispatch ─────────────────────────────────────────────────────────
@@ -261,6 +264,8 @@ def run(args: argparse.Namespace) -> int:
         return _run_init(args)
     elif cmd == "list-templates":
         return _run_list_templates(args)
+    elif cmd in ("validate", "show"):
+        return _run_validate(args, show=cmd == "show")
     print(f"error: unknown workflow subcommand '{cmd}'", file=sys.stderr)
     return 2
 
@@ -389,7 +394,7 @@ def _run_init(args: argparse.Namespace) -> int:
         # Keys for <KEY> style placeholders in workflow-local.template.md
         "OWNER": owner,
         "REPO": repo,
-        "ISSUES_PATH": val("", "Issues path (local tracker)", f".issues"),
+        "ISSUES_PATH": val("", "Issues path (local tracker)", ".issues"),
         "REVIEW_REMOTE": val("", "Review remote name", "origin"),
         "REVIEW_PREFIX": val("", "Review branch prefix", "review"),
         "TEST_COMMAND": val("", "Test command (empty to skip)", ""),
@@ -467,4 +472,26 @@ def _run_list_templates(args: argparse.Namespace) -> int:
         print(f"  {name:30s}  {path}")
     print()
     print("Usage:  orchestratord workflow init")
+    return 0
+
+
+def _run_validate(args: argparse.Namespace, *, show: bool = False) -> int:
+    from orchestratord.workflow_engine.engine import WorkflowSchema, WorkflowSchemaError
+
+    try:
+        schema = WorkflowSchema.from_yaml(args.file)
+        order = schema.build_dag_order()
+    except (OSError, WorkflowSchemaError) as exc:
+        print(f"✗ {exc}", file=sys.stderr)
+        return 1
+    if show:
+        print(f"Workflow: {schema.name} (version {schema.version})")
+        print(f"Stages: {len(schema.stages)}")
+        for stage_id in order:
+            stage = schema.get_stage(stage_id)
+            if stage is not None:
+                deps = ",".join(str(value) for value in stage.depends_on) or "-"
+                print(f"  {stage.id}: {stage.name} [{stage.kind.value}] depends_on={deps}")
+    else:
+        print(f"✓ {args.file}: valid workflow ({len(schema.stages)} stages)")
     return 0

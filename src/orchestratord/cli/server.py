@@ -36,17 +36,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def add_server_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register ``server`` sub-subcommands (status | stop | start)."""
+def add_server_parser(
+    subparsers: argparse._SubParsersAction,
+    *,
+    command_name: str = "server",
+    dest: str = "server_subcommand",
+    start_command: str = "start",
+) -> None:
+    """Register daemon commands under the canonical or compatibility name."""
     server_parser = subparsers.add_parser(
-        "server",
+        command_name,
         help="Manage the orchestrator daemon process",
         description="Start, stop, or check the status of the orchestrator daemon. "
         "All commands are idempotent — running them multiple times "
         "has no ill effect.",
     )
     server_sub = server_parser.add_subparsers(
-        dest="server_subcommand",
+        dest=dest,
         required=True,
     )
 
@@ -114,7 +120,7 @@ def add_server_parser(subparsers: argparse._SubParsersAction) -> None:
 
     # --- server start ---
     start_parser = server_sub.add_parser(
-        "start",
+        start_command,
         help="Start the orchestrator daemon",
         description="Launch the orchestrator with a workflow file. "
         "Optionally enable the declarative workflow engine via --workflow-yaml "
@@ -302,12 +308,12 @@ def add_server_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def run(args: argparse.Namespace) -> int:
     """Dispatch to the appropriate server subcommand."""
-    cmd = args.server_subcommand
+    cmd = getattr(args, "server_subcommand", None) or getattr(args, "daemon_subcommand", None)
     if cmd == "status":
         return _run_status(args)
     elif cmd == "stop":
         return _run_stop(args)
-    elif cmd == "start":
+    elif cmd in ("start", "serve"):
         return _run_start(args)
     elif cmd == "connect-gateway":
         return _run_connect_gateway(args)
@@ -1140,7 +1146,7 @@ def _run_orchestrator(
             f" \u00b7 permission_mode={getattr(_agent, 'permission_mode', '?')}"
         )
 
-    from orchestratord.orchestration_subsystem import OrchestrationSubsystem
+    from orchestratord.applications import IssueToPrApplication
 
     # Validate only the selected SPI backend. Discovery keeps legacy backend
     # backend names stable while pre-flight runs
@@ -1181,7 +1187,7 @@ def _run_orchestrator(
             return 2
         print(f"  backend={backend} ({spi_backend.display_name})")
 
-    subsystem = OrchestrationSubsystem(
+    subsystem = IssueToPrApplication(
         config, workflow_yaml_path=workflow_yaml_path, backend=spi_backend
     )
 

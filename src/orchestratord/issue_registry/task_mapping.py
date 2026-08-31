@@ -41,6 +41,13 @@ def issue_to_agent_task(
         "issue_author_login": issue.author_login,
         "issue_branch_name": issue.branch_name,
         "issue_python_executable": issue.python_executable,
+        # Business-owned stage policy.  The workflow engine treats these as
+        # opaque instructions; Git/PR semantics do not live in StageRunner.
+        "stage_instructions": [
+            "You may use git add and git commit on the current branch.",
+            "Do not run git push; the issue-to-PR application handles synchronization.",
+            "Do not switch branches or create pull requests from an agent stage.",
+        ],
     }
 
     if clarification_question:

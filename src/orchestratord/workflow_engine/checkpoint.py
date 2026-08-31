@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +41,7 @@ class Checkpoint:
     # 扩展状态上下文
     workflow_state_metadata: dict[str, Any] = field(default_factory=dict)
     rollback_events: list[dict[str, Any]] = field(default_factory=list)
+    run_context: dict[str, Any] | None = None
     issue_context: dict[str, Any] | None = None
     finished_at: str | None = None
 
@@ -71,6 +71,7 @@ class Checkpoint:
             "schema_version": self.schema_version,
             "workflow_state_metadata": self.workflow_state_metadata,
             "rollback_events": self.rollback_events,
+            "run_context": self.run_context,
             "issue_context": self.issue_context,
             "finished_at": self.finished_at,
         }
@@ -88,8 +89,11 @@ class Checkpoint:
         for k, v in data.get("stage_results", {}).items():
             stage_results[int(k)] = v
 
-        issue_context = data.get("issue_context")
-        # 避免原始 Issue 对象被序列化后无法简单恢复；from_dict 保留字典形式
+        run_context = data.get("run_context", data.get("issue_context"))
+        issue_context = data.get("issue_context", run_context)
+        # Keep compatibility data dictionary-shaped during old checkpoint restore.
+        if run_context is not None and not isinstance(run_context, dict):
+            run_context = {"_raw": run_context}
         if issue_context is not None and not isinstance(issue_context, dict):
             issue_context = {"_raw": issue_context}
 
@@ -107,6 +111,7 @@ class Checkpoint:
             schema_version=schema_version,
             workflow_state_metadata=data.get("workflow_state_metadata", {}),
             rollback_events=data.get("rollback_events", []),
+            run_context=run_context,
             issue_context=issue_context,
             finished_at=data.get("finished_at"),
         )
@@ -156,7 +161,8 @@ class CheckpointManager:
             metadata=getattr(state, "metadata", {}),
             workflow_state_metadata=getattr(state, "metadata", {}),
             rollback_events=list(getattr(state, "rollback_events", [])),
-            issue_context=_serialize_issue_context(state.issue_context),
+            run_context=_serialize_run_context(state.run_context or state.issue_context),
+            issue_context=_serialize_run_context(state.run_context or state.issue_context),
             finished_at=state.finished_at,
         )
 
@@ -210,7 +216,8 @@ class CheckpointManager:
 
         state.workflow_state_metadata = dict(checkpoint.workflow_state_metadata)
         state.rollback_events = list(checkpoint.rollback_events)
-        state.issue_context = checkpoint.issue_context
+        state.run_context = checkpoint.run_context or checkpoint.issue_context
+        state.issue_context = state.run_context
         state.finished_at = checkpoint.finished_at
         state.decision_history = DecisionHistory.from_dict_list(checkpoint.decision_history)
         # 兼容旧检查点：workflow_state_metadata 与 metadata 同义
@@ -247,17 +254,26 @@ class CheckpointManager:
             pass
 
 
-def _serialize_issue_context(issue_context: dict[str, Any] | None) -> dict[str, Any] | None:
-    """序列化 issue_context，过滤掉不可序列化的原始对象引用。
+def _serialize_run_context(run_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Serialize data-only run context, dropping live object references."""
+    if run_context is None:
+        return None
+    if not isinstance(run_context, dict):
+        return None
+    result: dict[str, Any] = {}
+    for key, value in run_context.items():
+        if key.startswith("_") or key == "task":
+            continue
+        try:
+            json.dumps(value)
+        except (TypeError, ValueError):
+            continue
+        result[key] = value
+    return result
 
-    原始 Issue 对象保留在内存中使用，检查点中仅持久化可序列化字段。
-    """
-    if issue_context is None:
-        return None
-    if not isinstance(issue_context, dict):
-        return None
-    # 保留除原始对象引用外的所有字段
-    return {k: v for k, v in issue_context.items() if not k.startswith("_")}
+
+# Compatibility name for integrations importing the old private helper.
+_serialize_issue_context = _serialize_run_context
 
 
 class WorkflowResumer:

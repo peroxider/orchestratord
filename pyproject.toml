@@ -1,6 +1,6 @@
 [project]
 name = "orchestratord"
-description = "Issue-to-PR orchestration daemon over pluggable agent backends"
+description = "Extensible workflow orchestration daemon with pluggable actions and agent backends"
 requires-python = ">=3.11"
 dynamic = ["version"]
 dependencies = [

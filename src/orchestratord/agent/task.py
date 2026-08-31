@@ -1,9 +1,8 @@
 """AgentTask — generic work-unit abstraction for the orchestration layer.
 
-AgentTask decouples the agent execution capability from the issue-to-PR
-business pipeline.  Different workflow kinds (issue, ci_fix, code_audit,
-workflow_stage, review_followup, agent_rebase) populate different fields
-but share the same ``AgentTaskRunner.run_task()`` interface.
+AgentTask decouples agent execution from the business application that
+requested it. Different workflow kinds populate opaque context fields but
+share the same ``AgentTaskRunner.run_task()`` interface.
 
 See ``DESIGN_agent_task_abstraction.md`` for the full architecture.
 """
@@ -23,7 +22,8 @@ class AgentTask:
     that needs doing" and the agent execution layer.  It intentionally
     knows nothing about issues, pull requests, git, or trackers.
 
-    Different workflow kinds populate different fields:
+    The following names are compatibility examples owned by the bundled
+    issue-to-PR application; the capability layer does not interpret them:
 
     ``kind="issue"``
         ``title`` = issue title, ``description`` = issue body,

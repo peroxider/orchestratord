@@ -1,11 +1,4 @@
-"""StageRunner 适配器。
-
-桥接 DeclarativeWorkflowEngine 与 AgentRunner，
-将阶段执行适配为 AgentRunner 可消费的合成 Issue 工作单元。
-
-设计决策 DD-5: 方案 A（合成 Issue 适配器）优先，
-保留 AgentRunner 的全部稳健机制（停滞检测、进度上报、验证管线等）。
-"""
+"""Adapters that execute declarative workflow stages."""
 
 from __future__ import annotations
 
@@ -20,12 +13,8 @@ from .validators import ContractValidator
 from .workflow_state import StageNode, WorkflowState
 
 if TYPE_CHECKING:
-    from ..backend_runner import BackendRunner as AgentRunner
-    from ..session_state import AgentSession
     from ..agent.runner import AgentTaskRunner
-    from ..config.schema import AgentConfig, SandboxConfig, WorkflowConfig
-    from ..issue_registry.issue import Issue
-    from ..workspace import Workspace
+    from ..config.schema import AgentConfig, SandboxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +55,7 @@ class DecisionRunResult:
 class StageRunner:
     """阶段执行适配器。
 
-    通过合成 Issue 调用 AgentRunner，复用其全部生命周期管理能力：
+    Dispatches generic AgentTask values through AgentTaskRunner:
     - 停滞检测 (stagnation detection)
     - 进度上报 (ProgressSink)
     - 验证管线 (Verification Pipeline)
@@ -78,8 +67,8 @@ class StageRunner:
 
     def __init__(
         self,
-        agent_runner: "AgentRunner",
-        workflow_config: "WorkflowConfig",
+        agent_runner: Any = None,
+        workflow_config: Any = None,
         agent_config: "AgentConfig | None" = None,
         sandbox_config: "SandboxConfig | None" = None,
         workspace_dir: str = "",
@@ -122,7 +111,7 @@ class StageRunner:
     async def run(self, stage_node: StageNode, state: WorkflowState) -> StageRunResult:
         """执行 Agent 阶段。
 
-        构建合成 Issue，通过 AgentRunner 执行，支持自动重试。
+        Build and execute an AgentTask with bounded retries.
         """
         last_error: str | None = None
 
@@ -187,10 +176,10 @@ class StageRunner:
 
         for attempt in range(max_retries + 1):
             try:
-                session = await self._run_synthetic_issue(
+                session = await self._run_agent_task(
                     prompt=self._build_decision_prompt(stage_node, state),
                     stage_node=stage_node,
-                    parent_issue=state.issue_context.get("_issue"),
+                    parent_task=(state.run_context or state.issue_context or {}).get("task"),
                 )
                 output_text = session.output_text if session else ""
                 outcome = self._parse_decision_outcome(output_text, stage_node)
@@ -217,22 +206,36 @@ class StageRunner:
 
         return DecisionRunResult(stage_id=stage_node.id, outcome="proceed")
 
-    # ── Agent 阶段执行 (DD-5: 合成 Issue 适配器) ─────────────────
+    async def run_action(self, stage_node: StageNode, state: WorkflowState) -> Any:
+        """Execute a registered, backend-neutral workflow action."""
+        from .actions import ActionContext, execute_action
+
+        return await execute_action(
+            stage_node.uses,
+            stage_node.action_config,
+            ActionContext(
+                run_context=dict(state.run_context or state.issue_context or {}),
+                workspace_dir=str(self._workspace_dir),
+                stage_results=dict(state.stage_results),
+            ),
+        )
+
+    # ── Agent stage execution ───────────────────────────────────
 
     async def _execute_agent_stage(
         self,
         stage_node: StageNode,
         state: WorkflowState,
     ) -> StageRunResult:
-        """通过合成 Issue + AgentRunner 执行 Agent 阶段。"""
+        """Execute an agent stage through the generic task protocol."""
         # 记录阶段开始前的总成本，用于计算阶段增量
         cost_before = self._get_total_cost_usd()
 
         prompt = self._build_stage_prompt(stage_node, state)
-        session = await self._run_synthetic_issue(
+        session = await self._run_agent_task(
             prompt=prompt,
             stage_node=stage_node,
-            parent_issue=state.issue_context.get("_issue"),
+            parent_task=(state.run_context or state.issue_context or {}).get("task"),
         )
 
         if session is None:
@@ -257,16 +260,13 @@ class StageRunner:
             error=None if status == "completed" else f"Session status: {status}",
         )
 
-    async def _run_synthetic_issue(
+    async def _run_agent_task(
         self,
         prompt: str,
         stage_node: StageNode,
-        parent_issue: Any = None,
-    ) -> "AgentSession | None":
-        """Build synthetic work unit and execute via AgentRunner or AgentTaskRunner."""
-        from ..issue_registry.issue import Issue
-        from ..workspace import Workspace
-        from ..session_state import AgentSession
+        parent_task: Any = None,
+    ) -> Any:
+        """Build a generic work unit and execute it through the capability API."""
 
         workspace_path = Path(self._workspace_dir) if self._workspace_dir else Path(".")
 
@@ -282,10 +282,10 @@ class StageRunner:
                 context={
                     "stage_id": stage_node.id,
                     "phase": stage_node.phase,
-                    "parent_issue": parent_issue,
+                    "parent_task": parent_task,
                 },
                 workspace_path=str(workspace_path),
-                labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
+                labels=["workflow-stage", f"workflow-{stage_node.phase}"],
                 prompt_override=prompt,
             )
             result = await self._task_runner.run_task(
@@ -293,72 +293,11 @@ class StageRunner:
                 progress_callback=self._forward_progress_event,
             )
 
-            # Build a synthetic session for backward compat.
-            workspace = Workspace(
-                path=workspace_path,
-                issue_identifier=f"stage-{stage_node.id:02d}",
-                issue_id=f"stage-{stage_node.id:02d}",
-            )
-            synthetic_issue = Issue(
-                id=f"stage-{stage_node.id:02d}",
-                identifier=f"stage-{stage_node.id:02d}",
-                title=f"[{stage_node.phase}] {stage_node.name}",
-                description=prompt,
-                labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
-            )
-            session = AgentSession(
-                issue=synthetic_issue,
-                task=task,
-                workspace=workspace,
-                run_kind=f"workflow-stage-{stage_node.phase}",
-                run_id=f"stage-{stage_node.id:02d}",
-            )
-            session.status = result.status
-            session.output_text = result.output_text
-            session.turn_count = result.turn_count
-            session.tool_count = result.tool_count
-            session.session_end_reason = result.session_end_reason
-            session.session_end_summary = result.session_end_summary
-            return session
+            return result
 
-        # Fallback: legacy synthetic Issue path.
-        synthetic_issue = Issue(
-            id=f"stage-{stage_node.id:02d}",
-            identifier=f"stage-{stage_node.id:02d}",
-            title=f"[{stage_node.phase}] {stage_node.name}",
-            description=prompt,
-            labels=[f"workflow-stage", f"workflow-{stage_node.phase}"],
+        raise RuntimeError(
+            "StageRunner requires an AgentTaskRunner"
         )
-
-        workspace = Workspace(
-            path=workspace_path,
-            issue_identifier=f"stage-{stage_node.id:02d}",
-            issue_id=f"stage-{stage_node.id:02d}",
-        )
-
-        session = AgentSession(
-            issue=synthetic_issue,
-            workspace=workspace,
-            run_kind=f"workflow-stage-{stage_node.phase}",
-            run_id=f"stage-{stage_node.id:02d}",
-        )
-
-        try:
-            await self._agent_runner.run(
-                session=session,
-                workflow=self._workflow_config,
-                tracker=None,
-                status_dashboard=self._status_dashboard,
-                clarification_resolver=self._clarification_resolver,
-                progress_reporter=self._progress_reporter,
-                diagnostics_callback=self._diagnostics_callback,
-            )
-        except Exception as exc:
-            logger.exception("AgentRunner.run failed for stage %s", stage_node.id)
-            session.status = "failed"
-            session.output_text = str(exc)
-
-        return session
 
     async def _forward_progress_event(self, event: Any) -> None:
         """Forward generic task progress to the legacy workflow sink.
@@ -407,7 +346,7 @@ class StageRunner:
     async def _run_threshold_gate(
         self, stage_node: StageNode, state: WorkflowState
     ) -> GateRunResult:
-        """阈值 GATE：通过合成 Issue + LLM 评分判定。"""
+        """Evaluate a threshold gate through a generic agent task."""
         try:
             prompt = (
                 f"Evaluate the following work output and assign a score from 0.0 to 1.0.\n"
@@ -415,7 +354,7 @@ class StageRunner:
                 f"Stage: {stage_node.name}\n"
                 f"Prompt: {stage_node.prompt}\n"
             )
-            session = await self._run_synthetic_issue(prompt=prompt, stage_node=stage_node)
+            session = await self._run_agent_task(prompt=prompt, stage_node=stage_node)
             output_text = session.output_text if session else ""
             score = self._extract_score(output_text)
             approved = score >= stage_node.gate_threshold
@@ -489,16 +428,18 @@ class StageRunner:
             )
         parts.append(stage_node.prompt or f"Execute stage: {stage_node.name}")
 
-        # Git 约束：允许在 issue 分支上 commit，禁止 push 和分支操作
-        # git_sync 会在 workflow 完成后统一 push 并创建 PR
-        parts.append(
-            "\n## ⚠️ Git Constraints\n"
-            "- You may use `git add` and `git commit` on the current branch.\n"
-            "- Do NOT run `git push` — the orchestrator handles push and PR creation.\n"
-            "- Do NOT run `git checkout`, `git switch`, or create new branches.\n"
-            "- Do NOT create pull requests.\n"
-            "- Use Write / Edit tools to modify source files."
+        # Optional business policy supplied by the root task.  The engine
+        # deliberately knows nothing about Git, PRs, datasets, or models.
+        context = state.run_context or state.issue_context or {}
+        root_task = context.get("task")
+        stage_instructions = (
+            getattr(root_task, "context", {}).get("stage_instructions", [])
+            if root_task is not None
+            else []
         )
+        if stage_instructions:
+            parts.append("\n## Workflow Policies")
+            parts.extend(f"- {instruction}" for instruction in stage_instructions)
 
         # 3. 前序阶段输出
         if state.completed_stages:
@@ -528,18 +469,15 @@ class StageRunner:
         return prompt
 
     def _render_base_prompt(self, state: WorkflowState) -> str:
-        """通过 PromptBuilder.render 获取 WORKFLOW.md 基础 prompt。
-
-        使用原始 issue 对象（存储在 state.issue_context['_issue']）
-        渲染 WORKFLOW.md 模板，保留项目上下文、编码规范等关键指令。
-        """
-        issue = state.issue_context.get("_issue") if state.issue_context else None
-        if issue is None:
-            # 降级：无 issue 对象时，用 issue_context 构建简单 prompt
-            if state.issue_context:
-                parts = ["## Issue Context"]
-                parts.append(f"Title: {state.issue_context.get('title', 'N/A')}")
-                desc = state.issue_context.get("description", "")
+        """Render the root task while retaining project guidance."""
+        context = state.run_context or state.issue_context or {}
+        task = context.get("task")
+        if task is None:
+            # Degrade to data-only run context when no task object is present.
+            if context:
+                parts = ["## Task Context"]
+                parts.append(f"Title: {context.get('title', 'N/A')}")
+                desc = context.get("description", "")
                 if desc:
                     parts.append(f"Description: {desc}")
                 return "\n".join(parts)
@@ -548,13 +486,13 @@ class StageRunner:
         try:
             from ..prompt_builder import PromptBuilder
 
-            return PromptBuilder.render(issue=issue)
+            return PromptBuilder.render(task)
         except Exception as exc:
             logger.warning("PromptBuilder.render failed, using fallback: %s", exc)
-            # 降级：直接使用 issue 的 title + description
-            title = getattr(issue, "title", "") or state.issue_context.get("title", "")
-            desc = getattr(issue, "description", "") or state.issue_context.get("description", "")
-            return f"## Issue: {title}\n\n{desc}"
+            # Fall back to the task's title and description.
+            title = getattr(task, "title", "") or context.get("title", "")
+            desc = getattr(task, "description", "") or context.get("description", "")
+            return f"## Task: {title}\n\n{desc}"
 
     # ── 工具方法 ──────────────────────────────────────────────────
 

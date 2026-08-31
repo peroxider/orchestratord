@@ -2,6 +2,46 @@
 
 Agent-agnostic orchestration daemon — a multi-backend workflow engine with issue tracking, PR automation, and multi-agent modes.
 
+The orchestration core is business-neutral. Issue-to-PR is the first bundled
+application; action plugins can also implement training, inference, evaluation,
+publication, or agent-evolution stages.
+
+## CLI resource model
+
+The canonical CLI separates runtime resources from business applications:
+
+```bash
+orchestratord daemon start --workflow WORKFLOW.md --backend codex
+orchestratord workflow validate workflow.yaml
+orchestratord workflow show workflow.yaml
+orchestratord run start workflow.yaml --backend codex --input-file task.json
+orchestratord run logs --id RUN_ID
+orchestratord backend list
+orchestratord backend doctor codex
+orchestratord app list
+orchestratord app issue-pr review --id ISSUE_ID --approve
+```
+
+`server` and `issue` remain compatibility command groups. New integrations
+should use `daemon`, `run`, and `app issue-pr`.
+
+Declarative stages may use the built-in `agent`, `gate`, and `decision` kinds,
+or a namespaced action registered through the `orchestratord.actions` Python
+entry-point group:
+
+```yaml
+stages:
+  - id: 1
+    name: train
+    uses: ml.train
+    with:
+      gpu: 4
+  - id: 2
+    name: evaluate
+    uses: ml.evaluate
+    depends_on: [1]
+```
+
 The core daemon coordinates agent sessions through a small SPI (Service Provider Interface). Concrete backends (ClawCodex, OpenAI Codex, DeepSeek Harness, Hermes, OpenCode…) ship as independent PyPI plugins and are discovered at runtime via Python entry points.
 
 ## Why

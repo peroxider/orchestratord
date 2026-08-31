@@ -11,7 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -59,6 +59,7 @@ class EngineConfig:
     run_id: str = ""
     enable_snapshots: bool = False  # 是否启用阶段快照（用于回滚）
     llm_client: Any | None = None  # 供 llm_judge 验证器使用
+    control_state: Callable[[], str | None] | None = None
 
 
 @dataclass
@@ -153,7 +154,7 @@ class WorkflowSchema:
 
 def _parse_stage_node(index: int, raw: dict[str, Any]) -> StageNode:
     """解析单个阶段节点。"""
-    kind_str = str(raw.get("kind", "agent")).lower()
+    kind_str = str(raw.get("kind", "action" if raw.get("uses") else "agent")).lower()
     try:
         kind = StageKind(kind_str)
     except ValueError:
@@ -167,6 +168,8 @@ def _parse_stage_node(index: int, raw: dict[str, Any]) -> StageNode:
         prompt=raw.get("prompt", ""),
         depends_on=_normalize_int_list(raw.get("depends_on", [])),
         agent_config=raw.get("agent_config", {}),
+        uses=str(raw.get("uses", "") or ""),
+        action_config=raw.get("with", {}) if isinstance(raw.get("with", {}), dict) else {},
         validators=raw.get("validators", []),
         gate_mode=raw.get("gate_mode", "manual"),
         gate_threshold=float(raw.get("gate_threshold", 0.8)),
@@ -328,10 +331,28 @@ class DeclarativeWorkflowEngine:
                     self.state.completed_stages.append(sid)
                     self.state.stage_statuses[sid] = StageStatus.COMPLETED
 
+        # Parallel scheduling is currently enabled for external ACTION stages.
+        # Agent/gate/decision stages keep their ordered semantics, including
+        # rollback and interactive decisions.
+        remaining = [
+            self.workflow.get_stage(sid)
+            for sid in self._dag_order[start_index:]
+            if sid not in self.state.completed_stages
+        ]
+        if (
+            self.config.max_concurrent_stages > 1
+            and remaining
+            and all(stage is not None and stage.is_action_stage for stage in remaining)
+        ):
+            return await self._execute_parallel_actions(start_time)
+
         # 执行循环
         error_msg: str | None = None
         idx = start_index
         while idx < len(self._dag_order):
+            if not await self._wait_for_control():
+                error_msg = "workflow run cancelled"
+                break
             stage_id = self._dag_order[idx]
             stage = self.workflow.get_stage(stage_id)
             if stage is None:
@@ -444,6 +465,108 @@ class DeclarativeWorkflowEngine:
             stage_results=dict(self.state.stage_results),
         )
 
+    async def _wait_for_control(self) -> bool:
+        """Apply cooperative pause/cancel requests at stage boundaries."""
+        callback = self.config.control_state
+        if callback is None:
+            return True
+        while True:
+            state = callback()
+            if state in ("cancel_requested", "cancelled"):
+                return False
+            if state != "paused":
+                return True
+            await asyncio.sleep(0.25)
+
+    async def _execute_parallel_actions(self, start_time: float) -> WorkflowResult:
+        """Execute ready ACTION nodes in bounded concurrent batches."""
+        pending = {
+            stage.id: stage
+            for stage in self.workflow.stages
+            if stage.id not in self.state.completed_stages
+        }
+        error_msg: str | None = None
+        stop_requested = False
+        limit = max(1, self.config.max_concurrent_stages)
+
+        while pending:
+            if not await self._wait_for_control():
+                error_msg = "workflow run cancelled"
+                stop_requested = True
+                break
+            ready = [
+                stage
+                for stage in pending.values()
+                if all(dep in self.state.completed_stages for dep in stage.depends_on)
+            ]
+            if not ready:
+                for stage in pending.values():
+                    self.state.stage_statuses[stage.id] = StageStatus.SKIPPED
+                    self.event_bus.emit_stage_skipped(
+                        stage_id=stage.id,
+                        stage_name=stage.name,
+                        reason="dependencies not satisfied",
+                    )
+                break
+
+            batch = ready[:limit]
+            outcomes = await asyncio.gather(
+                *(self._execute_stage(stage) for stage in batch),
+                return_exceptions=True,
+            )
+            for stage, outcome in zip(batch, outcomes):
+                pending.pop(stage.id, None)
+                if isinstance(outcome, BaseException):
+                    self._handle_stage_error(stage, outcome, "failure")
+                    self.state.mark_stage_failed(stage.id, str(outcome))
+                    if error_msg is None:
+                        error_msg = str(outcome)
+                    if stage.on_error == "fail":
+                        stop_requested = True
+                    continue
+                try:
+                    self.cost_tracker.reset_stage()
+                    self.cost_tracker.add(outcome.cost_usd)
+                    for warning in self.cost_tracker.check_budget():
+                        self.event_bus.emit_cost_warning(message=warning)
+                except CostExceededError as exc:
+                    self._handle_stage_error(stage, exc, "cost")
+                    self.state.mark_stage_failed(stage.id, str(exc))
+                    if error_msg is None:
+                        error_msg = str(exc)
+                    stop_requested = True
+                    continue
+                self.state.mark_stage_completed(stage.id, outcome)
+                self._save_checkpoint(stage.id)
+                self.event_bus.emit_stage_complete(
+                    stage_id=stage.id,
+                    stage_name=stage.name,
+                    cost=outcome.cost_usd,
+                    duration=outcome.duration_seconds,
+                )
+            if stop_requested:
+                break
+
+        self.state.mark_workflow_finished()
+        total_duration = time.time() - start_time
+        if error_msg:
+            self.event_bus.emit_workflow_error(error=error_msg)
+        else:
+            self.event_bus.emit_workflow_complete(
+                total_cost=self.cost_tracker.total_usd,
+                total_duration=total_duration,
+            )
+        return WorkflowResult(
+            success=error_msg is None,
+            workflow_name=self.workflow.name,
+            completed_stages=self.state.completed_count,
+            total_stages=self.state.total_stages,
+            total_cost_usd=self.cost_tracker.total_usd,
+            total_duration_seconds=total_duration,
+            error=error_msg,
+            stage_results=dict(self.state.stage_results),
+        )
+
     # ── 阶段执行 ──────────────────────────────────────────────────
 
     async def _execute_stage(self, stage: StageNode) -> StageResult:
@@ -469,6 +592,8 @@ class DeclarativeWorkflowEngine:
             result = await self._run_gate_stage(stage)
         elif stage.is_decision_stage:
             result = await self._run_decision_stage(stage)
+        elif stage.is_action_stage:
+            result = await self._run_action_stage(stage)
         else:
             result = StageResult(
                 stage_id=stage.id,
@@ -477,6 +602,35 @@ class DeclarativeWorkflowEngine:
 
         result.duration_seconds = time.time() - stage_start
         return result
+
+    async def _run_action_stage(self, stage: StageNode) -> StageResult:
+        if self._stage_runner is None:
+            raise WorkflowEngineError("StageRunner not injected", stage_id=stage.id)
+        if not stage.uses:
+            raise StageFailureError("Action stage requires 'uses'", stage_id=stage.id)
+        effective_timeout = self._effective_timeout(stage)
+        try:
+            run_result = await asyncio.wait_for(
+                self._stage_runner.run_action(stage, self.state),
+                timeout=effective_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise StageTimeoutError(
+                f"Action stage {stage.id} ({stage.name}) timed out after {effective_timeout}s",
+                stage_id=stage.id,
+            )
+        if not run_result.success:
+            raise StageFailureError(
+                f"Action stage {stage.id} ({stage.name}) failed: {run_result.error}",
+                stage_id=stage.id,
+            )
+        return StageResult(
+            stage_id=stage.id,
+            status=StageStatus.COMPLETED,
+            outputs=run_result.outputs,
+            artifacts=run_result.artifacts,
+            cost_usd=run_result.cost_usd,
+        )
 
     async def _run_agent_stage(self, stage: StageNode) -> StageResult:
         """执行 Agent 阶段。
