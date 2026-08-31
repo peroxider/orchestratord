@@ -83,7 +83,7 @@ class ClawcodexBackend:
             tool_filtering=True,
             takeover=True,
             goal_mode=True,
-            # ADR-003: clawcodex exposes a transcript probe via
+            # clawcodex exposes a transcript probe via
             # QueryRunner.probe_transcript (see session.py:probe_resume).
             resume_detection=True,
         )

@@ -35,11 +35,6 @@ version: 1
 
 权威定义见 `spi/capabilities.py` 的 `BackendCapabilities`（见 source-map）。
 
-## 背景
-
-能力协商的设计动机与降级矩阵最早由 ADR-001（backends hardening）确立，
-`goal_mode` 位由 ADR-002 引入。两个 ADR 均在仓库根目录可读。
-
 ## 输出
 
 用一段话向用户解释该能力位的含义与对应的降级行为；引用上表的行。

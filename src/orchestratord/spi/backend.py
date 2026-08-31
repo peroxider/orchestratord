@@ -5,7 +5,7 @@ entry_points [orchestratord.backends].  The orchestration core discovers
 backends through entry_points and never imports backend packages directly
 (CI-enforced).
 
-Timeout semantics (DESIGN_graded_timeouts_and_resume.md §1, ADR-003):
+Timeout semantics (DESIGN_graded_timeouts_and_resume.md §1):
 
 SessionSpec carries **five independent** timeout fields. Each backend
 decides which subset to honor and how (see backend_runner.py §3.3 for
@@ -80,7 +80,7 @@ class SessionSpec:
     stall_warn_s: float | None = None        # DEPRECATED: warning threshold
 
     # ------------------------------------------------------------------
-    # 5-level timeout classification (ADR-003)
+    # 5-level timeout classification
     # ------------------------------------------------------------------
     total_timeout_s: float | None = None        # run-level watchdog
     handshake_timeout_s: float | None = None    # start → first event

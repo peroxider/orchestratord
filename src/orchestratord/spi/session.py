@@ -7,7 +7,7 @@ This split (send + events) is deliberate: multi-agent modes (debate
 round-robin, pipeline) need to inject a user message without waiting
 for completion.
 
-Resume semantics (DESIGN_graded_timeouts_and_resume.md §2, ADR-003):
+Resume semantics (DESIGN_graded_timeouts_and_resume.md §2):
 
 The resume outcome is a **three-state** signal (ResumeStatus), not a
 bool. The motivation: some backends (dsh, opencode) cannot probe

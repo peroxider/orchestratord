@@ -77,7 +77,7 @@ class OpenCodeSession:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: opencode serve exposes ``session/load`` MCP
+            # opencode serve exposes ``session/load`` MCP
             # call which can probe whether a session is still
             # reachable on the server side. Translates to the
             # three-state ResumeStatus.

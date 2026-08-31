@@ -36,7 +36,7 @@ def test_backend_family_has_canonical_four_values() -> None:
     actual = {member.value for member in BackendFamily}
     assert actual == {"InProcess", "SdkProcess", "Protocol", "Cli"}, (
         f"BackendFamily values drifted: {actual}. Adding a new family "
-        "requires updating ADR-004 + downstream dispatchers."
+        "requires updating downstream dispatchers."
     )
 
 
@@ -54,7 +54,7 @@ def test_backend_family_member_count_matches_design() -> None:
     """Catches accidental add/remove of enum members without ADR update."""
     assert len(BackendFamily) == 4, (
         f"BackendFamily has {len(BackendFamily)} members, expected 4. "
-        "Adding/removing a family is a breaking change — bump ADR-004."
+        "Adding/removing a family is a breaking change."
     )
 
 

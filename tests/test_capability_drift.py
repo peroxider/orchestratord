@@ -247,7 +247,7 @@ def test_family_value_is_known(
 # resume_detection bit (DESIGN_graded_timeouts_and_resume.md §2.6 / §3.5)
 # ---------------------------------------------------------------------------
 
-# ADR-003 contract matrix for the ``resume_detection`` capability bit:
+# Contract matrix for the ``resume_detection`` capability bit:
 # backends whose ``probe_resume()`` returns a meaningful verdict must
 # declare it; backends that always answer UNDETECTABLE / REJECTED must not.
 _RESUME_DETECTION_EXPECTATIONS = {
@@ -265,7 +265,7 @@ def test_resume_detection_bit_declared(
     descriptor_name: str,
     descriptors: dict[str, BackendDescriptor],
 ) -> None:
-    """The ``resume_detection`` bit must match the ADR-003 contract matrix.
+    """The ``resume_detection`` bit must match the contract matrix.
 
     The generic ``test_capability_bit_set_matches_descriptor`` only checks
     descriptor ↔ implementation consistency; this test pins the *intended*
@@ -280,7 +280,7 @@ def test_resume_detection_bit_declared(
     assert declared is expected, (
         f"{descriptor_name}: resume_detection declared={declared} "
         f"expected={expected} — see DESIGN_graded_timeouts_and_resume.md "
-        "§2.6 / ADR-003 §2.4"
+        "§2.6"
     )
 
 

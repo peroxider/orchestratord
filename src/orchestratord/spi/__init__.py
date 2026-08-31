@@ -1,7 +1,7 @@
 """SPI — Service Provider Interface for orchestratord backends.
 
-All protocol definitions in this package are frozen (ADR-006: additive
-changes only — new capability bits, new event kinds; no semantic changes).
+All protocol definitions in this package are frozen: additive changes
+only — new capability bits, new event kinds; no semantic changes.
 Breaking changes require a 2.0 revision.
 """
 

@@ -352,7 +352,7 @@ class BackendRunner:
     def _resolve_timeouts(spec: SessionSpec) -> dict[str, float]:
         """Resolve ``None`` timeout fields to default values.
 
-        Defaults (DESIGN_graded_timeouts_and_resume.md §1.3 / ADR-003):
+        Defaults (DESIGN_graded_timeouts_and_resume.md §1.3):
           * total_timeout_s:        1800s (30 min — run watchdog)
           * handshake_timeout_s:      30s (start → first event)
           * first_turn_timeout_s:    120s (first event → first TURN_COMPLETE)
@@ -552,7 +552,7 @@ class BackendRunner:
             "permission_mode": self.agent_config.permission_mode,
         }
 
-        # ADR-003 §2.5: probe resume status before any send().
+        # Probe resume status before any send().
         if spec.resume_session_id:
             probe_result = await self._probe_resume_or_log(spi_session, spec)
             if probe_result is ResumeStatus.REJECTED:
@@ -576,7 +576,7 @@ class BackendRunner:
                     logger.debug("spi_session.close() failed", exc_info=True)
                 return
 
-        # ADR-003 §3.2: resolve and surface the 5-level timeout bundle.
+        # Resolve and surface the 5-level timeout bundle.
         timeouts = self._resolve_timeouts(spec)
         logger.info(
             "BackendRunner timeouts: backend=%s total=%.1fs handshake=%.1fs "
@@ -861,7 +861,7 @@ class BackendRunner:
             if kind == EventKind.TURN_COMPLETE and not first_turn_complete:
                 first_turn_complete = True
 
-            # ADR-003 §3.2: enforce per-phase and run-level timeouts.
+            # Enforce per-phase and run-level timeouts.
             now = time.monotonic()
             last_event_monotonic = now
             elapsed = now - run_start

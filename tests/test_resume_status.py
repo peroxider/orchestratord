@@ -1,4 +1,4 @@
-"""Tests for the 3-state ResumeStatus + per-backend probe_resume() (ADR-003).
+"""Tests for the 3-state ResumeStatus + per-backend probe_resume().
 
 DESIGN_graded_timeouts_and_resume.md §2.5 / §3.5 verification matrix:
 

@@ -39,7 +39,7 @@ class CodexAppServerSession:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: codex app-server exposes ``session/load`` MCP
+            # codex app-server exposes ``session/load`` MCP
             # call to check whether a session is still alive on the
             # server side. Resume probes translate the response into
             # the three-state ResumeStatus.

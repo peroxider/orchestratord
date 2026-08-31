@@ -53,7 +53,7 @@ class OpenCodeBackend:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: opencode serve exposes session/load HTTP probe
+            # opencode serve exposes session/load HTTP probe
             # (see session.py:probe_resume).
             resume_detection=True,
         )

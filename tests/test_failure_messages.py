@@ -290,7 +290,7 @@ class TestMessageActionability:
 
 
 # ---------------------------------------------------------------------------
-# ADR-003: 12-cell matrix for build_failure_message()
+# 12-cell matrix for build_failure_message()
 # (3 ResumeStatus states × 4 error_codes that exercise the timeout
 # routing; RESUMED is a benign acknowledgement and only one cell.)
 # ---------------------------------------------------------------------------

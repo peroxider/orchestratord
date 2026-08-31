@@ -58,7 +58,7 @@ class DshBackend:
             cost_reporting=True,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: DSH SDK offers no resume probe; the orchestrator
+            # DSH SDK offers no resume probe; the orchestrator
             # must treat this as UNDETECTABLE (see session.py:probe_resume).
             resume_detection=False,
         )

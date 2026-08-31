@@ -13,7 +13,7 @@ OPENCODE_DESCRIPTOR = BackendDescriptor(
         "streaming_deltas",
         "approval_hooks",
         "parallel_sessions",
-        # ADR-003: opencode serve exposes session/load HTTP probe
+        # opencode serve exposes session/load HTTP probe
         # (see session.py:probe_resume).
         "resume_detection",
     }),

@@ -431,7 +431,7 @@ class ClaudeSession:
         pass
 
     async def probe_resume(self) -> ResumeStatus:
-        # ADR-003 §2.4: Claude doesn't currently support a cross-process
+        # Claude doesn't currently support a cross-process
         # resume probe — return UNDETECTABLE so the orchestrator falls
         # through to its best-effort replay path.
         if not self._spec.resume_session_id:

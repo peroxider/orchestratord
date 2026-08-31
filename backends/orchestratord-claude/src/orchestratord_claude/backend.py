@@ -1,6 +1,6 @@
 """ClaudeBackend — CLI backend wrapping the ``claude -p`` invocation.
 
-Per-turn spawn model (DESIGN_backends_hardening.md §3, ADR-003 §2):
+Per-turn spawn model (DESIGN_backends_hardening.md §3):
 
 * Each :py:meth:`create_session` returns a :class:`ClaudeSession`
   that holds the spec but does not launch the CLI until the first

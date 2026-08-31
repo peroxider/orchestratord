@@ -36,7 +36,7 @@ class CodexSession:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: the codex CLI is a per-turn subprocess wrapper;
+            # the codex CLI is a per-turn subprocess wrapper;
             # there is no cross-process state to probe before send.
             # The orchestrator must surface this as UNDETECTABLE.
             resume_detection=False,

@@ -120,7 +120,7 @@ class HermesSession:
     async def probe_resume(self) -> ResumeStatus:
         """Hermes explicitly does not support cross-process resume.
 
-        Per ADR-003 / DESIGN §3.3 the hermes backend must return
+        The hermes backend must return
         ``REJECTED`` so the orchestrator does not waste a turn on a
         doomed ``send()``. The orchestrator will emit a structured
         ``resume_rejected`` event with ``reason='unsupported'``.

@@ -151,7 +151,7 @@ class CodexBackend:
                 cost_reporting=False,
                 tool_filtering=False,
                 takeover=False,
-                # ADR-003: AppServer backend exposes session/load MCP
+                # AppServer backend exposes session/load MCP
                 # probe (see app_server_session.py:probe_resume).
                 resume_detection=True,
             )
@@ -164,7 +164,7 @@ class CodexBackend:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: CLI backend has no cross-process probe path.
+            # CLI backend has no cross-process probe path.
             resume_detection=False,
         )
 

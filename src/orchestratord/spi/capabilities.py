@@ -44,7 +44,7 @@ class BackendCapabilities:
     tool_filtering: bool = False
     takeover: bool = False
     goal_mode: bool = False
-    # resume_detection (DESIGN_graded_timeouts_and_resume.md §2.4, ADR-003):
+    # resume_detection (DESIGN_graded_timeouts_and_resume.md §2.4):
     # True iff the backend can answer probe_resume() with a meaningful
     # RESUMED / REJECTED verdict. False means the backend MUST return
     # ResumeStatus.UNDETECTABLE.  Note: ``resumable`` is the orthogonal

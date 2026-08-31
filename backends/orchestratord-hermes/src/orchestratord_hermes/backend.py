@@ -46,7 +46,7 @@ class HermesBackend:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # ADR-003: hermes has no resume probe — backend declares
+            # hermes has no resume probe — backend declares
             # unsupported (REJECTED). resume_detection stays False.
             resume_detection=False,
         )

@@ -1,9 +1,9 @@
 """Unit tests for goal-mode (Ralph-loop) integration in ClawcodexSession.
 
-Per ADR-002 §7, these tests mock the GoalManager (which lives in the
-clawcodex source tree, not in the orchestratord repo) and verify the
-ClawcodexSession wiring: event emission, recursive continuation,
-failure-mode handling, and workspace-change detection.
+These tests mock the GoalManager (which lives in the clawcodex source
+tree, not in the orchestratord repo) and verify the ClawcodexSession
+wiring: event emission, recursive continuation, failure-mode handling,
+and workspace-change detection.
 """
 
 from __future__ import annotations

@@ -39,8 +39,8 @@ def _known_descriptor_names() -> list[str]:
 def test_resolve_backend_returns_degrading_backend_instance() -> None:
     """``resolve_backend("clawcodex-dev")`` returns a ``DegradingBackend``.
 
-    Per ADR-001 §3, the registry always wraps implementations in
-    :class:`DegradingBackend` to enforce core degradation paths uniformly.
+    The registry always wraps implementations in :class:`DegradingBackend`
+    to enforce core degradation paths uniformly.
     """
     descs = discover_descriptors()
     if "clawcodex-dev" not in descs:

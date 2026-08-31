@@ -4,7 +4,7 @@ Each function returns a concise, actionable message following the
 "What happened -> Why -> What to do next" structure, suitable for both
 IM notifications (WeChat/Slack) and issue tracker comments.
 
-ADR-003 routing (DESIGN_graded_timeouts_and_resume.md §4):
+Routing (DESIGN_graded_timeouts_and_resume.md §4):
 
 Failure messages are now routed by ``ResumeStatus`` + ``error_code``
 rather than a single ``timeout_ms`` field. The 5-level timeout
@@ -399,7 +399,7 @@ def end_reason_guidance(
 
 
 # ---------------------------------------------------------------------------
-# ADR-003: ResumeStatus + error_code routing (DESIGN §4)
+# ResumeStatus + error_code routing (DESIGN §4)
 # ---------------------------------------------------------------------------
 
 

@@ -40,7 +40,7 @@ CODEX_APP_SERVER_DESCRIPTOR = BackendDescriptor(
         "interrupt",
         "approval_hooks",
         "parallel_sessions",
-        # ADR-003: AppServer backend exposes session/load MCP probe
+        # AppServer backend exposes session/load MCP probe
         # (see app_server_session.py:probe_resume).
         "resume_detection",
     }),

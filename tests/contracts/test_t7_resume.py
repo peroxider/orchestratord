@@ -1,6 +1,6 @@
 """T7 — Resume: close → resume_session_id rebuild → history visible.
 
-Verifies the cross-backend SPI resume contract (DESIGN §2, ADR-003):
+Verifies the cross-backend SPI resume contract (DESIGN §2):
 
 1. ``SessionSpec.resume_session_id`` reaches
    ``Backend.create_session(spec)``.

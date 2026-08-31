@@ -1,4 +1,4 @@
-"""Tests for the 5-level SessionSpec timeout classification (ADR-003).
+"""Tests for the 5-level SessionSpec timeout classification.
 
 DESIGN_graded_timeouts_and_resume.md §1.4 invariants:
 
@@ -159,7 +159,7 @@ class TestValidationSkippedWhenTotalAbsent:
 
 
 class TestBackwardCompatConstruction:
-    """The pre-ADR-003 callers used only the deprecated aliases.
+    """The pre-refactor callers used only the deprecated aliases.
     They must continue to construct a valid spec without raising."""
 
     def test_legacy_construction(self) -> None:
