@@ -527,13 +527,10 @@ def _build_issue_update_payload(
 ) -> dict[str, Any]:
     """Build the PATCH payload for :meth:`RepositoryIssueClient.update_issue`.
 
-    For ``access_token``-auth platforms (Gitee, GitCode) the ``state``
-    parameter is translated to ``state_event`` — GitLab-style API.
-    **Known limitation (GitCode)**: ``state_event=close`` is accepted
-    (HTTP 200) but does **not** actually close the issue. This is a
-    platform-side bug; callers that rely on the close side-effect
-    should verify the issue state after the call or degrade gracefully.
-    See ``tests/telemetry/telemetry_issue_push_real.py`` for reproduction.
+    For generic ``access_token``-auth platforms the ``state`` parameter is
+    translated to ``state_event`` — GitLab-style API. GitCode lifecycle
+    transitions are handled before this helper because its documented
+    endpoint uses a distinct URL and ``state=close|reopen`` form contract.
     """
     payload: dict[str, Any] = {}
     normalized = (state or "").strip().lower()

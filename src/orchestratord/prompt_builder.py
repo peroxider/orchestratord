@@ -191,24 +191,46 @@ class PromptBuilder:
         else:
             task_dict = dict(task)
 
-        # Backward compat: keep "issue" key for existing templates.
-        # The legacy issue dict may lack "identifier"/"title" while
-        # templates render {{ issue.identifier }} / {{ issue.title }} —
-        # Jinja2 fails on the missing key ("dict object has no attribute
-        # '...'"). Fill them in so the render never errors.
-        _issue_val = task_dict.get("context", task_dict)
-        if isinstance(_issue_val, dict):
-            _fills = {
-                "identifier": _issue_val.get("id", ""),
+        raw_issue_context = task_dict.get("context", task_dict)
+        issue_context = (
+            dict(raw_issue_context)
+            if isinstance(raw_issue_context, dict)
+            else dict(task_dict)
+        )
+        if isinstance(task, AgentTask):
+            # ``issue`` is the compatibility namespace used by existing
+            # WORKFLOW.md templates.  AgentTask stores tracker fields under
+            # explicit ``issue_*`` keys, so restore the legacy aliases rather
+            # than handing Jinja a dict that has no ``identifier``/``title``.
+            legacy_aliases = {
+                "id": issue_context.get("issue_id", task_dict.get("id", "")),
+                "identifier": issue_context.get(
+                    "issue_identifier",
+                    task_dict.get("id", ""),
+                ),
+                "title": task_dict.get("title", ""),
+                "description": task_dict.get("description", ""),
+                "labels": task_dict.get("labels", []),
+                "priority": task_dict.get("priority"),
+            }
+        else:
+            # Non-AgentTask callers may pass a bare issue dict that lacks
+            # "identifier"/"title" while templates render
+            # {{ issue.identifier }} / {{ issue.title }} — Jinja2 fails on
+            # the missing key ("dict object has no attribute '...'");
+            # fill them in so the render never errors.
+            legacy_aliases = {
+                "identifier": issue_context.get("id", ""),
                 "title": "",
             }
-            _missing = {k: v for k, v in _fills.items() if not _issue_val.get(k)}
-            if _missing:
-                _issue_val = dict(_issue_val, **_missing)
+        for key, value in legacy_aliases.items():
+            issue_context.setdefault(key, value)
+
         context = {
             "attempt": attempt,
             "task": _to_jinja_value(task_dict),
-            "issue": _to_jinja_value(_issue_val),
+            # Backward compat: keep "issue" key for existing templates
+            "issue": _to_jinja_value(issue_context),
             "clarification": clarification_context,
             "pending_question": pending_question,
             "options": options,

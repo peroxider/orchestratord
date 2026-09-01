@@ -14,13 +14,12 @@ import os
 import sys
 import time
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 from orchestratord.spi.approval import ApprovalDecision
+from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.events import EventEnvelope, EventKind
-from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
 
 # Ensure the clawcodex-ascend source tree is on sys.path so the
@@ -70,6 +69,7 @@ class ClawcodexSession:
         )
         self._event_queue: asyncio.Queue[EventEnvelope | None] = asyncio.Queue()
         self._current_task: asyncio.Task[Any] | None = None
+        self._current_runner: Any | None = None
         self._seq = 0
         self._closed = False
         # Goal-mode state
@@ -78,6 +78,7 @@ class ClawcodexSession:
         self._goal_state: dict[str, Any] | None = None
         self._cumulative_tokens: int = 0
         self._cumulative_cost_usd: float = 0.0
+        self._native_turn_count = 0
         self._events_buffer: list[EventEnvelope] = []
 
         if spec.goal_condition:
@@ -110,11 +111,12 @@ class ClawcodexSession:
 
     async def interrupt(self) -> None:
         """Clawcodex QueryRunner does not support interrupt natively."""
-        pass
 
     async def approve(self, request_id: str, decision: ApprovalDecision) -> None:
-        """Approval is handled by the clawcodex tool system natively."""
-        pass
+        """Release a native ClawCodex permission waiter with ``decision``."""
+        runner = self._current_runner
+        if runner is None or not runner.approve(request_id, decision):
+            logger.warning("approve() called for unknown request_id=%s", request_id)
 
     async def probe_resume(self) -> ResumeStatus:
         """Probe whether the resume target transcript is reachable.
@@ -197,7 +199,7 @@ class ClawcodexSession:
                 timeout=probe_timeout,
             )
             return ResumeStatus.RESUMED if ok else ResumeStatus.REJECTED
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "ClawcodexSession._probe_resume_via_sdk: probe timed out "
                 "after %.1fs — falling back to directory check",
@@ -284,6 +286,8 @@ class ClawcodexSession:
             except Exception:
                 logger.warning("ClawcodexSession: failed to serialize goal state", exc_info=True)
         if self._current_task is not None and not self._current_task.done():
+            if self._current_runner is not None:
+                self._current_runner.cancel_pending_approvals("session closed")
             self._current_task.cancel()
             try:
                 await self._current_task
@@ -294,6 +298,8 @@ class ClawcodexSession:
         """Synchronous close — best-effort, does not await task cancellation."""
         self._closed = True
         if self._current_task is not None and not self._current_task.done():
+            if self._current_runner is not None:
+                self._current_runner.cancel_pending_approvals("session closed")
             self._current_task.cancel()
 
     # ------------------------------------------------------------------
@@ -440,39 +446,53 @@ class ClawcodexSession:
         try:
             from extensions.api.query import QueryConfig, QueryRunner
 
-            config = QueryConfig(
-                prompt=content,
-                workspace=self._spec.cwd,
-                provider=self._spec.provider,
-                model=self._spec.model,
-                max_turns=self._spec.max_turns,
-                permission_mode=self._spec.permission_mode,
-                append_system_prompt=self._spec.system_prompt,
-                tools=self._spec.tools_allow,
-                env=self._spec.env,
-                # resume_session_id from the orchestrator core is the run_id,
-                # never a real clawcodex session id — passing it down makes
-                # headless Session.resume(run_id) fail with cli_error(2) and
-                # kill every run. Keep it None until real resume lands on
-                # both sides (see TEMP-DISABLED resume_detection in backend.py).
-                resume_session_id=None,
-                run_id=self._spec.run_id,
-                debug_log_path=self._spec.debug_log_path,
-                # The orchestrator's SessionSpec timeout_* fields default to
-                # None; passing None into QueryConfig makes the clawcodex
-                # stream compare `None > 0` and crash every run
-                # ("'>' not supported between instances of 'NoneType' and
-                # 'int'"). Fall back to QueryConfig defaults when unset.
-                timeout_s=self._spec.timeout_s or 1800.0,
-                stall_timeout_s=self._spec.stall_timeout_s or 300.0,
-                stall_warn_s=self._spec.stall_warn_s or 30.0,
-                agent_id=self._spec.extra.get("agent_id"),
-                runtime_tasks=self._spec.extra.get("runtime_tasks"),
-                control_drain_fn=self._spec.extra.get("control_drain_fn"),
-                pause_wait_fn=self._spec.extra.get("pause_wait_fn"),
-                pause_gate=self._spec.extra.get("pause_gate"),
-            )
+            config_kwargs: dict[str, Any] = {
+                "prompt": content,
+                "workspace": self._spec.cwd,
+                "provider": self._spec.provider,
+                "model": self._spec.model,
+                "max_turns": self._spec.max_turns,
+                "permission_mode": self._spec.permission_mode,
+                "append_system_prompt": self._spec.system_prompt,
+                "tools": self._spec.tools_allow,
+                "env": self._spec.env,
+                # resume_session_id is only populated for genuine resume
+                # requests (the core keeps run_id and resume_session_id
+                # separate); passing the orchestrator run_id here would make
+                # headless Session.resume() fail. None falls through to a
+                # fresh session, matching upstream's TEMP-DISABLED guard.
+                "resume_session_id": self._spec.resume_session_id,
+                "run_id": self._spec.run_id,
+                "debug_log_path": self._spec.debug_log_path,
+                "agent_id": self._spec.extra.get("agent_id"),
+                "runtime_tasks": self._spec.extra.get("runtime_tasks"),
+                "control_drain_fn": self._spec.extra.get("control_drain_fn"),
+                "pause_wait_fn": self._spec.extra.get("pause_wait_fn"),
+                "pause_gate": self._spec.extra.get("pause_gate"),
+            }
+            # SessionSpec timeout_* fields default to None; passing None into
+            # QueryConfig makes the stream compare `None > 0` and crash
+            # ("'>' not supported between instances of 'NoneType' and
+            # 'int'"). Only pass timeouts that are explicitly set, so
+            # QueryConfig keeps its own defaults otherwise.
+            total_timeout = self._spec.total_timeout_s
+            if total_timeout is None:
+                total_timeout = self._spec.timeout_s
+            if total_timeout is not None:
+                config_kwargs["timeout_s"] = total_timeout
+            inactivity_timeout = self._spec.inactivity_timeout_s
+            if inactivity_timeout is None:
+                inactivity_timeout = self._spec.stall_timeout_s
+            if inactivity_timeout is not None:
+                config_kwargs["stall_timeout_s"] = inactivity_timeout
+            if self._spec.stall_warn_s is not None:
+                config_kwargs["stall_warn_s"] = self._spec.stall_warn_s
+            if self._spec.approval is not None:
+                config_kwargs["approval_timeout_s"] = self._spec.approval.timeout_seconds
+
+            config = QueryConfig(**config_kwargs)
             runner = QueryRunner(config)
+            self._current_runner = runner
             async for event in runner.stream():
                 translated = self._translate_event(event)
                 if translated is not None:
@@ -503,6 +523,7 @@ class ClawcodexSession:
                 )
             )
         finally:
+            self._current_runner = None
             # Sentinel: signals end of this turn's event stream.
             await self._event_queue.put(None)
 
@@ -524,6 +545,7 @@ class ClawcodexSession:
         - SessionComplete.reason: str
         """
         from extensions.api.query import (
+            ApprovalRequestEvent,
             PhaseComplete,
             SessionComplete,
             TextDelta,
@@ -538,6 +560,19 @@ class ClawcodexSession:
                 timestamp=self._now(),
                 kind=EventKind.TEXT_DELTA,
                 payload={"text": event.content, "delta": event.content},
+            )
+        elif isinstance(event, ApprovalRequestEvent):
+            return EventEnvelope(
+                seq=self._next_seq(),
+                timestamp=self._now(),
+                kind=EventKind.APPROVAL_REQUEST,
+                payload={
+                    "request_id": event.request_id,
+                    "call_id": event.call_id,
+                    "tool_name": event.tool_name,
+                    "arguments": event.arguments,
+                    "message": event.message,
+                },
             )
         elif isinstance(event, ToolCallEvent):
             return EventEnvelope(
@@ -564,13 +599,16 @@ class ClawcodexSession:
                 },
             )
         elif isinstance(event, TurnComplete):
+            turn_delta = max(int(event.turn or 0), 1)
+            self._native_turn_count += turn_delta
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),
                 kind=EventKind.TURN_COMPLETE,
                 payload={
-                    "reason": str(event.turn),
-                    "turn": event.turn,
+                    "reason": "completed",
+                    "turn": self._native_turn_count,
+                    "turn_delta": turn_delta,
                 },
             )
         elif isinstance(event, PhaseComplete):

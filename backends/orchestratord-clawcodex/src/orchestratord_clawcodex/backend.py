@@ -85,11 +85,12 @@ class ClawcodexBackend:
             goal_mode=True,
             # clawcodex exposes a transcript probe via
             # QueryRunner.probe_transcript (see session.py:probe_resume).
-            # TEMP-DISABLED: probe_transcript is not yet implemented on the
-            # clawcodex side (upstream has no such method). Keep resume
-            # detection OFF so the core does not probe and fail every run;
-            # re-enable once the interface lands on both sides.
-            resume_detection=False,
+            # Upstream TEMP-DISABLED this bit because a missing SDK probe
+            # would "probe and fail every run". That hazard no longer
+            # exists: probe_resume() is dual-path (SDK probe_transcript
+            # → session_storage directory check → UNDETECTABLE), so every
+            # failure mode degrades gracefully and never kills a run.
+            resume_detection=True,
         )
 
     def create_session(self, spec: SessionSpec) -> AgentSession:

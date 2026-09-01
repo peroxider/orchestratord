@@ -59,3 +59,47 @@ def test_cli_parser_supports_swarm_aliases() -> None:
     assert alias.swarm is True
     effort = build_parser().parse_args(["--effort", "swarm", "do work"])
     assert effort.effort == "swarm"
+
+
+def _llm_revised_payload() -> str:
+    return json.dumps(
+        {
+            "goal": "Complex task",
+            "subtasks": [
+                {
+                    "id": "t1",
+                    "title": "Analyze",
+                    "description": "analyze the repo",
+                    "depends_on": [],
+                    "verification": "checks pass",
+                    "affected_files": [],
+                }
+            ],
+            "waves": [["t1"]],
+            "max_parallel": 2,
+        }
+    )
+
+
+def test_llm_revised_plan_logs_without_name_error() -> None:
+    """Regression: the LLM revision success path referenced an undefined
+    module-level ``logger`` and raised NameError for every revised plan."""
+    issue = Issue(id="i-1", identifier="ISSUE-1", title="Complex task")
+    decomposer = TaskDecomposer(
+        llm_client=lambda prompt: _llm_revised_payload(),
+        planner_strategy="refine",
+    )
+    plan = asyncio.run(decomposer.decompose_issue(issue))
+    assert [subtask.id for subtask in plan.subtasks] == ["t1"]
+
+
+def test_llm_revision_failure_falls_back_to_seed_plan() -> None:
+    """Regression: the LLM revision failure path referenced an undefined
+    module-level ``logger``; it must log and return the seed plan."""
+    issue = Issue(id="i-1", identifier="ISSUE-1", title="Complex task")
+    decomposer = TaskDecomposer(
+        llm_client=lambda prompt: "not-json",
+        planner_strategy="refine",
+    )
+    plan = asyncio.run(decomposer.decompose_issue(issue))
+    assert plan.subtasks  # seed plan is returned unchanged

@@ -10,7 +10,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # ToolCallEvent — the event object passed to policy.evaluate()
 # ---------------------------------------------------------------------------
@@ -147,13 +146,18 @@ _APPROVAL_POLICY_MAP: dict[str | int, type[ApprovalPolicy]] = {
 def get_approval_policy(policy_name: str | dict[str, Any]) -> ApprovalPolicy:
     """Resolve policy name (or inline dict) to an ApprovalPolicy instance."""
     if isinstance(policy_name, dict):
-        # Inline dict config — treat as "never" (auto-approve) for safety
-        return NeverApprovalPolicy()
+        # Structured policies describe classes of approval prompts that must
+        # be rejected.  The generic SPI event does not expose enough backend-
+        # specific detail to distinguish those classes, so autonomous mode
+        # must fail closed instead of silently converting a reject policy to
+        # ``never`` (auto-approve).
+        return AskApprovalPolicy()
 
     name = str(policy_name).strip().lower()
     policy_cls = _APPROVAL_POLICY_MAP.get(name)
     if policy_cls is None:
-        return NeverApprovalPolicy()
+        # A misspelt policy must never widen permissions.
+        return AskApprovalPolicy()
     return policy_cls()
 
 
@@ -165,4 +169,5 @@ def build_approval_policy_map(
     Mirrors INTEGRATION.md section 3.5 AgentRunner._approval_policy_map.
     """
     raw = getattr(sandbox_config, "approval_policy", "never") or "never"
-    return {raw: get_approval_policy(raw)}
+    key = raw if isinstance(raw, str) else "inline"
+    return {key: get_approval_policy(raw)}

@@ -16,6 +16,9 @@ venv/
 .reports/
 .orchestratord/
 /.idea/
+.claude/
+.trae/
+AGENTS.md
 .env
 .env.*
 !.env.example

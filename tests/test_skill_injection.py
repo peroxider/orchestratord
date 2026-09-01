@@ -157,3 +157,80 @@ class TestSkillToolExposure:
             system_prompt="SYS",
         )
         assert spec.extra["runtime_tasks"] == {"task-1": "running"}
+
+    def test_current_run_id_is_not_an_implicit_resume_target(self):
+        from types import SimpleNamespace
+
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=AgentConfig(),
+            sandbox_config=SandboxConfig(),
+        )
+        spec = runner._build_session_spec(
+            session=SimpleNamespace(
+                workspace=SimpleNamespace(path="."),
+                run_id="new-run",
+                debug_log_path=None,
+                _runtime_tasks=None,
+            ),  # type: ignore[arg-type]
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="SYS",
+        )
+        assert spec.run_id == "new-run"
+        assert spec.resume_session_id is None
+
+    def test_explicit_resume_target_is_preserved(self):
+        from types import SimpleNamespace
+
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=AgentConfig(),
+            sandbox_config=SandboxConfig(),
+        )
+        spec = runner._build_session_spec(
+            session=SimpleNamespace(
+                workspace=SimpleNamespace(path="."),
+                run_id="existing-run",
+                debug_log_path=None,
+                _runtime_tasks=None,
+            ),  # type: ignore[arg-type]
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="SYS",
+            resume_session_id="existing-run",
+        )
+        assert spec.resume_session_id == "existing-run"
+
+    def test_agent_timeouts_are_mapped_to_session_spec(self):
+        from types import SimpleNamespace
+
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        agent = AgentConfig(
+            run_timeout_ms=90_000,
+            stall_timeout_ms=45_000,
+            stall_warn_ms=5_000,
+        )
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=agent,
+            sandbox_config=SandboxConfig(),
+        )
+        spec = runner._build_session_spec(
+            session=SimpleNamespace(
+                workspace=SimpleNamespace(path="."),
+                run_id="run-1",
+                debug_log_path="debug.ndjson",
+                _runtime_tasks=None,
+            ),  # type: ignore[arg-type]
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="SYS",
+        )
+        assert spec.total_timeout_s == 90.0
+        assert spec.inactivity_timeout_s == 45.0
+        assert spec.idle_watchdog_timeout_s == 90.0
+        assert spec.stall_warn_s == 5.0
+        assert spec.debug_log_path == "debug.ndjson"
