@@ -56,6 +56,28 @@ def run(args: argparse.Namespace) -> int:
         except (BackendNotFoundError, RuntimeError) as exc:
             print(f"backend check failed: {exc}", file=sys.stderr)
             return 1
+
+        # Strict resolution only validates the descriptor. Run the
+        # backend's preflight with an environment-derived spec so missing
+        # credentials / unconfigurable providers surface HERE instead of
+        # mid-run as an opaque error.
+        import os
+
+        from orchestratord.spi.backend import SessionSpec
+
+        spec = SessionSpec(
+            cwd=os.getcwd(),
+            provider=getattr(args, "provider", None),
+        )
+        try:
+            backend.preflight(spec)
+        except Exception as exc:  # noqa: BLE001 - doctor must report, not crash
+            print(
+                f"backend {args.name!r} is NOT ready: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
         print(f"backend {args.name!r} is ready ({backend.display_name})")
         return 0
 

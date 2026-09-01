@@ -14,6 +14,7 @@ process or contacting a provider.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -170,3 +171,127 @@ def test_dsh_preflight_rejects_incomplete_harness_sdk(
     message = str(raised.value)
     assert "DeepSeekHarness" in message
     assert "DeepSeekHarnessConfig" in message
+
+
+def test_dsh_preflight_rejects_non_deepseek_provider(spec: SessionSpec) -> None:
+    """A provider without a runtime adapter must fail preflight
+    with an actionable message — not die mid-stage with the opaque
+    "no adapter registered for provider X" runtime error.
+    """
+    spec.provider = "anthropic"
+
+    with pytest.raises(RuntimeError) as raised:
+        DshBackend().preflight(spec)
+
+    message = str(raised.value)
+    assert "anthropic" in message
+    assert "deepseek-official" in message
+    assert "agent.provider" in message
+
+
+def test_dsh_preflight_accepts_deepseek_provider(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec.provider = "deepseek-official"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    DshBackend().preflight(spec)  # must not raise
+
+
+def test_dsh_preflight_allows_missing_provider_default(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No provider configured → the backend default applies; preflight
+    must not reject a spec that would have worked.
+    """
+    spec.provider = None
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    DshBackend().preflight(spec)  # must not raise
+
+
+def test_dsh_preflight_requires_credential(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no api_key configured and no DEEPSEEK_API_KEY in the
+    environment, preflight must fail with an actionable message — the
+    historical behaviour reported ready and deferred the failure to
+    mid-run as an opaque error.
+    """
+    spec.provider = "deepseek-official"
+    spec.api_key = None
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError) as raised:
+        DshBackend().preflight(spec)
+
+    message = str(raised.value)
+    assert "DEEPSEEK_API_KEY" in message
+
+
+def test_dsh_preflight_accepts_env_credential(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec.provider = "deepseek-official"
+    spec.api_key = None
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    DshBackend().preflight(spec)  # must not raise
+
+
+def test_dsh_preflight_accepts_explicit_api_key(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec.provider = "deepseek-official"
+    spec.api_key = "sk-configured"
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    DshBackend().preflight(spec)  # must not raise
+
+
+def test_dsh_preflight_rejects_unresolvable_api_key_ref(
+    spec: SessionSpec, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A '$VAR' style api_key reference whose variable is missing must
+    be reported at preflight, not mid-run.
+    """
+    spec.provider = "deepseek-official"
+    spec.api_key = "${DSH_MISSING_KEY}"
+    monkeypatch.delenv("DSH_MISSING_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+    with pytest.raises(RuntimeError) as raised:
+        DshBackend().preflight(spec)
+
+    assert "DSH_MISSING_KEY" in str(raised.value)
+
+
+def test_doctor_reports_unready_without_credential(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`backend doctor dsh` must report unready when
+    DEEPSEEK_API_KEY is absent (historically reported ready).
+    """
+    import sys
+
+    from orchestratord.cli import backend as backend_cli
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    args = SimpleNamespace(name="dsh", backend_subcommand="doctor")
+
+    rc = backend_cli.run(args)
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "NOT ready" in err
+    assert "DEEPSEEK_API_KEY" in err
+
+
+def test_doctor_reports_ready_with_credential(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    args = SimpleNamespace(name="dsh", backend_subcommand="doctor")
+
+    from orchestratord.cli import backend as backend_cli
+
+    rc = backend_cli.run(args)
+
+    assert rc == 0
+    assert "ready" in capsys.readouterr().out

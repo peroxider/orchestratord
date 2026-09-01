@@ -202,6 +202,8 @@ class WorkflowResult:
     total_duration_seconds: float
     error: str | None = None
     stage_results: dict[int, StageResult] = field(default_factory=dict)
+    # Stage_id -> backend session run_id, for `run logs`.
+    stage_run_ids: dict[int, str | None] = field(default_factory=dict)
 
 
 class DeclarativeWorkflowEngine:
@@ -463,6 +465,11 @@ class DeclarativeWorkflowEngine:
             total_duration_seconds=total_duration,
             error=error_msg,
             stage_results=dict(self.state.stage_results),
+            stage_run_ids={
+                sid: res.run_id
+                for sid, res in self.state.stage_results.items()
+                if getattr(res, "run_id", None)
+            },
         )
 
     async def _wait_for_control(self) -> bool:
@@ -565,6 +572,11 @@ class DeclarativeWorkflowEngine:
             total_duration_seconds=total_duration,
             error=error_msg,
             stage_results=dict(self.state.stage_results),
+            stage_run_ids={
+                sid: res.run_id
+                for sid, res in self.state.stage_results.items()
+                if getattr(res, "run_id", None)
+            },
         )
 
     # ── 阶段执行 ──────────────────────────────────────────────────
@@ -688,6 +700,7 @@ class DeclarativeWorkflowEngine:
             outputs=getattr(run_result, "outputs", []),
             artifacts=getattr(run_result, "artifacts", {}),
             cost_usd=cost,
+            run_id=getattr(run_result, "run_id", None),
         )
 
     async def _run_gate_stage(self, stage: StageNode) -> StageResult:

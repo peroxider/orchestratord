@@ -26,7 +26,6 @@ from orchestratord.runner_utils import (
     _event_to_broadcast_dict as runner_event_to_broadcast_dict,
 )
 
-
 # ------------------------------------------------------------------
 # _event_to_broadcast_dict — new event types
 # ------------------------------------------------------------------
@@ -86,9 +85,9 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
         """A connected client receives the broadcast frame."""
         from orchestratord.agent_runner import AgentSession
         from orchestratord.control_socket import ControlSocket, send_cmd  # noqa: F401
+        from orchestratord.events.agent_events import PhaseComplete
         from orchestratord.issue_registry.issue import Issue
         from orchestratord.workspace import Workspace
-        from orchestratord.events.agent_events import PhaseComplete
 
         with TemporaryDirectory() as tmp:
             ws_path = Path(tmp) / "ws"
@@ -106,8 +105,19 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
 
                 reader, writer = await asyncio.open_unix_connection(str(sock_path))
 
-                # give the server a tick to register the client writer
-                await asyncio.sleep(0)
+                # The server registers the client writer only once its
+                # accept task has run — ``open_unix_connection`` returning
+                # does not guarantee that yet (the connect can complete off
+                # the accept queue). A single ``sleep(0)`` tick is a race:
+                # a broadcast before registration is silently dropped
+                # (``send_event`` no-ops on an empty client set). Poll until
+                # the server has registered us, with a bounded wait.
+                for _ in range(100):
+                    if cs._clients:
+                        break
+                    await asyncio.sleep(0.01)
+                else:
+                    self.fail("control socket never registered the client")
 
                 await runner_broadcast_to_socket(
                     session, PhaseComplete(phase=1, turn_count=1)

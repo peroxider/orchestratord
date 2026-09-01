@@ -92,6 +92,13 @@ class RunSession:
     _runtime_tasks: Any | None = None
     summary_comment_id: str | None = None
     tool_count: int = 0
+    # Cost telemetry: backends reporting real USD (clawcodex/claude
+    # SESSION_COMPLETE payload "total_cost_usd") land in cost_usd;
+    # backends reporting token usage (dsh payload "usage") land in
+    # token_usage. Read by AgentTaskResult.cost_usd and
+    # _update_run_diagnostics.
+    cost_usd: float = 0.0
+    token_usage: dict = field(default_factory=dict)
     verification_status: str | None = None
     verification_output: str | None = None
     report_path: str | None = None
@@ -165,3 +172,6 @@ class RetryItem:
     worker_host: str | None = None
     workspace_path: str = ""
     scheduled_at: float = field(default_factory=time.time)
+    # How many times a tracker-miss/fetch-failure has
+    # re-queued this item (ceiling in Orchestrator._retry_requeue_limit).
+    requeue_count: int = 0

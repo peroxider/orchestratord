@@ -16,7 +16,6 @@ from __future__ import annotations
 import importlib
 
 import pytest
-
 from orchestratord_dsh.backend import DshBackend
 
 
@@ -38,12 +37,19 @@ def test_dsh_capabilities_cost_reporting_is_true() -> None:
 
 def test_dsh_capabilities_baseline_unchanged() -> None:
     """Lock the rest of the capability matrix so future edits cannot
-    accidentally regress bits unrelated to Scheme C.
+    accidentally regress bits unrelated to the streaming pump.
     """
     backend = DshBackend()
     caps = backend.capabilities()
-    assert caps.streaming_deltas is False
-    assert caps.resumable is True
+    # The notification pump forwards assistant/chunk deltas as
+    # they arrive, so real deltas (not pseudo-splits) reach the core.
+    assert caps.streaming_deltas is True
+    # Honesty: cross-process resume fails with "id collision"
+    # (the runtime has no remount protocol for a persisted session).
+    # resumable=True was a false declaration that suppressed the core's
+    # degradation path; same-process multi-turn still works but that is
+    # NOT what the bit promises.
+    assert caps.resumable is False
     assert caps.interrupt is False
     assert caps.approval_hooks is False
     assert caps.parallel_sessions is True
@@ -56,9 +62,9 @@ def test_dsh_session_optimistic_cost_default() -> None:
     before the harness probe runs (the optimistic default; see
     ``DshSession._probe_cost_support``).
     """
-    from orchestratord.spi.backend import SessionSpec
-
     from orchestratord_dsh.session import DshSession
+
+    from orchestratord.spi.backend import SessionSpec
 
     session = DshSession(SessionSpec(cwd="/tmp"))
     assert session.capabilities.cost_reporting is True

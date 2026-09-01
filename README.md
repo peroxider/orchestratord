@@ -159,19 +159,21 @@ Each backend advertises a `BackendCapabilities` dataclass. A checkmark means the
 | Capability bit        | clawcodex | codex (Cli / As)¹ | dsh | hermes | opencode |
 | --------------------- | :-------: | :---------------: | :-: | :----: | :------: |
 | Family (heuristic)    | InProcess |   Cli / SdkProcess | Cli²|  Cli   | Protocol |
-| `streaming_deltas`    |     ✓     |      ✓ / ✓        |     |        |    ✓     |
-| `resumable`           |           |      ✓ /          |  ✓  |   ✓    |          |
+| `streaming_deltas`    |     ✓     |      ✓ / ✓        |  ✓  |        |    ✓     |
+| `resumable`           |           |      ✓ /          |     |   ✓    |          |
 | `interrupt`           |           |        / ✓        |     |        |          |
 | `approval_hooks`      |     ✓     |        / ✓        |     |        |    ✓     |
 | `parallel_sessions`   |           |      ✓ / ✓        |  ✓  |   ✓    |    ✓     |
-| `cost_reporting`      |     ✓     |                   |  ✓  |        |          |
+| `cost_reporting`      |     ✓     |                   |  ✓³ |        |          |
 | `tool_filtering`      |     ✓     |                   |     |        |          |
 | `takeover`            |     ✓     |                   |     |        |          |
 | **Score**             |  **6/8**  |   **2/8** / **4/8** |**3/8**|**2/8**|  **3/8** |
 
 ¹ `codex` advertises two runtime modes. At construction time the backend probes `codex app-server --help`: a 0 exit means the AppServer JSON-RPC path is available and the backend lights up `streaming_deltas + interrupt + approval_hooks` (SdkProcess, 4/8). If the probe fails (older `codex` binaries, missing `codex` on PATH, or `--yolo`-style Cli-only installs), the backend falls back to `codex exec --json` and reports the historical 2/8 Cli bits. `backend_registry._classify_family()` returns `SdkProcess` in the first case and `Cli` in the second.
 
-² `dsh` documents itself as `SdkProcess` but its capability bits do not satisfy the SdkProcess heuristic (which requires `interrupt + approval_hooks + streaming_deltas`), so `backend_registry._classify_family()` classifies it as `Cli`. A mismatch between self-description and reported capabilities.
+² `dsh` streams real deltas via its notification pump, but the SdkProcess heuristic requires `interrupt + approval_hooks + streaming_deltas` together, so `backend_registry._classify_family()` still classifies it as `Cli`. The descriptor mirrors this classification. Cross-process `resume` is off: the harness runtime has no remount protocol for persisted sessions (id collision).
+
+³ dsh reports real **token usage** (accumulated from `assistant/message` events, carried on the `SESSION_COMPLETE` payload as `usage`); it does not fabricate USD — there is no price table. Backends that report USD (clawcodex/claude) use the `total_cost_usd` payload key; the core extracts both.
 
 **Capability degradation is enforced by the core, not by backends** (`src/orchestratord/spi/capabilities.py:21`):
 
@@ -192,7 +194,7 @@ The session SPI exposes a single async iterator of `EventEnvelope` events. Backe
 
 | EventKind         | clawcodex | codex (Cli / As) | dsh | hermes | opencode |
 | ----------------- | :-------: | :-------------: | :-: | :----: | :------: |
-| `TEXT_DELTA`      |     ✓     |       / ✓       |     |        |    ✓     |
+| `TEXT_DELTA`      |     ✓     |       / ✓       |  ✓  |        |    ✓     |
 | `TEXT`            |           |       ✓         |  ✓  |   ✓    |    ✓ (fallback) |
 | `TOOL_CALL`       |     ✓     |                 |  ✓  |        |    ✓     |
 | `TOOL_RESULT`     |     ✓     |                 |  ✓  |        |    ✓     |
@@ -206,7 +208,7 @@ Observations from reading the session modules:
 
 - **`clawcodex`** is the only backend that emits the full tool lifecycle (`TOOL_CALL` + `TOOL_RESULT`) and the only one that emits `TEXT_DELTA` and `PHASE_COMPLETE`. Native permission waits are translated to `APPROVAL_REQUEST`; the core evaluates its approval policy and calls `approve()` to release the matching ClawCodex waiter. `interrupt()` remains unsupported and is therefore not advertised.
 - **`codex`** ships two implementations selected at runtime. The backend probes `codex app-server --help` (`backends/orchestratord-codex/src/orchestratord_codex/backend.py`); a 0 exit wires up `CodexAppServerSession` (`backends/orchestratord-codex/src/orchestratord_codex/app_server_session.py`) with `streaming_deltas + interrupt + approval_hooks` (4/8, SdkProcess). A non-0 exit or missing binary falls back to `CodexSession` (2/8, Cli, `codex exec --json`).
-- **`dsh`** wraps `deepseek-harness-sdk`. The SDK is synchronous, so all harness calls are dispatched via `asyncio.to_thread` (`backends/orchestratord-dsh/src/orchestratord_dsh/session.py:67`). It translates `assistant/message`, `tool/call`, `tool/result`, `turn/end`. As of `DESIGN_backends_hardening.md` Scheme C it also emits an `ERROR` branch when the SDK raises or `finish_reason` is non-success (`dsh_init_error` / `dsh_error` / `dsh_finish`), and advertises `cost_reporting=True` because the SDK surfaces token usage.
+- **`dsh`** wraps `deepseek-harness-sdk`. The SDK is synchronous, so each turn runs on a worker thread while a notification pump forwards `session.event` notifications into an asyncio queue — `send()` returns immediately and events flow incrementally (`backends/orchestratord-dsh/src/orchestratord_dsh/session.py`). It translates `assistant/chunk` (text/reasoning deltas → `TEXT_DELTA`), `assistant/message`, `tool/call`, `tool/result`, `turn/end`. As of `DESIGN_backends_hardening.md` Scheme C it also emits an `ERROR` branch when the SDK raises or `finish_reason` is non-success (`dsh_init_error` / `dsh_error` / `dsh_finish`, the latter carrying the real error message), and advertises `cost_reporting=True` backed by the token usage it accumulates onto the `SESSION_COMPLETE` payload.
 - **`hermes`** is the simplest CLI backend. It always passes `--yolo` (auto-approve) and `--pass-session-id` for resume. Tool events are not translated; only `TEXT/ERROR` are emitted. The docstring notes an upgrade path: "if hermes gateway protocol opens, migrate to Protocol family".
 - **`opencode`** spawns `opencode serve --port 0` and discovers the listening line via stderr regex. As of `DESIGN_backends_hardening.md` Scheme B, `send()` opens `POST /v1/chat` with `Accept: text/event-stream` and translates each `data:` frame into `TEXT_DELTA / TOOL_CALL / TOOL_RESULT / TURN_COMPLETE / ERROR`; `approval.request` frames are cached in `_pending_approvals` and forwarded through `session.approve()`. Old opencode binaries that return a non-SSE response degrade to a single `TEXT` event so consumers still see the bytes.
 

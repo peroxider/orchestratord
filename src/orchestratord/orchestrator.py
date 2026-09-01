@@ -102,6 +102,14 @@ logger = logging.getLogger(__name__)
 _CONTINUATION_RETRY_DELAY_MS = 1_000
 _FAILURE_RETRY_BASE_MS = 10_000
 
+# End reasons produced by explicit operator action. They are
+# terminal states — the auto-retry loop must not revive them.
+_NON_RETRYABLE_END_REASONS = frozenset({
+    "operator_stop",
+    "operator_takeover",
+    "operator_stopped",
+})
+
 
 def _operator_failure_detail(exc: BaseException) -> str:
     """Return a concise failure detail suitable for IM and registry records."""
@@ -2991,6 +2999,8 @@ class Orchestrator:
             output_len=len(getattr(session, "output_text", "") or ""),
             timeout_deadline_at=getattr(session, "timeout_deadline_at", None),
             workspace_dirty=getattr(session, "run_workspace_dirty", None),
+            cost_usd=getattr(session, "cost_usd", None),
+            token_usage=getattr(session, "token_usage", None),
         )
         if record is None:
             if not (issue_id or "").startswith("stage-"):
@@ -4326,6 +4336,22 @@ class Orchestrator:
         without forcing all retries to share it.
         """
         issue_id = session.issue.id or ""
+
+        # Operator-initiated stops must never be defeated by the
+        # auto-retry loop (stop → retry → stop burning API calls until
+        # max attempts). These end reasons are terminal; the operator
+        # can run the issue again explicitly via ``issue retry``.
+        end_reason = getattr(session, "session_end_reason", None)
+        if end_reason in _NON_RETRYABLE_END_REASONS:
+            logger.warning(
+                "Not auto-retrying issue_id=%s — end reason '%s' is "
+                "operator-initiated; use 'issue retry' to run again",
+                issue_id,
+                end_reason,
+            )
+            self._state.claimed.discard(issue_id)
+            return
+
         attempt = self._state.retry_attempts.get(issue_id, 0) + 1
         self._state.retry_attempts[issue_id] = attempt
 
@@ -4367,6 +4393,15 @@ class Orchestrator:
             error=f"agent failed: {session.status}",
         )
         self._state.retry_queue.append(retry)
+        # Persist the retry plan on the registry record so a
+        # daemon restart cannot silently drop a waiting retry and
+        # operators can see why nothing is running.
+        record = self._registry.get(issue_id)
+        if record is not None:
+            record.retry_count = attempt
+            record.next_retry_at = retry.scheduled_at + retry.delay_seconds
+            record.touch()
+            self._registry._save()
         logger.info(
             "Scheduled retry issue_id=%s attempt=%s delay=%sms",
             issue_id,
@@ -4503,6 +4538,47 @@ class Orchestrator:
                 data.pop(issue_id, None)
             sentinel_path.write_text(json.dumps(data, indent=2))
 
+    def _retry_requeue_limit(self) -> int:
+        """Ceiling for tracker-miss requeues.
+
+        A retry that the tracker permanently fails to report must not
+        loop forever; the cap mirrors ``max_retry_attempts``.
+        """
+        return max(1, int(getattr(self.workflow.agent, "max_retry_attempts", 5) or 5))
+
+    def _requeue_retry(self, retry: Any, now: float) -> bool:
+        """Re-queue a retry with a doubled, capped delay.
+
+        Returns ``False`` when the requeue ceiling is exhausted — the
+        item is dropped (with a warning) and the persisted plan cleared.
+        """
+        retry.requeue_count = getattr(retry, "requeue_count", 0) + 1
+        if retry.requeue_count > self._retry_requeue_limit():
+            logger.warning(
+                "Retry issue %s exceeded the requeue ceiling (%d) — "
+                "dropping the persisted retry plan; use 'issue retry' "
+                "to run again",
+                retry.issue_id,
+                self._retry_requeue_limit(),
+            )
+            self._clear_retry_plan(retry.issue_id)
+            return False
+        retry.delay_seconds = min(
+            retry.delay_seconds * 2,
+            self.workflow.agent.max_retry_backoff_ms / 1000.0,
+        )
+        retry.scheduled_at = now
+        self._state.retry_queue.append(retry)
+        return True
+
+    def _clear_retry_plan(self, issue_id: str) -> None:
+        """Clear ``next_retry_at`` on the registry record (best-effort)."""
+        record = self._registry.get(issue_id)
+        if record is not None and record.next_retry_at is not None:
+            record.next_retry_at = None
+            record.touch()
+            self._registry._save()
+
     async def _process_retry_queue(self) -> None:
         """Process retry queue with exponential backoff.
 
@@ -4513,15 +4589,19 @@ class Orchestrator:
 
         now = time.time()
         ready: list[Any] = []
-        remaining: list[Any] = []
+        not_ready: list[Any] = []
 
         for retry in self._state.retry_queue:
             if now >= retry.scheduled_at + retry.delay_seconds:
                 ready.append(retry)
             else:
-                remaining.append(retry)
+                not_ready.append(retry)
 
-        self._state.retry_queue = remaining
+        # Explicit reassembly — deferred items are appended to
+        # ``not_ready`` below and the queue is rewritten afterwards, so
+        # retention no longer depends on ``remaining`` aliasing the live
+        # queue list.
+        self._state.retry_queue = not_ready
 
         for retry in ready:
             # Skip if already running or completed
@@ -4532,7 +4612,7 @@ class Orchestrator:
             # Check concurrency slot
             if len(self._state.running) >= self._state.max_concurrent_agents:
                 logger.debug("Retry deferred issue_id=%s no concurrency slots", retry.issue_id)
-                remaining.append(retry)
+                self._state.retry_queue.append(retry)
                 continue
 
             # Re-fetch issue state from tracker
@@ -4540,16 +4620,25 @@ class Orchestrator:
                 issues = await self.tracker.fetch_issue_states_by_ids([retry.issue_id])
                 issue = issues.get(retry.issue_id)
                 if issue is None:
-                    logger.warning("Retry issue not found issue_id=%s", retry.issue_id)
+                    # A fetch that omits the issue is not a reason
+                    # to silently drop the retry — re-queue with an
+                    # extended delay so transient tracker paginations /
+                    # API hiccups cannot lose the plan.
+                    # a *permanently* vanished issue would otherwise loop
+                    # forever, so the requeue carries an attempt ceiling.
+                    requeued = self._requeue_retry(retry, now)
+                    if requeued:
+                        logger.warning(
+                            "Retry issue %s missing from tracker fetch — "
+                            "re-queued (requeue %d/%d)",
+                            retry.issue_id,
+                            retry.requeue_count,
+                            self._retry_requeue_limit(),
+                        )
                     continue
             except Exception as exc:
                 logger.error("Failed to fetch retry issue %s: %s", retry.issue_id, exc)
-                # Put back at end of queue with extended delay
-                retry.delay_seconds = min(
-                    retry.delay_seconds * 2, self.workflow.agent.max_retry_backoff_ms / 1000.0
-                )
-                retry.scheduled_at = now
-                remaining.append(retry)
+                self._requeue_retry(retry, now)
                 continue
 
             # Check if issue is still in active states
@@ -4557,14 +4646,19 @@ class Orchestrator:
                 s.strip().lower() for s in (getattr(self.tracker, "active_states", None) or [])
             ]
             if issue.state and issue.state.strip().lower() not in active_states:
-                logger.info(
-                    "Retry issue %s no longer active (state=%s), dropping",
+                logger.warning(
+                    "Retry issue %s no longer active (state=%s), dropping "
+                    "the persisted retry plan",
                     retry.issue_id,
                     issue.state,
                 )
+                self._clear_retry_plan(retry.issue_id)
                 continue
 
             self._state.claimed.add(retry.issue_id)
+            # The plan is being executed — clear next_retry_at so
+            # the registry reflects reality.
+            self._clear_retry_plan(retry.issue_id)
             await self._launch_issue(issue)
             logger.info(
                 "Retry launched issue_id=%s attempt=%s",

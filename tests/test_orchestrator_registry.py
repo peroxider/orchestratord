@@ -187,3 +187,41 @@ class TestBackwardCompatPreRegistry(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunDiagnosticsCost(unittest.TestCase):
+    """Run diagnostics must carry cost telemetry."""
+
+    def test_update_run_diagnostics_persists_cost_and_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            reg = IssueRegistry(Path(tmp) / "r.json")
+            reg.register(issue_id="9", issue_identifier="ISSUE-9")
+
+            record = reg.update_run_diagnostics(
+                "9",
+                run_id="run-9",
+                cost_usd=0.1234,
+                token_usage={"inputTokens": 4287, "outputTokens": 34},
+            )
+            assert record is not None
+            self.assertEqual(record.run_cost_usd, 0.1234)
+            self.assertEqual(
+                record.run_token_usage, {"inputTokens": 4287, "outputTokens": 34}
+            )
+            # Persisted to disk.
+            reloaded = IssueRegistry(Path(tmp) / "r.json").get("9")
+            assert reloaded is not None
+            self.assertEqual(reloaded.run_cost_usd, 0.1234)
+            self.assertEqual(
+                reloaded.run_token_usage, {"inputTokens": 4287, "outputTokens": 34}
+            )
+
+
+def test_tracker_config_has_no_dead_cordis_key() -> None:
+    """Tracker.cordis documented "forwarded via DSH_CORDIS_CONFIG"
+    but no code ever read it — the real chain is agent.cordis →
+    SessionSpec.cordis. The dead key must be gone.
+    """
+    from orchestratord.config.schema import TrackerConfig
+
+    assert "cordis" not in TrackerConfig.__dataclass_fields__

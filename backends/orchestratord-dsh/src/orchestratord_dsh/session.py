@@ -1,37 +1,62 @@
-"""DshSession — wraps deepseek-harness-sdk Session into the AgentSession SPI."""
+"""DshSession — wraps deepseek-harness-sdk Session into the AgentSession SPI.
+
+The SDK is synchronous (blocking ``subscription.next()`` inside
+``Session.run``), so each turn is dispatched to a worker thread while a
+notification pump forwards ``session.event`` payloads into an
+``asyncio.Queue``.  ``send()`` returns as soon as the turn is
+dispatched; events flow incrementally through ``events()``.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from orchestratord.spi.approval import ApprovalDecision
+from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.events import EventEnvelope, EventKind
-from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
-from orchestratord.spi.session import ResumeStatus
+
+logger = logging.getLogger(__name__)
 
 
 class DshSession:
     """Adapts a DeepSeek Harness SDK session into an AgentSession.
 
-    The SDK is synchronous (blocking ``subscription.next()``), so all
-    harness calls are dispatched via ``asyncio.to_thread`` to avoid
-    blocking the event loop.
+    Each ``send()`` dispatches one blocking ``harness.run()`` turn to a
+    worker thread. The SDK invokes ``on_notification`` on that thread
+    for every notification as it arrives; translated envelopes are
+    handed back to the event loop via ``call_soon_threadsafe`` and
+    drained by ``events()``. A ``SESSION_COMPLETE`` envelope is always
+    the last event of a turn, even when the turn fails.
     """
 
-    def __init__(self, spec: SessionSpec) -> None:
+    def __init__(
+        self,
+        spec: SessionSpec,
+        *,
+        harness_factory: Callable[[], Any] | None = None,
+    ) -> None:
         self._spec = spec
-        self.session_id = spec.resume_session_id or f"dsh-{id(self)}"
-        # cost_reporting=True is optimistic — the SDK may not surface a
-        # `usage` field on every release.  ``_probe_cost_support`` will
-        # downgrade this once the harness is instantiated and we know.
+        # ``id(self)`` looked unique but CPython reuses object ids
+        # after GC — two sessions could collide with a live persisted
+        # one. A random uuid cannot.
+        self.session_id = spec.resume_session_id or f"dsh-{uuid.uuid4().hex[:12]}"
+        # streaming_deltas=True: the notification pump forwards
+        # assistant/chunk text-delta / reasoning-delta frames as they
+        # arrive, so the core consumes real deltas (no pseudo-split).
         self.capabilities = BackendCapabilities(
-            streaming_deltas=False,
-            resumable=True,
+            streaming_deltas=True,
+            # Honesty: cross-process resume hits the runtime's
+            # "id collision" guard (no remount protocol for persisted
+            # sessions). Same-process multi-turn works but the bit
+            # promises more than that.
+            resumable=False,
             interrupt=False,
             approval_hooks=False,
             parallel_sessions=True,
@@ -39,11 +64,18 @@ class DshSession:
             tool_filtering=False,
             takeover=False,
         )
-        self._events: list[EventEnvelope] = []
+        self._harness_factory = harness_factory
+        self._queue: asyncio.Queue[EventEnvelope] = asyncio.Queue()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._turn_task: asyncio.Task[None] | None = None
+        self._turn_started = False
         self._seq = 0
         self._closed = False
         self._harness: Any = None
-        self._cost_probed = False
+        self._last_error_message: str | None = None
+        # Real token usage accumulated from assistant/message
+        # events (data.usage) — surfaced on SESSION_COMPLETE.
+        self._usage_totals: dict[str, int] = {}
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -52,147 +84,155 @@ class DshSession:
     def _now(self) -> float:
         return time.time()
 
-    def _get_harness(self) -> Any:
-        if self._harness is None:
-            from deepseek_harness.api import DeepSeekHarness, DeepSeekHarnessConfig
+    def _default_harness_factory(self) -> Any:
+        from deepseek_harness.api import DeepSeekHarness, DeepSeekHarnessConfig
 
-            config = DeepSeekHarnessConfig(
-                cwd=self._spec.cwd,
-                model=self._spec.model or "deepseek-v4-flash",
-                provider=self._spec.provider or "deepseek-official",
-                env=self._spec.env,
-                base_url=self._spec.base_url,
-                api_key=self._spec.api_key,
-                cordis=self._spec.cordis,
-                runtime_bin=self._spec.runtime_bin,
-            )
-            self._harness = DeepSeekHarness(config)
-            self._harness.start()
-            self._probe_cost_support()
-        return self._harness
-
-    def _probe_cost_support(self) -> None:
-        """Downgrade ``cost_reporting`` if the linked SDK exposes no usage field.
-
-        The optimistic default assumes the SDK ships ``usage`` on
-        ``RunResult``. If the attribute is missing we re-build
-        ``self.capabilities`` with the bit cleared so the orchestrator
-        core can fall back to its token estimator instead of expecting
-        data that will never arrive.
-        """
-        if self._cost_probed:
-            return
-        self._cost_probed = True
-        sample = getattr(self._harness, "sample_run", None)
-        has_usage_attr = sample is not None and "usage" in getattr(
-            sample, "__dict__", {}
+        config = DeepSeekHarnessConfig(
+            cwd=self._spec.cwd,
+            model=self._spec.model or "deepseek-v4-flash",
+            provider=self._spec.provider or "deepseek-official",
+            env=self._spec.env,
+            base_url=self._spec.base_url,
+            api_key=self._spec.api_key,
+            cordis=self._spec.cordis,
+            runtime_bin=self._spec.runtime_bin,
         )
-        # Most SDK builds do not yet expose ``sample_run``; treat the
-        # optimistic default as authoritative in that case.
-        if sample is not None and not has_usage_attr:
-            self.capabilities = BackendCapabilities(
-                streaming_deltas=self.capabilities.streaming_deltas,
-                resumable=self.capabilities.resumable,
-                interrupt=self.capabilities.interrupt,
-                approval_hooks=self.capabilities.approval_hooks,
-                parallel_sessions=self.capabilities.parallel_sessions,
-                cost_reporting=False,
-                tool_filtering=self.capabilities.tool_filtering,
-                takeover=self.capabilities.takeover,
-            )
+        harness = DeepSeekHarness(config)
+        harness.start()
+        return harness
+
+    def _ensure_harness(self) -> Any:
+        if self._harness is None:
+            factory = self._harness_factory or self._default_harness_factory
+            self._harness = factory()
+        return self._harness
 
     async def send(self, content: str | list[Any]) -> None:
         if self._closed:
             raise RuntimeError("session closed")
-
         text = content if isinstance(content, str) else str(content)
+
+        # Serialize turns: a follow-up send waits for the previous turn
+        # thread to finish (including its terminal SESSION_COMPLETE).
+        if self._turn_task is not None:
+            await self._turn_task
+
+        self._loop = asyncio.get_running_loop()
+        self._turn_started = True
+        self._turn_task = asyncio.create_task(
+            asyncio.to_thread(self._run_turn, text)
+        )
+
+    def _run_turn(self, text: str) -> None:
+        """Blocking turn body — runs on a worker thread."""
         error_emitted = False
         try:
             try:
-                harness = self._get_harness()
-            except Exception as exc:
-                self._events.append(
-                    EventEnvelope(
-                        seq=self._next_seq(),
-                        timestamp=self._now(),
-                        kind=EventKind.ERROR,
-                        payload={
-                            "code": "dsh_init_error",
-                            "message": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
+                if self._closed:
+                    raise RuntimeError("session closed before turn started")
+                harness = self._ensure_harness()
+            except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
+                error_message = f"{type(exc).__name__}: {exc}"
+                self._last_error_message = error_message
+                self._emit_threadsafe(
+                    EventKind.ERROR,
+                    {
+                        "code": "dsh_init_error",
+                        "message": error_message,
+                    },
                 )
                 error_emitted = True
                 return
 
             try:
-                result = await asyncio.to_thread(
-                    self._send_sync, text, harness
+                result = harness.run(
+                    text,
+                    session_id=self.session_id,
+                    on_notification=self._on_notification,
                 )
-            except Exception as exc:
-                self._events.append(
-                    EventEnvelope(
-                        seq=self._next_seq(),
-                        timestamp=self._now(),
-                        kind=EventKind.ERROR,
-                        payload={
-                            "code": "dsh_error",
-                            "message": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
+            except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
+                error_message = f"{type(exc).__name__}: {exc}"
+                self._last_error_message = error_message
+                self._emit_threadsafe(
+                    EventKind.ERROR,
+                    {
+                        "code": "dsh_error",
+                        "message": error_message,
+                    },
                 )
                 error_emitted = True
             else:
-                self._ingest_result(result)
-                # If the SDK returned an abnormal finish, ``_ingest_result``
-                # appended a synthetic ERROR event — propagate that signal
-                # into the terminal SESSION_COMPLETE.
-                if (
-                    self._events
-                    and self._events[-1].kind == EventKind.ERROR
+                # Incremental events were forwarded by the notification
+                # pump; the batched ``result.events`` are intentionally
+                # not re-emitted. Only the finish reason is read here.
+                if result.finish_reason not in (
+                    None,
+                    "success",
+                    "stop",
+                    "completed",
                 ):
+                    # The core reads payload["message"] — without
+                    # it the failure surfaces as "unknown error".
+                    self._emit_threadsafe(
+                        EventKind.ERROR,
+                        {
+                            "code": "dsh_finish",
+                            "reason": result.finish_reason,
+                            "message": self._last_error_message
+                            or f"turn finished with reason={result.finish_reason}",
+                        },
+                    )
                     error_emitted = True
         finally:
-            self._events.append(
-                EventEnvelope(
-                    seq=self._next_seq(),
-                    timestamp=self._now(),
-                    kind=EventKind.SESSION_COMPLETE,
-                    payload={
-                        "reason": "error" if error_emitted else "success",
-                    },
-                )
-            )
+            complete_payload: dict[str, Any] = {
+                "reason": "error" if error_emitted else "success"
+            }
+            if self._usage_totals:
+                # Real token usage (not fabricated USD — DeepSeek
+                # prices are not invented here; the core/consumer can
+                # convert with its own pricing table).
+                complete_payload["usage"] = dict(self._usage_totals)
+            self._emit_threadsafe(EventKind.SESSION_COMPLETE, complete_payload)
 
-    def _send_sync(self, text: str, harness: Any) -> Any:
-        return harness.run(text, session_id=self.session_id)
+    def _on_notification(self, notification: Any) -> None:
+        """SDK callback — invoked on the worker thread per notification."""
+        if getattr(notification, "method", None) != "session.event":
+            return
+        payload = getattr(notification, "payload", None)
+        if not isinstance(payload, dict):
+            return
+        if payload.get("sessionId") != self.session_id:
+            return
+        event = payload.get("event")
+        if not isinstance(event, dict):
+            return
+        for translated in self._translate_event(event):
+            self._enqueue_threadsafe(translated)
 
-    def _ingest_result(self, result: Any) -> None:
-        """Translate DSH RunResult events into EventEnvelope stream."""
-        for event in result.events:
-            translated = self._translate_event(event)
-            if translated is not None:
-                self._events.append(translated)
+    def _emit_threadsafe(self, kind: EventKind, payload: dict[str, Any]) -> None:
+        envelope = EventEnvelope(
+            seq=self._next_seq(),
+            timestamp=self._now(),
+            kind=kind,
+            payload=payload,
+        )
+        self._enqueue_threadsafe(envelope)
 
-        # When the SDK reports an abnormal finish and no ERROR event has
-        # already been emitted by ``_translate_event`` (which is the
-        # case today), surface it as one. ``SESSION_COMPLETE`` is
-        # always emitted by ``send()``'s finally, not here — this
-        # avoids the historical double-emit bug.
-        if result.finish_reason not in (None, "success", "stop", "completed"):
-            self._events.append(
-                EventEnvelope(
-                    seq=self._next_seq(),
-                    timestamp=self._now(),
-                    kind=EventKind.ERROR,
-                    payload={
-                        "code": "dsh_finish",
-                        "reason": result.finish_reason,
-                    },
-                )
-            )
+    def _enqueue_threadsafe(self, envelope: EventEnvelope) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(self._queue.put_nowait, envelope)
+        except RuntimeError:
+            # Event loop closed mid-turn (e.g. close() during an active
+            # turn) — the consumer is gone; drop the event.
+            logger.debug("dsh event dropped after loop close: %s", envelope.kind)
 
-    def _translate_event(self, event: dict[str, Any]) -> EventEnvelope | None:
+    def _translate_event(
+        self, event: dict[str, Any]
+    ) -> list[EventEnvelope]:
+        """Translate one DSH wire event into 0..n SPI envelopes."""
         event_type = event.get("type", "")
         data = event.get("data", {}) if isinstance(event.get("data"), dict) else {}
 
@@ -203,56 +243,148 @@ class DshSession:
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text_parts.append(str(block.get("text", "")))
-            return EventEnvelope(
-                seq=self._next_seq(),
-                timestamp=self._now(),
-                kind=EventKind.TEXT,
-                payload={"text": "".join(text_parts)},
-            )
+            # Accumulate real token usage (data.usage) so the
+            # SESSION_COMPLETE payload can carry session totals.
+            usage = data.get("usage")
+            if isinstance(usage, dict):
+                for key, value in usage.items():
+                    if isinstance(value, (int, float)):
+                        self._usage_totals[key] = (
+                            self._usage_totals.get(key, 0) + int(value)
+                        )
+            return [
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.TEXT,
+                    payload={"text": "".join(text_parts)},
+                )
+            ]
+
+        elif event_type == "assistant/chunk":
+            chunk = data.get("chunk", {}) if isinstance(data.get("chunk"), dict) else {}
+            chunk_type = chunk.get("type", "")
+            if chunk_type in ("text-delta", "reasoning-delta"):
+                return [
+                    EventEnvelope(
+                        seq=self._next_seq(),
+                        timestamp=self._now(),
+                        kind=EventKind.TEXT_DELTA,
+                        payload={"text": str(chunk.get("text", ""))},
+                    )
+                ]
+            return []
 
         elif event_type == "tool/call":
-            return EventEnvelope(
-                seq=self._next_seq(),
-                timestamp=self._now(),
-                kind=EventKind.TOOL_CALL,
-                payload={
-                    "call_id": data.get("callId", ""),
-                    "name": data.get("name", ""),
-                    "arguments": data.get("arguments", {}),
-                },
-            )
+            return [
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.TOOL_CALL,
+                    payload={
+                        "call_id": data.get("callId", ""),
+                        "name": data.get("name", ""),
+                        "arguments": data.get("arguments", {}),
+                    },
+                )
+            ]
 
         elif event_type == "tool/result":
-            return EventEnvelope(
-                seq=self._next_seq(),
-                timestamp=self._now(),
-                kind=EventKind.TOOL_RESULT,
-                payload={
-                    "call_id": data.get("callId", ""),
-                    "ok": True,
-                    "output": data.get("result"),
-                },
-            )
+            # Real wire shape:
+            #   data.message.content[0].toolCallId  (fallback:
+            #   data.message.source.callId), text under
+            #   content[*].content[*].text, error flag `isError`.
+            message = data.get("message", {})
+            if not isinstance(message, dict):
+                message = {}
+            blocks = message.get("content", [])
+            if not isinstance(blocks, list):
+                blocks = []
+            call_id = ""
+            texts: list[str] = []
+            is_error = False
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                if not call_id and block.get("toolCallId"):
+                    call_id = str(block["toolCallId"])
+                if block.get("isError"):
+                    is_error = True
+                inner = block.get("content", [])
+                if isinstance(inner, list):
+                    for part in inner:
+                        if isinstance(part, dict) and part.get("text"):
+                            texts.append(str(part["text"]))
+            if not call_id:
+                source = message.get("source", {})
+                if isinstance(source, dict) and source.get("callId"):
+                    call_id = str(source["callId"])
+            return [
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.TOOL_RESULT,
+                    payload={
+                        "call_id": call_id,
+                        "ok": not is_error,
+                        "output": "\n".join(texts),
+                    },
+                )
+            ]
 
         elif event_type == "turn/end":
             reason_data = data.get("reason", {})
             reason_kind = reason_data.get("kind", "unknown") if isinstance(reason_data, dict) else str(reason_data)
-            return EventEnvelope(
-                seq=self._next_seq(),
-                timestamp=self._now(),
-                kind=EventKind.TURN_COMPLETE,
-                payload={"reason": reason_kind},
-            )
+            envelopes = [
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.TURN_COMPLETE,
+                    payload={"reason": reason_kind},
+                )
+            ]
+            if reason_kind == "error":
+                # Surface data.reason.error.{message,code} — the
+                # core reads payload["message"] and the historical
+                # stream only showed a bare reason=error.
+                error_info = (
+                    reason_data.get("error", {})
+                    if isinstance(reason_data, dict)
+                    else {}
+                )
+                if not isinstance(error_info, dict):
+                    error_info = {}
+                message_text = str(
+                    error_info.get("message")
+                    or f"turn ended with reason={reason_kind}"
+                )
+                code = str(error_info.get("code") or "dsh_turn_error")
+                self._last_error_message = message_text
+                envelopes.append(
+                    EventEnvelope(
+                        seq=self._next_seq(),
+                        timestamp=self._now(),
+                        kind=EventKind.ERROR,
+                        payload={"code": code, "message": message_text},
+                    )
+                )
+            return envelopes
 
-        return None
-
-    async def _emit_events(self):
-        for ev in self._events:
-            yield ev
-        self._events.clear()
+        return []
 
     def events(self) -> AsyncIterator[EventEnvelope]:
-        return self._emit_events()
+        return self._stream()
+
+    async def _stream(self) -> AsyncIterator[EventEnvelope]:
+        if not self._turn_started:
+            # Historical contract: events() before any send() is an
+            # exhausted stream, not a hanging one.
+            return
+        while True:
+            envelope = await self._queue.get()
+            yield envelope
+            if envelope.kind is EventKind.SESSION_COMPLETE:
+                break
 
     async def interrupt(self) -> None:
         pass
@@ -261,25 +393,41 @@ class DshSession:
         pass
 
     async def probe_resume(self) -> ResumeStatus:
-        """DSH SDK does not expose a resume probe — always UNDETECTABLE.
+        """DSH SDK exposes no resume probe — detection is unavailable.
 
-        The orchestrator should still attempt ``send()``; if the SDK
-        cannot find the resume target it will surface as an ERROR
-        event on the normal stream.
+        With a resume target configured the result is UNDETECTABLE (the
+        orchestrator still attempts ``send()``; a missing resume target
+        surfaces as an ERROR event on the normal stream). Without one
+        the session is trivially "fresh", reported as RESUMED.
         """
         if not self._spec.resume_session_id:
             return ResumeStatus.RESUMED
         return ResumeStatus.UNDETECTABLE
 
     async def close(self) -> None:
-        if self._harness is not None:
-            await asyncio.to_thread(self._harness.close)
+        if self._turn_task is not None and not self._turn_task.done():
+            # The SDK has no session cancel, so a turn
+            # in flight cannot be terminated — closing the harness makes
+            # the worker fail on its next transport read. Log it so an
+            # unexpected post-close worker burst is diagnosable.
+            logger.warning(
+                "dsh session closed while a turn was still in flight "
+                "(session_id=%s) — the worker will unwind on its own",
+                self.session_id,
+            )
         self._closed = True
+        if self._harness is not None:
+            try:
+                await asyncio.to_thread(self._harness.close)
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("dsh harness close failed: %s", exc)
+            self._harness = None
 
     def close_sync(self) -> None:
+        self._closed = True
         if self._harness is not None:
             try:
                 self._harness.close()
-            except Exception:
-                pass
-        self._closed = True
+            except Exception as exc:  # noqa: BLE001 - best-effort teardown
+                logger.debug("dsh harness close failed: %s", exc)
+            self._harness = None

@@ -30,6 +30,9 @@ class StageRunResult:
     cost_usd: float = 0.0
     error: str | None = None
     message: str = ""
+    # Backend session run_id — the transcript lives under
+    # ~/.orchestratord/sessions/<run_id>/, so `run logs` can resolve it.
+    run_id: str | None = None
 
 
 @dataclass
@@ -258,6 +261,7 @@ class StageRunner:
             message=output_text,
             cost_usd=max(cost_delta, 0.0),
             error=None if status == "completed" else f"Session status: {status}",
+            run_id=getattr(session, "run_id", None),
         )
 
     async def _run_agent_task(

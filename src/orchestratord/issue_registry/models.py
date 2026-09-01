@@ -112,6 +112,10 @@ class IssueRecord:
     # Operator intent + retry bookkeeping.
     intent: Intent = Intent.NONE
     retry_count: int = 0
+    # Wall-clock timestamp of the currently scheduled retry (from
+    # _schedule_retry). ``None`` when no retry is pending. Persisted so
+    # a daemon restart cannot silently drop a waiting retry plan.
+    next_retry_at: float | None = None
     last_command: str | None = None
     intent_source: str | None = None  # "label" | "command" | "cli"
     # Comment-command incremental-scan cursor.
@@ -125,6 +129,10 @@ class IssueRecord:
     run_output_len: int = 0
     run_timeout_deadline_at: float | None = None
     run_workspace_dirty: bool | None = None
+    # Cost telemetry for the current/last run: USD from backends
+    # that report it (clawcodex), token usage dict from dsh.
+    run_cost_usd: float = 0.0
+    run_token_usage: dict = field(default_factory=dict)
     # Retry context: list of run_ids from previous attempts for this
     # issue.  The retrying agent can Read() the transcript at
     # ~/.orchestratord/sessions/<run_id>/transcript.jsonl to learn what was

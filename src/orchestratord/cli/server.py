@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from orchestratord.paths import GATEWAY_SOCK
+from orchestratord.workspace_locator import ORCHESTRATORD_ORCHESTRATOR_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -357,8 +358,23 @@ def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
         workflow_path=getattr(args, "workflow", None),
     )
     if workspace_root:
-        slug = _slug_from_workspace(str(workspace_root))
-        metadata_path = Path.home() / ".cache" / "orchestratord" / "orchestrator" / slug / "metadata.json"
+        # The daemon may have stored a relative workspace_root in
+        # legacy metadata; compare resolved paths so `--workspace
+        # ./workspace` matches "workspace" when CWDs align.
+        workspace_root_str = str(workspace_root)
+
+        def _same_root(stored: str | None) -> bool:
+            if not stored:
+                return False
+            if stored == workspace_root_str:
+                return True
+            try:
+                return Path(stored).resolve() == Path(workspace_root_str).resolve()
+            except OSError:
+                return False
+
+        slug = _slug_from_workspace(workspace_root_str)
+        metadata_path = ORCHESTRATORD_ORCHESTRATOR_DIR / slug / "metadata.json"
         if metadata_path.exists():
             import json
 
@@ -368,16 +384,15 @@ def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
             except Exception:
                 pass
         # Fallback: search by workspace_root matching
-        metadata_dir = Path.home() / ".cache" / "orchestratord" / "orchestrator"
-        if metadata_dir.exists():
-            for md_dir in metadata_dir.iterdir():
+        if ORCHESTRATORD_ORCHESTRATOR_DIR.exists():
+            for md_dir in ORCHESTRATORD_ORCHESTRATOR_DIR.iterdir():
                 mf = md_dir / "metadata.json"
                 if mf.exists():
                     import json
 
                     try:
                         data = json.loads(mf.read_text(encoding="utf-8"))
-                        if data.get("workspace_root") == str(workspace_root):
+                        if _same_root(data.get("workspace_root")):
                             return mf, data
                     except Exception:
                         pass
@@ -487,7 +502,7 @@ def _run_stop_all(args: argparse.Namespace) -> int:
     - Live PIDs → send signal (SIGTERM / SIGKILL) and wait for graceful exit.
     - Dead PIDs → clean up stale metadata immediately.
     """
-    orchestrator_dir = Path.home() / ".cache" / "orchestratord" / "orchestrator"
+    orchestrator_dir = ORCHESTRATORD_ORCHESTRATOR_DIR
     if not orchestrator_dir.exists():
         print("No orchestrator metadata directory found — nothing to stop.")
         return 0

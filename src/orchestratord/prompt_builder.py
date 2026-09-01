@@ -31,8 +31,8 @@ _jinja_env = Environment(undefined=StrictUndefined)
 _DEFAULT_PROMPT = """You are an autonomous software engineering agent.
 
 Task: {{ task.title }}
-{% if task.kind == "issue" and task.context.issue_identifier %}
-Issue: {{ task.context.issue_identifier }}
+{% if task.kind == "issue" and task.context and task.context.get("issue_identifier") %}
+Issue: {{ task.context.get("issue_identifier") }}
 {% endif %}
 {% if task.description %}
 Description:
@@ -41,8 +41,8 @@ Description:
 {% if task.priority %}
 Priority: {{ task.priority }}
 {% endif %}
-{% if task.context.issue_state %}
-State: {{ task.context.issue_state }}
+{% if task.context and task.context.get("issue_state") %}
+State: {{ task.context.get("issue_state") }}
 {% endif %}
 
 Please analyze the issue, implement the necessary changes, and ensure all tests pass.
@@ -240,9 +240,19 @@ class PromptBuilder:
             rendered = template.render(context).strip()
         except TemplateError as exc:
             logger.error("Template render error: %s", exc)
-            # Fallback to default prompt
-            fallback = _jinja_env.from_string(_DEFAULT_PROMPT)
-            rendered = fallback.render(context).strip()
+            # Fallback to default prompt. The fallback itself must
+            # never raise — degrade to a minimal raw prompt if even the
+            # default cannot render this task shape.
+            try:
+                fallback = _jinja_env.from_string(_DEFAULT_PROMPT)
+                rendered = fallback.render(context).strip()
+            except TemplateError as fallback_exc:
+                logger.error("Default prompt fallback failed: %s", fallback_exc)
+                task_value = context.get("task") or {}
+                rendered = (
+                    f"Task: {task_value.get('title', '')}\n\n"
+                    f"{task_value.get('description', '')}"
+                ).strip()
         if session is not None and getattr(session, "workspace_strategy", None) == "sequential":
             rendered = f"{rendered}\n\n{_build_sequential_workspace_context(session)}"
 

@@ -265,6 +265,8 @@ class StateMachineMixin:
         output_len: int | None = None,
         timeout_deadline_at: float | None = None,
         workspace_dirty: bool | None = None,
+        cost_usd: float | None = None,
+        token_usage: dict | None = None,
     ) -> IssueRecord | None:
         """Update high-frequency run diagnostics fields (throttled save).
 
@@ -293,6 +295,10 @@ class StateMachineMixin:
             record.run_timeout_deadline_at = timeout_deadline_at
         if workspace_dirty is not None:
             record.run_workspace_dirty = workspace_dirty
+        if cost_usd is not None:
+            record.run_cost_usd = cost_usd
+        if token_usage is not None:
+            record.run_token_usage = token_usage
         record.touch()
         # When the run_id transitions from None to a concrete value we
         # must persist immediately — the dashboard discovers active runs

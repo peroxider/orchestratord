@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _add_location(parser: argparse.ArgumentParser) -> None:
@@ -147,6 +151,13 @@ async def _start(args: argparse.Namespace) -> int:
     record.total_stages = result.total_stages
     record.cost_usd = result.total_cost_usd
     record.error = result.error
+    # Remember the stage session run_ids so `run logs` can find
+    # the transcripts (they live under sessions/<stage_run_id>/).
+    stage_run_ids = getattr(result, "stage_run_ids", None) or {}
+    if stage_run_ids:
+        record.metadata["stage_run_ids"] = {
+            str(k): v for k, v in stage_run_ids.items()
+        }
     store.save(record)
     print(json.dumps({
         "run_id": run_id,
@@ -165,11 +176,49 @@ def _legacy(args: argparse.Namespace, command: str) -> int:
 
     args.issue_subcommand = command
     if command == "transcript":
-        args.run = args.id
+        args.run = _resolve_stage_run_id(args)
         args.id = None
     if command == "inject":
         args.hint = args.message
     return run_issue(args)
+
+
+def _resolve_stage_run_id(args: argparse.Namespace) -> str:
+    """Map a workflow run id to its (last) stage session run_id.
+
+    Stage transcripts live under sessions/<stage_run_id>/ while
+    `run logs --id` refers to the workflow-level run. The RunStore
+    record's ``stage_run_ids`` metadata (written at completion) bridges
+    the two; fall back to the raw id for older records. Malformed
+    entries (non-numeric stage keys) are skipped rather
+    than crashing the lookup.
+    """
+    raw = getattr(args, "id", None)
+    try:
+        from orchestratord.run_store import RunStore
+
+        record = RunStore(args.workspace or ".").get(raw)
+        stage_run_ids = (getattr(record, "metadata", None) or {}).get(
+            "stage_run_ids"
+        )
+        if stage_run_ids:
+            def _stage_order(item: tuple[str, Any]) -> int:
+                try:
+                    return int(item[0])
+                except (TypeError, ValueError):
+                    return -1
+
+            chosen = max(stage_run_ids.items(), key=_stage_order)[1]
+            if chosen:
+                return str(chosen)
+    except Exception:
+        logger.debug(
+            "run logs: could not resolve stage run_id for %r — "
+            "falling back to the raw id",
+            raw,
+            exc_info=True,
+        )
+    return raw
 
 
 def _list_runs(args: argparse.Namespace) -> int:
