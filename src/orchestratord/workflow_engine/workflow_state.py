@@ -91,6 +91,8 @@ class StageResult:
     duration_seconds: float = 0.0
     decision_outcome: str | None = None
     decision_next_stage: int | None = None
+    # Backend session run_id for `run logs` transcript resolution.
+    run_id: str | None = None
     timestamp: str = field(
         default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     )

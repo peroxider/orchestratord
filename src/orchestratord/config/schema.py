@@ -433,10 +433,9 @@ class TrackerConfig:
     kind: str = "linear"
     endpoint: str = "https://api.linear.app/graphql"
     api_key: str | None = None
-    # Path to a custom Cordis plugin config YAML for the dsh backend.
-    # When set, the dsh runtime loads this instead of its bundled default.
-    # The path is forwarded to the backend via DSH_CORDIS_CONFIG.
-    cordis: str | None = None
+    # The historical ``cordis`` key was dead — nothing ever read
+    # it (the comment claimed DSH_CORDIS_CONFIG forwarding that did not
+    # exist). The real chain is agent.cordis → SessionSpec.cordis → SDK.
     project_slug: str | None = None
     owner: str | None = None
     repo: str | None = None

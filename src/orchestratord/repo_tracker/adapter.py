@@ -234,6 +234,21 @@ class RepositoryTrackerAdapter(TrackerAdapter):
         )
         current = issue[0] if issue else None
 
+        # Skip the PATCH entirely when the issue is already in the
+        # target state. GitCode rejects state_event-only bodies with
+        # 400 ("at least one parameter must be provided"), so a retry/
+        # reset syncing ``open`` onto an already-open issue produced a
+        # spurious warning on every attempt.
+        normalized_state_probe = state.strip().lower()
+        if current is not None and (current.state or "").strip().lower() == normalized_state_probe:
+            logger.debug(
+                "update_issue_state: issue %s already in state %r — "
+                "skipping redundant PATCH",
+                issue_id,
+                state,
+            )
+            return
+
         labels = list(current.labels) if current is not None else []
         normalized_state = state.strip().lower()
         known_state_labels = {

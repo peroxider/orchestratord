@@ -1,10 +1,10 @@
 """dsh backend — descriptor 声明。
 
-dsh 自描述为 SdkProcess，但 SPI 启发式按 capability 位（缺 interrupt +
-approval_hooks + streaming_deltas）将其归类为 ``Cli``，drift 守护在
-历史 ``test_capability_drift.py:67-74`` 注释中明确"mirrors the SPI
-classification so the detector agrees with the registry"。本 descriptor
-沿用此约定：family=CLI，capabilities 不含 SdkProcess 三件套。
+通知泵改造后 dsh 以 ``streaming_deltas=True`` 提供真实增量
+(``assistant/chunk`` text/reasoning-delta → TEXT_DELTA)。SPI 启发式
+仍按 capability 位(require interrupt + approval_hooks +
+streaming_deltas 三者齐备)将其归类为 ``Cli`` —— 本 descriptor 沿用
+该约定:family=CLI,capabilities 只含实际为真的位。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ DSH_DESCRIPTOR = BackendDescriptor(
     family=BackendFamily.CLI,
     backend_package="orchestratord-dsh",
     capabilities=frozenset({
-        "resumable",
+        "streaming_deltas",
         "parallel_sessions",
         "cost_reporting",
     }),

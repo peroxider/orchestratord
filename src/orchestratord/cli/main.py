@@ -101,4 +101,17 @@ def app() -> None:
         parser.print_help()
         sys.exit(2)
 
-    sys.exit(run(args))
+    try:
+        code = run(args)
+    except BrokenPipeError:
+        # The consumer closed the pipe early (e.g. `orchestratord run
+        # logs … | head`). That is a normal termination for a print-heavy
+        # read-only command: exit 0 without a traceback. Point stdout at
+        # devnull first so the interpreter's final flush cannot raise
+        # EPIPE again on shutdown.
+        import os
+
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(0)
+    sys.exit(code)

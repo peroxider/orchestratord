@@ -51,7 +51,7 @@ def _event_to_broadcast_dict(event: Any) -> dict:
             return {
                 "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
                 "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
-                "result": payload.get("result", payload),
+                "result": payload.get("result", payload.get("output", payload)),
             }
         if kind_value == "turn_complete":
             return {"turn": payload.get("turn", 0)}
@@ -106,11 +106,13 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
     """Broadcast an event to attached control-socket clients.
 
     Defensive: a broken socket must never abort the agent run.
-    The whole method is wrapped in try/except and guarded by
-    ``is not None``.
+    The whole method is wrapped in try/except.
+
+    The transcript frame is written even when no control socket
+    is attached — the transcript is the backing store for ``issue
+    tail`` / ``issue transcript`` / ``run logs`` and must not depend on
+    a socket client being connected.
     """
-    if session.control_socket is None:
-        return
     try:
         kind = getattr(event, "kind", None)
         kind_value = getattr(kind, "value", kind)
@@ -126,21 +128,80 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
             "type": type_map.get(kind_value, event.__class__.__name__),
             "data": _event_to_broadcast_dict(event),
         }
-        await session.control_socket.send_event(frame)
-        # Persist to transcript so the chat UI can replay history
-        # after a page refresh — even when the dashboard was not
-        # connected during the session.
-        _write_transcript_frame(session.run_id, frame)
+        if session.control_socket is not None:
+            await session.control_socket.send_event(frame)
+        # Persist to transcript so the chat UI can replay history after
+        # a page refresh and the CLI can tail a live run.
+        _write_transcript_frame(getattr(session, "run_id", None), frame)
     except Exception:
         pass
 
 
-def _write_transcript_frame(run_id: str, frame: dict) -> None:
+def _transcript_message_from_frame(frame: dict) -> dict:
+    """Convert a control-socket frame into a claude-style transcript
+    message (``role`` + ``content`` blocks).
+
+    Transcript rows historically had no ``role`` field, so
+    ``issue transcript --role assistant`` filtered everything out and
+    the readers degenerated to ``role='?'``. The mapping follows the
+    claude-code transcript convention the readers are built for:
+    assistant messages carry text / tool_use blocks, user messages
+    carry tool_result blocks, and lifecycle events are ``system``.
+    """
+    frame_type = frame.get("type")
+    data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+
+    if frame_type == "TextDelta":
+        return {
+            "role": "assistant",
+            "content": [{"type": "text", "text": str(data.get("content", ""))}],
+        }
+    if frame_type == "ToolCallEvent":
+        return {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": str(data.get("tool_use_id") or ""),
+                    "name": str(data.get("tool_name", "")),
+                    "input": data.get("params", {}),
+                }
+            ],
+        }
+    if frame_type == "ToolResultEvent":
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": str(data.get("tool_use_id") or ""),
+                    "content": data.get("result"),
+                }
+            ],
+        }
+    if frame_type == "InjectDelivered":
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": str(data.get("hint_snippet", ""))}],
+            "origin": "inject",
+        }
+    # Lifecycle / unknown events: keep the raw frame for audit value but
+    # give it a role so the readers can filter deterministically.
+    msg = dict(frame)
+    msg["role"] = "system"
+    return msg
+
+
+def _write_transcript_frame(run_id: str | None, frame: dict) -> None:
     """Append a frame to the session transcript JSONL file.
 
-    Best-effort: failures are silently ignored so a full disk or
-    permission error never breaks the agent run.
+    The frame is stored as a claude-style message (see
+    :func:`_transcript_message_from_frame`). Best-effort: failures are
+    silently ignored so a full disk or permission error never breaks
+    the agent run.
     """
+    if not run_id:
+        return
     try:
         import time as _time
         from pathlib import Path as _Path
@@ -148,7 +209,7 @@ def _write_transcript_frame(run_id: str, frame: dict) -> None:
         sessions_dir = _Path.home() / ".orchestratord" / "sessions"
         transcript_path = sessions_dir / run_id / "transcript.jsonl"
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
-        entry = dict(frame)
+        entry = _transcript_message_from_frame(frame)
         entry["ts"] = _time.time()
         line = json.dumps(entry, ensure_ascii=False, default=str)
         with open(transcript_path, "a", encoding="utf-8") as f:

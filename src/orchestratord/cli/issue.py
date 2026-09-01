@@ -399,6 +399,13 @@ def add_issue_parser(
         help="Remove hint number N",
     )
     inject_parser.add_argument(
+        "--workspace",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Explicit orchestrator workspace root",
+    )
+    inject_parser.add_argument(
         "--no-wait",
         dest="no_wait",
         action="store_true",
@@ -1313,11 +1320,16 @@ def _print_session_usage(record: "IssueRecord") -> None:
         print(f"  Usage (last)   : {last_detail}")
 
 
-def _resolve_issue_workspace_path(issue_id: str) -> Path | None:
+def _resolve_issue_workspace_path(
+    issue_id: str,
+    workspace_arg: str | None = None,
+) -> Path | None:
     """Resolve an issue workspace, including sequential registry layouts."""
     from orchestratord.workspace_locator import get_registry_path, get_workspace_root
 
-    workspace_root = get_workspace_root(workspace_arg=os.environ.get("ORCHESTRATORD_WORKSPACE_ROOT"))
+    workspace_root = get_workspace_root(
+        workspace_arg=workspace_arg or os.environ.get("ORCHESTRATORD_WORKSPACE_ROOT")
+    )
     registry_path = get_registry_path(workspace_arg=str(workspace_root)) if workspace_root else None
     if registry_path and registry_path.exists():
         import json
@@ -2177,7 +2189,9 @@ def _run_inject(args: argparse.Namespace) -> int:
         print("error: --id is required", file=sys.stderr)
         return 2
 
-    ws_path = _resolve_issue_workspace_path(issue_id)
+    ws_path = _resolve_issue_workspace_path(
+        issue_id, workspace_arg=getattr(args, "workspace", None)
+    )
     hints_file = ws_path / ".operator_hints.md" if ws_path else None
     if hints_file is None:
         print(

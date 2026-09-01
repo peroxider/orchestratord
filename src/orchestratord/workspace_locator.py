@@ -225,7 +225,10 @@ def write_orchestrator_metadata(
     import time
     import hashlib
 
-    ws_str = str(workspace_root)
+    # Store the resolved absolute path — a relative root made the
+    # metadata unmatchable for `server status --workspace <path>` from
+    # any other CWD.
+    ws_str = str(Path(workspace_root).resolve())
     slug = _slug_from_workspace(ws_str)
 
     # Create metadata directory (new path)

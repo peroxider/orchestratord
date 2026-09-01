@@ -17,7 +17,8 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -43,6 +44,18 @@ logger = logging.getLogger(__name__)
 
 # Reuse the same noop-detection threshold as AgentRunner.
 _NOOP_DETECTION_MAX_TURNS = 5
+
+# While the backend is silent between events, the event loop keeps
+# ticking at this interval so control commands (stop/pause/inject) stay
+# drainable and the five-level ADR-003 timeouts stay armed. Observing the
+# pending anext() via asyncio.wait never cancels it, so backends whose
+# event generators are not cancellation-safe are unaffected.
+_EVENT_POLL_INTERVAL = 0.5
+
+# How often the event loop refreshes the registry run
+# diagnostics (Turns / Tools / Output Chars / Last Event). The registry
+# throttles the actual disk write, so this only bounds in-memory work.
+_DIAGNOSTICS_INTERVAL = 2.0
 
 # Read-only spiral guard: after this many consecutive turns with only
 # read-only tool calls and no workspace changes, the session is terminated
@@ -128,6 +141,43 @@ class _TaskProgressBridge:
                 logger.debug("progress_callback failed", exc_info=outcome)
 
 
+async def _poll_events(
+    source: AsyncIterator[EventEnvelope],
+) -> AsyncIterator[EventEnvelope | None]:
+    """Yield backend events, plus ``None`` "poll ticks" during silence.
+
+    The control plane and the five-level ADR-003 timeouts are only
+    serviced inside the event-consumption loop, so a backend that stays
+    silent for long stretches (long tool runs, stalled runtime) used to
+    freeze both. This wrapper yields a ``None`` tick every
+    ``_EVENT_POLL_INTERVAL`` seconds of silence, keeping the loop alive.
+    The pending ``anext()`` is observed via ``asyncio.wait`` — never
+    cancelled — so generators that are not cancellation-safe are
+    unaffected.
+    """
+    iterator = aiter(source)
+    next_event_task: asyncio.Task[EventEnvelope] | None = None
+    try:
+        while True:
+            if next_event_task is None:
+                next_event_task = asyncio.ensure_future(anext(iterator))
+            done, _pending = await asyncio.wait(
+                {next_event_task}, timeout=_EVENT_POLL_INTERVAL
+            )
+            if not done:
+                yield None
+                continue
+            try:
+                event = next_event_task.result()
+            except StopAsyncIteration:
+                return
+            next_event_task = None
+            yield event
+    finally:
+        if next_event_task is not None and not next_event_task.done():
+            next_event_task.cancel()
+
+
 class BackendRunner:
     """Execute an issue via an AgentBackend (SPI Protocol).
 
@@ -207,7 +257,13 @@ class BackendRunner:
             task=task,
             workspace=workspace,
             run_kind=task.kind,
-            run_id=task.id,
+            # The task id is deterministic per workflow stage
+            # ("stage-01"), but the run_id doubles as the backend
+            # session id — a second run of the same stage in the same
+            # workspace collided with the persisted session (dsh "id
+            # collision"). Entropy is appended while the stage prefix
+            # keeps runs human-correlatable.
+            run_id=f"{task.id}-{uuid.uuid4().hex[:8]}",
             attempt=task.attempt,
             previous_run_ids=task.previous_run_ids,
             prompt_override=task.prompt_override,
@@ -342,7 +398,8 @@ class BackendRunner:
 
         try:
             await self._run_with_backend(session, spec, workflow, tracker,
-                                         status_dashboard, progress_reporter)
+                                         status_dashboard, progress_reporter,
+                                         diagnostics_callback=diagnostics_callback)
         except Exception:
             logger.exception(
                 "BackendRunner failed: backend=%s issue_id=%s run_id=%s",
@@ -531,6 +588,31 @@ class BackendRunner:
     # Core execution
     # ------------------------------------------------------------------
 
+    def _preflight_spec(self, spec: SessionSpec, session: AgentSession) -> bool:
+        """Run the backend preflight against the resolved spec.
+
+        Returns ``False`` (after marking the session failed with the
+        actionable message) when the backend rejects the spec; ``True``
+        when the run may proceed. ``preflight`` is part of the
+        AgentBackend protocol (every backend implements it) — a missing
+        implementation is an SPI contract violation and should surface
+        loudly, so no defensive getattr here.
+        """
+        try:
+            self.backend.preflight(spec)
+        except Exception as exc:  # noqa: BLE001 - preflight failure must fail the run, not crash the daemon
+            logger.error(
+                "BackendRunner preflight failed backend=%s run_id=%s: %s",
+                self.backend.name,
+                getattr(session, "run_id", None),
+                exc,
+            )
+            session.status = "failed"
+            session.session_end_reason = "preflight_failed"
+            session.session_end_summary = f"backend preflight failed: {exc}"
+            return False
+        return True
+
     async def _run_with_backend(
         self,
         session: AgentSession,
@@ -539,6 +621,7 @@ class BackendRunner:
         tracker: Any,
         status_dashboard: Any | None,
         progress_reporter: Any | None,
+        diagnostics_callback: Callable[[AgentSession], None] | None = None,
     ) -> None:
         """Drive the AgentBackend session and process its event stream."""
         backend_caps = self.backend.capabilities()
@@ -574,6 +657,12 @@ class BackendRunner:
                 owns_control_socket = True
             except Exception:
                 logger.debug("control socket unavailable for run_id=%s", session.run_id, exc_info=True)
+
+        # Fail fast on a spec the backend cannot serve (e.g. a
+        # provider with no matching runtime adapter) instead of dying
+        # mid-stage with an opaque runtime error.
+        if not self._preflight_spec(spec, session):
+            return
 
         # Create the SPI session.
         spi_session = self.backend.create_session(spec)
@@ -628,6 +717,7 @@ class BackendRunner:
                 spi_session, session, session_context,
                 workflow, tracker, status_dashboard, progress_reporter,
                 timeouts=timeouts,
+                diagnostics_callback=diagnostics_callback,
             )
         finally:
             try:
@@ -684,6 +774,7 @@ class BackendRunner:
         progress_reporter: Any | None,
         *,
         timeouts: dict[str, float] | None = None,
+        diagnostics_callback: Callable[[AgentSession], None] | None = None,
     ) -> None:
         """Process the EventEnvelope stream from the SPI session.
 
@@ -695,6 +786,7 @@ class BackendRunner:
         enforced inside the event loop below.
         """
         consecutive_noop_turns = 0
+        last_diagnostics_monotonic = 0.0
         last_file_status_snapshot: dict[str, Any] | None = None
 
         # Read-only spiral guard tracking
@@ -722,14 +814,34 @@ class BackendRunner:
             timeouts["first_turn"] if timeouts else None
         )
 
-        async for event in spi_session.events():
+        async for event in _poll_events(spi_session.events()):
             # Commands are drained before handling the event so an operator
             # request arriving at a turn boundary is available immediately.
             if _drain_control_commands(session):
                 session.status = "failed"
                 break
-            kind = event.kind
-            payload = event.payload
+            kind = event.kind if event is not None else None
+            payload = event.payload if event is not None else {}
+
+            # Keep the operator-visible diagnostics alive —
+            # Turns/Tools/Output Chars used to be written once at run
+            # start and frozen for the whole turn. Refresh on a modest
+            # interval; the registry coalesces disk writes itself.
+            if kind is not None:
+                session.last_agent_event = getattr(kind, "value", str(kind))
+                if kind == EventKind.TOOL_CALL:
+                    session.last_tool_name = str(payload.get("name", "") or "")
+            now_diag = time.monotonic()
+            if (
+                diagnostics_callback is not None
+                and now_diag - last_diagnostics_monotonic
+                >= _DIAGNOSTICS_INTERVAL
+            ):
+                last_diagnostics_monotonic = now_diag
+                try:
+                    diagnostics_callback(session)
+                except Exception:
+                    logger.debug("diagnostics_callback failed", exc_info=True)
 
             if kind == EventKind.TEXT:
                 text = payload.get("text", "")
@@ -881,6 +993,27 @@ class BackendRunner:
                 reason = payload.get("reason", "success")
                 session.status = "completed" if reason in ("success", "turn_complete") else "failed"
                 session.session_end_reason = reason
+                # Extract cost telemetry from the terminal payload.
+                # clawcodex/claude report USD via ``total_cost_usd``; dsh
+                # reports real token usage via ``usage``. The core reads
+                # both so the data reaches AgentTaskResult/registry.
+                total_cost_usd = payload.get("total_cost_usd")
+                if total_cost_usd is not None:
+                    try:
+                        session.cost_usd = float(total_cost_usd)
+                    except (TypeError, ValueError):
+                        logger.debug(
+                            "SESSION_COMPLETE total_cost_usd not numeric: %r",
+                            total_cost_usd,
+                        )
+                usage = payload.get("usage")
+                if isinstance(usage, dict) and usage:
+                    existing = getattr(session, "token_usage", None)
+                    merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+                    for key, value in usage.items():
+                        if isinstance(value, (int, float)):
+                            merged[key] = merged.get(key, 0) + int(value)
+                    session.token_usage = merged
                 if progress_reporter is not None and hasattr(progress_reporter, "on_session_complete"):
                     progress_reporter.on_session_complete(
                         SessionComplete(reason=reason), session
@@ -899,16 +1032,67 @@ class BackendRunner:
                     progress_reporter.on_error(error_msg)
 
             # Mark phase completion for the 5-level timeout watchdog.
-            if not handshake_complete:
-                handshake_complete = True
+            now = time.monotonic()
+            if event is not None:
+                if not handshake_complete:
+                    handshake_complete = True
+                last_event_monotonic = now
             if kind == EventKind.TURN_COMPLETE and not first_turn_complete:
                 first_turn_complete = True
-
-            # Enforce per-phase and run-level timeouts.
-            now = time.monotonic()
-            last_event_monotonic = now
             elapsed = now - run_start
-            gap = now - last_event_monotonic  # ==0 right after event; reset below
+            gap = now - last_event_monotonic
+
+            # ADR-003 §3.2: enforce per-phase and run-level timeouts.
+            # Previously the handshake/first_turn/inactivity thresholds
+            # were resolved but never enforced, and the idle gap was
+            # computed after resetting ``last_event_monotonic`` — so it
+            # could never fire. All five are armed now, and the poll
+            # ticks make them meaningful during backend silence.
+            if (
+                handshake_threshold is not None
+                and not handshake_complete
+                and elapsed >= handshake_threshold
+            ):
+                logger.error(
+                    "BackendRunner handshake_timeout exceeded "
+                    "(%.1fs ≥ %.1fs without first event)",
+                    elapsed, handshake_threshold,
+                )
+                session.session_end_reason = "handshake_timeout"
+                session.status = "failed"
+                break
+            if (
+                first_turn_threshold is not None
+                and handshake_complete
+                and not first_turn_complete
+                and gap >= first_turn_threshold
+            ):
+                # Note: the gap is measured from the LAST event, not
+                # the first — a streaming backend legitimately spends
+                # minutes inside its first turn (dsh issue #1 ran 394s in
+                # one turn). What ADR-003 wants to catch is a backend
+                # that goes silent before ever completing a turn.
+                logger.error(
+                    "BackendRunner first_turn_timeout exceeded "
+                    "(%.1fs ≥ %.1fs without first TURN_COMPLETE)",
+                    gap, first_turn_threshold,
+                )
+                session.session_end_reason = "first_turn_timeout"
+                session.status = "failed"
+                break
+            if (
+                inactivity_threshold is not None
+                and handshake_complete
+                and gap >= inactivity_threshold
+            ):
+                logger.error(
+                    "BackendRunner inactivity_timeout exceeded "
+                    "(%.1fs ≥ %.1fs between events)",
+                    gap, inactivity_threshold,
+                )
+                session.session_end_reason = "inactivity_timeout"
+                session.status = "failed"
+                break
             if total_threshold is not None and elapsed >= total_threshold:
                 logger.error(
                     "BackendRunner total_timeout exceeded (%.1fs ≥ %.1fs)",
@@ -927,7 +1111,8 @@ class BackendRunner:
                 break
 
             # Broadcast to control socket if active.
-            await _broadcast_to_socket(session, event)
+            if event is not None:
+                await _broadcast_to_socket(session, event)
 
             # Drain control commands.
             if _drain_control_commands(session):
