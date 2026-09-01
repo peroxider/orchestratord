@@ -73,6 +73,7 @@ class OrchestrationSubsystem:
                 clone_depth=workflow_config.workspace.clone_depth,
                 checkout_issue_branch=(workflow_config.workspace.checkout_issue_branch),
                 git_username=workflow_config.workspace.git_username,
+                git_email=workflow_config.workspace.git_email,
                 git_token=workflow_config.workspace.git_token,
                 gitignore_patterns=workflow_config.workspace.gitignore_patterns,
                 strategy=workflow_config.workspace.strategy,

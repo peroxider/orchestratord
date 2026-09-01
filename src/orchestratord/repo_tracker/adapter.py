@@ -282,6 +282,25 @@ class RepositoryTrackerAdapter(TrackerAdapter):
             labels=labels if current is not None or labels else None,
         )
 
+        # Most user tokens cannot mutate labels on public repos (403
+        # "apig token has not permission"). The state transition is the
+        # important part — degrade by retrying WITHOUT labels (labels=None)
+        # so the state still syncs and the 403 stops spamming the logs.
+        if labels is not None:
+            try:
+                await self.client.update_issue(issue_id, state=state, labels=labels)
+            except RepositoryTrackerError as exc:
+                if "403" in str(exc):
+                    logger.warning(
+                        "update_issue_state: label mutation denied (403) for "
+                        "issue_id=%s state=%s — retrying state-only.",
+                        issue_id,
+                        state,
+                    )
+                    await self.client.update_issue(issue_id, state=state, labels=None)
+                else:
+                    raise
+
     async def find_pull_request(
         self,
         *,

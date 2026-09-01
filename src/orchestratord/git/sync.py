@@ -218,6 +218,8 @@ class GitSyncService:
             return None
 
         # Check if tracker is LocalTrackerAdapter — skip push/PR for local-only repos
+        # NOTE: local_tracker lives at the top level (orchestratord/local_tracker),
+        # not under git/ — the relative import must go up one level.
         from ..local_tracker.adapter import LocalTrackerAdapter
 
         is_local_tracker = isinstance(self.tracker, LocalTrackerAdapter)

@@ -101,6 +101,10 @@ logger = logging.getLogger(__name__)
 
 _CONTINUATION_RETRY_DELAY_MS = 1_000
 _FAILURE_RETRY_BASE_MS = 10_000
+# End reasons that mean SUCCESS — the failure-guidance block must skip
+# them (they are not in the failure guidance table and would otherwise
+# fall back to the generic "未知错误" fallback).
+_SUCCESS_END_REASONS = frozenset({"success"})
 
 # End reasons produced by explicit operator action. They are
 # terminal states — the auto-retry loop must not revive them.
@@ -4122,8 +4126,12 @@ class Orchestrator:
             body_lines.append(f"- Error: `{reason_text}`")
         if hook_error and hook_error != reason_text:
             body_lines.append(f"- Detail: `{hook_error}`")
-        # User-facing guidance
-        if end_reason:
+        # User-facing guidance — only for FAILURE paths. A successful end
+        # reason (e.g. "success") is not in the failure guidance table, so
+        # it would fall through to the generic "未知错误" fallback and
+        # produce a self-contradictory comment ("Status: completed" +
+        # "失败原因：未知错误"). Skip guidance entirely for success.
+        if end_reason and end_reason not in _SUCCESS_END_REASONS:
             guidance = end_reason_guidance(
                 end_reason=end_reason,
                 hook_error=hook_error,

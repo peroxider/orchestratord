@@ -446,6 +446,13 @@ class ClawcodexSession:
         try:
             from extensions.api.query import QueryConfig, QueryRunner
 
+            # Honor the workflow's per-turn timeout (sandbox.turn_timeout_ms)
+            # forwarded via spec.extra: clawcodex freeze settings read
+            # CLAWCODEX_TURN_TIMEOUT, so set it before the runner starts.
+            _tt_ms = self._spec.extra.get("turn_timeout_ms")
+            if _tt_ms:
+                os.environ["CLAWCODEX_TURN_TIMEOUT"] = str(int(_tt_ms) / 1000)
+
             config_kwargs: dict[str, Any] = {
                 "prompt": content,
                 "workspace": self._spec.cwd,
@@ -500,7 +507,16 @@ class ClawcodexSession:
                     self._events_buffer.append(translated)
             # After turn completes, run goal evaluation if active
             await self._evaluate_goal()
-        except ImportError:
+        except ImportError as exc:
+            # Record the full traceback — the ERROR event below only carries
+            # the str() message, which hides WHICH module failed to import
+            # (e.g. "QueryRunner not available" gave no clue). With the
+            # traceback in the logs, the failing import can be pinpointed.
+            logger.exception(
+                "ClawcodexSession._run_turn: import failed during turn "
+                "(%s) — emitting QueryRunner-not-available",
+                exc,
+            )
             await self._event_queue.put(
                 EventEnvelope(
                     seq=self._next_seq(),
@@ -544,8 +560,8 @@ class ClawcodexSession:
         - PhaseComplete.phase: int, .turn_count: int
         - SessionComplete.reason: str
         """
+        import extensions.api.query as _query_mod
         from extensions.api.query import (
-            ApprovalRequestEvent,
             PhaseComplete,
             SessionComplete,
             TextDelta,
@@ -553,6 +569,11 @@ class ClawcodexSession:
             ToolResultEvent,
             TurnComplete,
         )
+        # ApprovalRequestEvent is a newer clawcodex interface; the local
+        # clawcodex checkout may not expose it yet (version skew, same as
+        # probe_transcript). Degrade: when missing, the approval branch
+        # simply never matches and no approval event is emitted.
+        ApprovalRequestEvent = getattr(_query_mod, "ApprovalRequestEvent", None)
 
         if isinstance(event, TextDelta):
             return EventEnvelope(
@@ -561,7 +582,10 @@ class ClawcodexSession:
                 kind=EventKind.TEXT_DELTA,
                 payload={"text": event.content, "delta": event.content},
             )
-        elif isinstance(event, ApprovalRequestEvent):
+        elif (
+            ApprovalRequestEvent is not None
+            and isinstance(event, ApprovalRequestEvent)
+        ):
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),
