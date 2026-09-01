@@ -222,6 +222,8 @@ class PromptBuilder:
             legacy_aliases = {
                 "identifier": issue_context.get("id", ""),
                 "title": "",
+                "description": "",
+                "labels": [],
             }
         for key, value in legacy_aliases.items():
             issue_context.setdefault(key, value)

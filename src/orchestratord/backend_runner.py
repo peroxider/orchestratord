@@ -531,6 +531,12 @@ class BackendRunner:
             if session._runtime_tasks is not None
             else {}
         )
+        # Forward the workflow's per-turn timeout (sandbox.turn_timeout_ms)
+        # through the opaque extra channel so backends that own their own
+        # turn budget (e.g. clawcodex freeze settings) can honor it.
+        tt_ms = getattr(self.sandbox_config, "turn_timeout_ms", None)
+        if tt_ms:
+            extra["turn_timeout_ms"] = int(tt_ms)
         try:
             from orchestratord.skills.tools import skill_tool_descriptions
 
@@ -881,6 +887,15 @@ class BackendRunner:
                     progress_reporter.on_tool_result(
                         payload.get("call_id", ""),
                     )
+                # Event-driven read-only guard: TURN_COMPLETE may never fire
+                # when the session is aborted mid tool-loop (exit_code=126
+                # path), so track the streak from tool results directly.
+                # The 3/6/8 graded hints + read_only_loop terminate below
+                # read read_only_streak as before.
+                if turn_has_tool_calls and not turn_has_modifying_tool:
+                    read_only_streak += 1
+                else:
+                    read_only_streak = 0
 
             elif kind == EventKind.TURN_COMPLETE:
                 reported_turn = int(payload.get("turn", 0) or 0)

@@ -59,6 +59,7 @@ class WorkspaceConfig:
     clone_depth: int | None = 1
     checkout_issue_branch: bool = True
     git_username: str | None = None
+    git_email: str | None = None
     git_token: str | None = None
     gitignore_patterns: list[str] = field(default_factory=list)
     strategy: str = "isolated"
@@ -289,6 +290,12 @@ class WorkspaceManager:
                 created = True
             await self._checkout_base_branch(path)
             await self._checkout_issue_branch(path, issue)
+            # Ensure commit identity on EVERY run (not only fresh clones) —
+            # reusing a preserved workspace must also carry the configured
+            # author, otherwise late commits fall back to the global
+            # identity (e.g. "Developer" → author not associated → the PR
+            # shows commits with no user).
+            await self._ensure_git_identity(path)
             return created
 
         return await self._ensure_workspace(path)
@@ -309,12 +316,25 @@ class WorkspaceManager:
                     path,
                 )
                 await self._run_process(["git", "init"], cwd=str(path))
+                # Inject credentials into the origin URL (same as the clone
+                # path) so `git push` never prompts for a username.
+                _origin_url = self.config.repo_clone_url or ""
+                if self.config.git_username and self.config.git_token:
+                    _origin_url = _origin_url.replace(
+                        "https://",
+                        f"https://{self.config.git_username}:{self.config.git_token}@",
+                    )
                 await self._run_process(
-                    ["git", "remote", "add", "origin", self.config.repo_clone_url],
+                    ["git", "remote", "add", "origin", _origin_url],
                     cwd=str(path),
                 )
                 # Fork 工作流：添加 upstream remote
                 await self._add_upstream_remote(path)
+                # Set commit identity BEFORE the agent starts committing —
+                # otherwise early commits use the global/fallback identity
+                # (e.g. "Developer") and the PR carries commits with the
+                # wrong author, which can fail permission checks on push.
+                await self._ensure_git_identity(path)
                 integration_branch = (
                     self.config.integration_branch or self.config.base_branch or ""
                 ).strip()
@@ -371,6 +391,10 @@ class WorkspaceManager:
 
         # Fork 工作流：clone 后添加 upstream remote
         await self._add_upstream_remote(path)
+        # Commit identity BEFORE the agent starts committing (see
+        # _ensure_git_identity docstring — wrong author on early commits
+        # breaks push permission checks).
+        await self._ensure_git_identity(path)
 
     async def _add_upstream_remote(self, path: Path) -> None:
         """如果配置了 upstream_clone_url 且与 repo_clone_url 不同，添加 upstream remote。"""
@@ -389,6 +413,32 @@ class WorkspaceManager:
             ["git", "remote", "add", "upstream", effective_url],
             cwd=str(path),
         )
+
+    async def _ensure_git_identity(self, path: Path) -> None:
+        """Set commit identity (user.name/user.email) so every commit the
+        agent makes carries the configured author — otherwise early commits
+        fall back to the global identity (wrong author → permission issues
+        on push). Mirrors GitSync._ensure_commit_identity."""
+        if self.config.git_username:
+            await self._try_process(
+                ["git", "config", "user.name", self.config.git_username],
+                cwd=str(path),
+            )
+        # git_email comes from the workflow config (WORKFLOW.md workspace
+        # section) — always prefer the configured value; only fall back to a
+        # derived address when the user did not configure one.
+        git_email = self.config.git_email
+        if git_email:
+            await self._try_process(
+                ["git", "config", "user.email", git_email],
+                cwd=str(path),
+            )
+        elif self.config.git_username:
+            await self._try_process(
+                ["git", "config", "user.email",
+                 f"{self.config.git_username}@gitcode.com"],
+                cwd=str(path),
+            )
 
     def _upstream_configured(self) -> bool:
         """是否配置了独立的 upstream（fork 工作流模式）。"""
