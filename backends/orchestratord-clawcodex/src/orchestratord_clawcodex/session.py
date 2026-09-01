@@ -255,6 +255,17 @@ class ClawcodexSession:
                 probe_timeout,
             )
             return ResumeStatus.UNDETECTABLE
+        except AttributeError as exc:
+            # QueryRunner.probe_transcript is not yet implemented on the
+            # clawcodex side (upstream has no such method). Treat it as
+            # undetectable (fresh session, continue) instead of REJECTED,
+            # which would fail every run. Aligns with claude/dsh/codex.
+            logger.warning(
+                "ClawcodexSession.probe_resume: probe interface missing (%s) — "
+                "returning UNDETECTABLE",
+                exc,
+            )
+            return ResumeStatus.UNDETECTABLE
         except Exception as exc:
             logger.warning(
                 "ClawcodexSession._probe_resume_via_storage: directory "
@@ -439,12 +450,22 @@ class ClawcodexSession:
                 append_system_prompt=self._spec.system_prompt,
                 tools=self._spec.tools_allow,
                 env=self._spec.env,
-                resume_session_id=self._spec.resume_session_id,
+                # resume_session_id from the orchestrator core is the run_id,
+                # never a real clawcodex session id — passing it down makes
+                # headless Session.resume(run_id) fail with cli_error(2) and
+                # kill every run. Keep it None until real resume lands on
+                # both sides (see TEMP-DISABLED resume_detection in backend.py).
+                resume_session_id=None,
                 run_id=self._spec.run_id,
                 debug_log_path=self._spec.debug_log_path,
-                timeout_s=self._spec.timeout_s,
-                stall_timeout_s=self._spec.stall_timeout_s,
-                stall_warn_s=self._spec.stall_warn_s,
+                # The orchestrator's SessionSpec timeout_* fields default to
+                # None; passing None into QueryConfig makes the clawcodex
+                # stream compare `None > 0` and crash every run
+                # ("'>' not supported between instances of 'NoneType' and
+                # 'int'"). Fall back to QueryConfig defaults when unset.
+                timeout_s=self._spec.timeout_s or 1800.0,
+                stall_timeout_s=self._spec.stall_timeout_s or 300.0,
+                stall_warn_s=self._spec.stall_warn_s or 30.0,
                 agent_id=self._spec.extra.get("agent_id"),
                 runtime_tasks=self._spec.extra.get("runtime_tasks"),
                 control_drain_fn=self._spec.extra.get("control_drain_fn"),

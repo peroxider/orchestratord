@@ -4083,8 +4083,6 @@ class Orchestrator:
     async def _update_issue_summary(self, session: AgentSession) -> None:
         """Update the issue summary comment with final status for failure paths."""
         comment_id = getattr(session, "summary_comment_id", None)
-        if comment_id is None:
-            return
         body_lines = [
             "## Orchestratord Run Summary",
             "",
@@ -4117,7 +4115,16 @@ class Orchestrator:
                 body_lines.append(f"建议操作：{action}")
         body = "\n".join(body_lines)
         try:
-            await self.tracker.update_comment(session.issue.id, comment_id, body)
+            if comment_id is None:
+                # No summary comment exists yet — create one so failures
+                # always surface feedback on the issue. Previously a missing
+                # summary_comment_id silently dropped failure feedback.
+                new_id = await self.tracker.create_comment(
+                    session.issue.id or "", body
+                )
+                session.summary_comment_id = new_id
+            else:
+                await self.tracker.update_comment(session.issue.id, comment_id, body)
         except Exception as exc:
             logger.warning(
                 "Failed to update summary comment issue_id=%s: %s", session.issue.id, exc
