@@ -752,7 +752,10 @@ class BackendRunner:
                     break
 
                 # --- Read-only spiral guard ---
-                if session.turn_count > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
+                # (session.turn_count or 0): defensive — some event paths
+                # leave turn_count unset (None), which would crash the
+                # comparison below.
+                if (session.turn_count or 0) > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
                     try:
                         from orchestratord.git.utils import get_file_status
                         statuses = get_file_status(str(session.workspace.path))

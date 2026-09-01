@@ -191,11 +191,24 @@ class PromptBuilder:
         else:
             task_dict = dict(task)
 
+        # Backward compat: keep "issue" key for existing templates.
+        # The legacy issue dict may lack "identifier"/"title" while
+        # templates render {{ issue.identifier }} / {{ issue.title }} —
+        # Jinja2 fails on the missing key ("dict object has no attribute
+        # '...'"). Fill them in so the render never errors.
+        _issue_val = task_dict.get("context", task_dict)
+        if isinstance(_issue_val, dict):
+            _fills = {
+                "identifier": _issue_val.get("id", ""),
+                "title": "",
+            }
+            _missing = {k: v for k, v in _fills.items() if not _issue_val.get(k)}
+            if _missing:
+                _issue_val = dict(_issue_val, **_missing)
         context = {
             "attempt": attempt,
             "task": _to_jinja_value(task_dict),
-            # Backward compat: keep "issue" key for existing templates
-            "issue": _to_jinja_value(task_dict.get("context", task_dict)),
+            "issue": _to_jinja_value(_issue_val),
             "clarification": clarification_context,
             "pending_question": pending_question,
             "options": options,
