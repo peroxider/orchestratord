@@ -196,6 +196,7 @@ The session SPI exposes a single async iterator of `EventEnvelope` events. Backe
 | `TEXT`            |           |       ✓         |  ✓  |   ✓    |    ✓ (fallback) |
 | `TOOL_CALL`       |     ✓     |                 |  ✓  |        |    ✓     |
 | `TOOL_RESULT`     |     ✓     |                 |  ✓  |        |    ✓     |
+| `APPROVAL_REQUEST`|     ✓     |       / ✓       |     |        |    ✓     |
 | `TURN_COMPLETE`   |     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |
 | `PHASE_COMPLETE`  |     ✓     |                 |     |        |          |
 | `SESSION_COMPLETE`|     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |
@@ -203,7 +204,7 @@ The session SPI exposes a single async iterator of `EventEnvelope` events. Backe
 
 Observations from reading the session modules:
 
-- **`clawcodex`** is the only backend that emits the full tool lifecycle (`TOOL_CALL` + `TOOL_RESULT`) and the only one that emits `TEXT_DELTA` and `PHASE_COMPLETE`. Its `interrupt()` and `approve()` are no-ops by design — clawcodex handles approval natively in its tool system, so the bits are advertised but the SPI calls intentionally do nothing (`backends/orchestratord-clawcodex/src/orchestratord_clawcodex/session.py:156`).
+- **`clawcodex`** is the only backend that emits the full tool lifecycle (`TOOL_CALL` + `TOOL_RESULT`) and the only one that emits `TEXT_DELTA` and `PHASE_COMPLETE`. Native permission waits are translated to `APPROVAL_REQUEST`; the core evaluates its approval policy and calls `approve()` to release the matching ClawCodex waiter. `interrupt()` remains unsupported and is therefore not advertised.
 - **`codex`** ships two implementations selected at runtime. The backend probes `codex app-server --help` (`backends/orchestratord-codex/src/orchestratord_codex/backend.py`); a 0 exit wires up `CodexAppServerSession` (`backends/orchestratord-codex/src/orchestratord_codex/app_server_session.py`) with `streaming_deltas + interrupt + approval_hooks` (4/8, SdkProcess). A non-0 exit or missing binary falls back to `CodexSession` (2/8, Cli, `codex exec --json`).
 - **`dsh`** wraps `deepseek-harness-sdk`. The SDK is synchronous, so all harness calls are dispatched via `asyncio.to_thread` (`backends/orchestratord-dsh/src/orchestratord_dsh/session.py:67`). It translates `assistant/message`, `tool/call`, `tool/result`, `turn/end`. As of `DESIGN_backends_hardening.md` Scheme C it also emits an `ERROR` branch when the SDK raises or `finish_reason` is non-success (`dsh_init_error` / `dsh_error` / `dsh_finish`), and advertises `cost_reporting=True` because the SDK surfaces token usage.
 - **`hermes`** is the simplest CLI backend. It always passes `--yolo` (auto-approve) and `--pass-session-id` for resume. Tool events are not translated; only `TEXT/ERROR` are emitted. The docstring notes an upgrade path: "if hermes gateway protocol opens, migrate to Protocol family".

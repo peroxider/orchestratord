@@ -172,9 +172,9 @@ class CompositeProgressSink:
 class ToolContextProgressSink:
     """Default :class:`ProgressSink` that logs progress events.
 
-    Writes progress events to the log and event bus. No longer depends on
-    backend ToolContext — the orchestrator is not an agent and doesn't
-    need a tool system.
+    Writes progress events to the log and, when a legacy context is supplied,
+    mirrors them into ``context.tasks[task_id].metadata.progress_stages``.
+    The mirror is duck-typed: core does not import a backend ToolContext.
 
     Progress percentage policy:
 
@@ -199,10 +199,9 @@ class ToolContextProgressSink:
         task_id: str,
         workflow_phases: list[str] | None = None,
         fallback_to_phase_step: bool = False,
-        # Legacy kwarg retained for backwards compatibility with tests and
-        # older call sites that still pass ``context``. The orchestrator is
-        # not an agent and no longer needs a backend ToolContext, so the
-        # argument is accepted-and-ignored rather than rejected.
+        # Optional compatibility surface for dashboards that still consume
+        # ToolContext-shaped task metadata.  It remains duck-typed so the
+        # core does not acquire a backend import.
         context: Any = None,
     ) -> None:
         self.task_id = task_id
@@ -230,6 +229,24 @@ class ToolContextProgressSink:
             return min(idx * 25, 100)
         return None
 
+    def _record_stage(self, stage: str, progress: int | None) -> None:
+        """Best-effort compatibility write into a ToolContext-shaped object."""
+        if self._legacy_context is None or not self.task_id:
+            return
+        tasks = getattr(self._legacy_context, "tasks", None)
+        if not isinstance(tasks, dict):
+            return
+        task = tasks.setdefault(self.task_id, {"id": self.task_id, "metadata": {}})
+        if not isinstance(task, dict):
+            return
+        metadata = task.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            return
+        row: dict[str, Any] = {"stage": stage}
+        if progress is not None:
+            row["progress"] = progress
+        metadata.setdefault("progress_stages", []).append(row)
+
     # -- dispatch --------------------------------------------------------
 
     def on_phase_complete(
@@ -243,6 +260,7 @@ class ToolContextProgressSink:
         phase_idx = event.phase or self._phase_count
         phase_name = self._named_phase(phase_idx)
         progress = self._phase_progress(phase_idx)
+        self._record_stage(phase_name, progress)
         logger.info(
             "progress: task=%s phase=%d/%s progress=%s turn_count=%d",
             self.task_id,
@@ -272,6 +290,7 @@ class ToolContextProgressSink:
         if not self.task_id:
             return
         progress = 100 if event.reason == "success" else None
+        self._record_stage(f"session_{event.reason}", progress)
         logger.info(
             "session complete: task=%s reason=%s progress=%s turn_count=%d phase_count=%d",
             self.task_id,

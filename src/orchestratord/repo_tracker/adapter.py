@@ -254,6 +254,7 @@ class RepositoryTrackerAdapter(TrackerAdapter):
         await self.client.update_issue(
             issue_id,
             state=state,
+            title=current.title if current is not None else None,
             # ``[]`` means "remove every label" while ``None`` means
             # "leave labels unchanged".  Reopening an issue whose only
             # label is a terminal lifecycle marker must preserve that

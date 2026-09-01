@@ -7,8 +7,11 @@ is the only place where Issue fields are mapped to AgentTask fields.
 from __future__ import annotations
 
 from orchestratord.agent.task import AgentTask
+from orchestratord.config.schema import WorkflowConfig
 from orchestratord.issue_registry.issue import Issue
 from orchestratord.issue_registry.task_mapping import issue_to_agent_task
+from orchestratord.prompt_builder import PromptBuilder
+from orchestratord.workflow_store import WorkflowStore, get_workflow_store
 
 
 def _sample_issue() -> Issue:
@@ -117,3 +120,22 @@ def test_round_trip_via_to_template_dict():
     assert d["title"] == issue.title
     assert d["context"]["issue_identifier"] == issue.identifier
     assert d["context"]["issue_id"] == issue.id
+
+
+def test_agent_task_renders_legacy_issue_template_namespace() -> None:
+    WorkflowStore.reset()
+    store = get_workflow_store()
+    store._config = WorkflowConfig()
+    store._prompt_template = (
+        "legacy={{ issue.identifier }}|{{ issue.title }}|"
+        "{{ issue.description }} task={{ task.title }}"
+    )
+    try:
+        rendered = PromptBuilder.render(issue_to_agent_task(_sample_issue()))
+    finally:
+        WorkflowStore.reset()
+
+    assert rendered.startswith(
+        "legacy=ISSUE-42|Fix auth timeout|Session expires after 60s. "
+        "task=Fix auth timeout"
+    )

@@ -471,6 +471,7 @@ class Orchestrator:
             task_id=task_id,
             workflow_phases=self.workflow.agent.phases,
             fallback_to_phase_step=bool(self.workflow.agent.fallback_to_phase_step),
+            context=getattr(self, "_progress_context", None),
         )
         composite = CompositeProgressSink([inner])
         # P3: attach the IM event emitter when a deliver callback is wired.
@@ -499,7 +500,17 @@ class Orchestrator:
         # protocol and its declared capability. Channel-specific caches and
         # loop internals stay behind the adapter boundary.
         im_adapter = getattr(self, "im_channel_adapter", None)
-        if im_adapter is not None and callable(getattr(im_adapter, "send_placeholder_card", None)) \
+        capabilities = getattr(im_adapter, "capabilities", None)
+        declared_capabilities = getattr(capabilities, "_capabilities", capabilities)
+        try:
+            has_card_update = any(
+                str(getattr(capability, "value", capability)).lower() == "card_update"
+                for capability in declared_capabilities
+            )
+        except TypeError:
+            has_card_update = False
+        if im_adapter is not None and has_card_update \
+                and callable(getattr(im_adapter, "send_placeholder_card", None)) \
                 and callable(getattr(im_adapter, "update_progress_card", None)):
             from .sinks.feishu_activity import FeishuActivitySink
 
@@ -512,7 +523,7 @@ class Orchestrator:
                 task_id=task_id,
                 feishu_adapter=im_adapter,
                 clock=time.time,
-                status_dashboard=self.status_dashboard,
+                status_dashboard=getattr(self, "status_dashboard", None),
                 phases_total=phases_total,
             )
             composite.add(activity_sink)
@@ -2069,7 +2080,8 @@ class Orchestrator:
             return
         now = time.monotonic()
         interval_s = cfg.poll_interval_ms / 1000.0
-        if now - self._state.pr_conflict_scan_last_run < interval_s:
+        last_run = self._state.pr_conflict_scan_last_run
+        if last_run > 0 and now - last_run < interval_s:
             return
         self._state.pr_conflict_scan_last_run = now
 

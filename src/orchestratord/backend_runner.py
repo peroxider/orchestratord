@@ -17,17 +17,16 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
+from orchestratord.events.agent_events import SessionComplete, TurnComplete
+from orchestratord.spi.approval import ApprovalDecision
 from orchestratord.spi.backend import AgentBackend, SessionSpec
 from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.session import ResumeStatus
-from orchestratord.events.agent_events import SessionComplete, TurnComplete
 
-from .session_state import AgentSession, RunSession, RunSubject
-from .runner_utils import _broadcast_to_socket, _drain_control_commands
-from .control_socket import ControlSocket
 from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
 from .approval_policy import (
     ApprovalPolicy,
@@ -35,7 +34,10 @@ from .approval_policy import (
     get_approval_policy,
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
+from .control_socket import ControlSocket
 from .prompt_builder import PromptBuilder
+from .runner_utils import _broadcast_to_socket, _drain_control_commands
+from .session_state import AgentSession, RunSession, RunSubject
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +293,10 @@ class BackendRunner:
         issue = session.issue
         workspace = session.workspace
 
+        # A run id supplied by the caller identifies an existing backend
+        # transcript to resume.  A run id generated below identifies this
+        # fresh run and must never be fed back as ``resume_session_id``.
+        resume_session_id = session.run_id
         if session.run_id is None:
             session.run_id = self._build_run_id(session)
 
@@ -319,7 +325,12 @@ class BackendRunner:
         session._runtime_tasks = self.get_task_registry()
 
         # Build a SessionSpec from agent config + session context.
-        spec = self._build_session_spec(session, workflow, system_prompt_append)
+        spec = self._build_session_spec(
+            session,
+            workflow,
+            system_prompt_append,
+            resume_session_id=resume_session_id,
+        )
         session._user_prompt = user_prompt
 
         logger.info(
@@ -381,10 +392,20 @@ class BackendRunner:
 
     @staticmethod
     def _build_run_id(session: AgentSession) -> str:
-        """Build a stable run_id for this session."""
+        """Build a stable, transcript-safe run id for this session.
+
+        Backend session identifiers cross a filesystem boundary.  ClawCodex
+        deliberately accepts only alphanumeric characters, ``_`` and ``-``
+        for transcript directory names, so tracker punctuation (notably the
+        ``#`` prefix used by GitCode issue identifiers) must not leak through.
+        """
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        identifier = getattr(session.issue, "identifier", None) or ""
-        slug = identifier.replace("/", "-").replace(" ", "_")[:40] if identifier else "unknown"
+        identifier = str(getattr(session.issue, "identifier", None) or "")
+        safe_identifier = "".join(
+            char if char.isalnum() or char in "_-" else "-"
+            for char in identifier
+        )
+        slug = safe_identifier.strip("-_")[:40] or "unknown"
         return f"{ts}_{slug}"
 
     def _build_prompt(
@@ -432,6 +453,8 @@ class BackendRunner:
         session: AgentSession,
         workflow: WorkflowConfig,
         system_prompt: str,
+        *,
+        resume_session_id: str | None = None,
     ) -> SessionSpec:
         """Build a SessionSpec from agent config and session context."""
         # Expose the agent-callable skill tool to every backend
@@ -459,6 +482,9 @@ class BackendRunner:
                 extra["skill_tools"] = skill_tools
         except Exception:
             logger.exception("skill tool description injection failed; continuing")
+        total_timeout_s = self.agent_config.run_timeout_ms / 1000.0
+        inactivity_timeout_s = self.agent_config.stall_timeout_ms / 1000.0
+        stall_warn_s = self.agent_config.stall_warn_ms / 1000.0
         return SessionSpec(
             cwd=str(session.workspace.path),
             system_prompt=system_prompt or None,
@@ -472,8 +498,14 @@ class BackendRunner:
             tools_allow=tools_allow,
             tools_deny=getattr(self.agent_config, "tools_deny", []) or [],
             env=self._build_env(session),
-            resume_session_id=session.run_id or None,
+            resume_session_id=resume_session_id,
             max_turns=self.max_turns,
+            total_timeout_s=total_timeout_s,
+            inactivity_timeout_s=inactivity_timeout_s,
+            idle_watchdog_timeout_s=total_timeout_s,
+            stall_warn_s=stall_warn_s,
+            run_id=session.run_id,
+            debug_log_path=getattr(session, "debug_log_path", None),
             extra=extra,
         )
 
@@ -725,6 +757,13 @@ class BackendRunner:
                         payload.get("call_id", ""),
                     )
 
+            elif kind == EventKind.APPROVAL_REQUEST:
+                await self._handle_approval_request_envelope(
+                    spi_session,
+                    event,
+                    session_context,
+                )
+
             elif kind == EventKind.TOOL_RESULT:
                 if progress_reporter is not None and hasattr(progress_reporter, "on_tool_result"):
                     progress_reporter.on_tool_result(
@@ -732,7 +771,8 @@ class BackendRunner:
                     )
 
             elif kind == EventKind.TURN_COMPLETE:
-                session.turn_count += 1
+                reported_turn = int(payload.get("turn", 0) or 0)
+                session.turn_count = max(session.turn_count + 1, reported_turn)
                 # Check for noop (no file changes).
                 file_changed = await self._check_file_changes(
                     session, last_file_status_snapshot
@@ -897,6 +937,41 @@ class BackendRunner:
     # ------------------------------------------------------------------
     # Tool call handling
     # ------------------------------------------------------------------
+
+    async def _handle_approval_request_envelope(
+        self,
+        spi_session: Any,
+        event: EventEnvelope,
+        session_context: dict[str, Any],
+    ) -> None:
+        """Resolve a pre-execution backend approval request.
+
+        Backends emit ``APPROVAL_REQUEST`` while their native tool runner is
+        blocked.  The core policy is authoritative: its decision is sent back
+        through ``AgentSession.approve`` before the backend may execute the
+        tool.  ``ask`` remains fail-closed in autonomous daemon mode, matching
+        :class:`AskApprovalPolicy`.
+        """
+        payload = event.payload
+        request_id = str(payload.get("request_id", ""))
+        if not request_id:
+            logger.warning("approval request missing request_id: %s", payload)
+            return
+
+        policy_event = ToolCallEvent(
+            tool_name=payload.get("tool_name") or payload.get("name", "unknown"),
+            params=payload.get("arguments", {}),
+            tool_use_id=payload.get("call_id"),
+        )
+        approved = self._approval_policy.evaluate(policy_event, session_context)
+        decision = ApprovalDecision.ALLOW if approved else ApprovalDecision.DENY
+        await spi_session.approve(request_id, decision)
+        logger.info(
+            "Approval request resolved: request_id=%s tool=%s decision=%s",
+            request_id,
+            policy_event.tool_name,
+            decision.value,
+        )
 
     def _handle_tool_call_envelope(
         self,

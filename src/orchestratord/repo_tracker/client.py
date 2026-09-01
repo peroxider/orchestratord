@@ -369,15 +369,60 @@ class RepositoryIssueClient(RepositoryPullRequestMixin):
         *,
         state: str | None = None,
         labels: list[str] | None = None,
+        title: str | None = None,
     ) -> None:
         """Update a remote issue's state and/or labels.
 
-        Best-effort: when the platform is GitCode (``access_token`` auth)
-        and the only change is ``state_event=close``, a known platform
-        limitation prevents the issue from actually closing (HTTP 200 is
-        returned but state stays ``open``). The error is logged at
-        WARNING level and swallowed — the caller is not interrupted.
+        GitCode's documented state-transition endpoint differs from its
+        ordinary issue/label endpoint: it omits ``repo`` from the URL and
+        requires ``repo``, ``title`` and ``state=close|reopen`` form fields.
+        Use that contract for lifecycle transitions so HTTP 200 also changes
+        the remote issue state instead of updating only its labels.
         """
+        normalized_state = (state or "").strip().lower()
+        state_action: str | None = None
+        if normalized_state in {
+            "closed",
+            "close",
+            "done",
+            "completed",
+            "cancelled",
+            "canceled",
+            "duplicate",
+            "failed",
+            "abandoned",
+            "verification_failed",
+        }:
+            state_action = "close"
+        elif normalized_state in {"open", "opened", "reopen", "reopened"}:
+            state_action = "reopen"
+
+        if self.platform.name == "gitcode" and state_action is not None:
+            if not title:
+                current = await self._request_json(
+                    "GET",
+                    f"/repos/{self.owner}/{self.repo}/issues/{issue_id}",
+                )
+                title = current.get("title") if isinstance(current, dict) else None
+            if not title:
+                raise RepositoryTrackerError(
+                    f"GitCode issue {issue_id} cannot transition state "
+                    "without its title"
+                )
+            data: dict[str, Any] = {
+                "repo": self.repo,
+                "title": title,
+                "state": state_action,
+            }
+            if labels is not None:
+                data["labels"] = ",".join(labels)
+            await self._request_json(
+                "PATCH",
+                f"/repos/{self.owner}/issues/{issue_id}",
+                data=data,
+            )
+            return
+
         payload = _build_issue_update_payload(
             state=state,
             labels=labels,
@@ -385,32 +430,12 @@ class RepositoryIssueClient(RepositoryPullRequestMixin):
         )
         if not payload:
             return
-        try:
-            await self._request_json(
-                "PATCH",
-                f"/repos/{self.owner}/{self.repo}/issues/{issue_id}",
-                json=payload if self.platform.auth_mode == "bearer" else None,
-                data=payload if self.platform.auth_mode != "bearer" else None,
-            )
-        except RepositoryTrackerError as exc:
-            # GitCode limitation: state_event=close alone requires at
-            # least one extra content field, and even then the close
-            # doesn't take effect. Degrade gracefully.
-            if (
-                self.platform.auth_mode != "bearer"
-                and list(payload.keys()) == ["state_event"]
-                and "state_event" in str(exc)
-                and "400" in str(exc)
-            ):
-                logger.warning(
-                    "update_issue: GitCode API does not support close via "
-                    "state_event=close (known platform limitation). "
-                    "issue_id=%s state=%s — ignoring.",
-                    issue_id,
-                    state,
-                )
-                return
-            raise
+        await self._request_json(
+            "PATCH",
+            f"/repos/{self.owner}/{self.repo}/issues/{issue_id}",
+            json=payload if self.platform.auth_mode == "bearer" else None,
+            data=payload if self.platform.auth_mode != "bearer" else None,
+        )
 
     async def update_issue_body(
         self,

@@ -23,6 +23,7 @@ from orchestratord.config.schema import (
     WorkspaceConfig,
 )
 from orchestratord.issue_registry.issue import Issue
+from orchestratord.intent import Intent
 from orchestratord.orchestrator import Orchestrator
 from orchestratord.status_dashboard import SessionStatus, StatusDashboard
 from orchestratord.tracker import TrackerAdapter

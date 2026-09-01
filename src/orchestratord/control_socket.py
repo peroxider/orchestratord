@@ -225,7 +225,13 @@ class ControlSocket:
         clients still receive the event.
         """
         if not self._clients:
-            return
+            # A successfully connected client can still be waiting for the
+            # server's accept callback to run.  Yield once before declaring
+            # the broadcast a no-op so the first lifecycle frame is not lost
+            # to that event-loop scheduling race.
+            await asyncio.sleep(0)
+            if not self._clients:
+                return
         if isinstance(event, EventFrame):
             frame = asdict(event)
         else:

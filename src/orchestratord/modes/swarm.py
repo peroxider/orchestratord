@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 from ..git.sync import VerificationFailed
 from ..task_decomposition import (
     TaskDecomposer,
+    TaskPlan,
     build_swarm_prompt,
     validate_task_execution,
     write_task_plan,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 from datetime import datetime
@@ -19,6 +20,9 @@ if TYPE_CHECKING:
 
     # Optional async LLM client: prompt → response.
     LLMClient = Callable[[str], str | Awaitable[str]]
+
+
+logger = logging.getLogger(__name__)
 
 
 _LIST_ITEM = re.compile(r"^\s*(?:[-*]\s+|\d+[.)]\s+)(.+?)\s*$")
