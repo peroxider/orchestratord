@@ -11,15 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .utils import (
-    get_current_branch,
-    get_default_branch,
-    get_file_status,
-    get_repo_root,
-    run_git as _run_git,
-)
-from ..config.schema import AgentConfig, HooksConfig, PrTemplateConfig
 from .. import report_writer
+from ..config.schema import AgentConfig, HooksConfig, PrTemplateConfig
 from ..issue_registry.issue import Issue
 from ..prompt_builder import resolve_python_executable
 from ..tracker import (
@@ -30,6 +23,15 @@ from ..tracker import (
     supports,
 )
 from ..workspace import Workspace
+from .utils import (
+    get_current_branch,
+    get_default_branch,
+    get_file_status,
+    get_repo_root,
+)
+from .utils import (
+    run_git as _run_git,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +128,10 @@ class GitSyncService:
             ".orchestrator_workspace",
             ".operator_hints.md",
             ".reports",
+            # Harness/agent-internal session persistence (e.g. the dsh
+            # SDK's session.jsonl.zstd transcripts) must never ride
+            # along in an implementation commit.
+            ".sessions",
             ".orchestratord_clarification_queue.json",
             ".orchestratord_issue_registry.json",
             ".orchestratord_workspace.lock",
@@ -562,7 +568,7 @@ class GitSyncService:
             await asyncio.to_thread(
                 self._run_git_checked, ["commit", "--amend", "--no-edit"], repo_root
             )
-        setattr(session, "pre_commit_output", output)
+        session.pre_commit_output = output
 
     async def _run_pre_push_verification(self, repo_root: str, session: Any) -> None:
         outputs: list[str] = []
@@ -587,6 +593,14 @@ class GitSyncService:
         # loop above runs nothing and verification used to pass vacuously.
         # Fall back to an auto-detected test run compared against the
         # pre-change baseline so net-new failures block the push.
+        #
+        # Contract note: an EXPLICIT ``agent.test_command`` is always a
+        # hard gate (non-zero exit blocks, no baseline exemption). A
+        # workspace with knowingly-red baseline tests must exclude them
+        # in the command itself (``--deselect`` / ``--ignore``) — the
+        # gate must stay predictable and not silently wave failures
+        # through. The baseline-aware path is reserved for the
+        # auto-detected fallback below.
         if not self._agent_config.test_command and self._agent_config.verification.regression_guard:
             verification_status, guard_output = await self._run_regression_guard(repo_root, session)
             if guard_output:
@@ -635,8 +649,8 @@ class GitSyncService:
                     output,
                 )
             outputs.append(f"## pre_push\n{output}".strip())
-        setattr(session, "verification_status", verification_status)
-        setattr(session, "verification_output", "\n\n".join(outputs))
+        session.verification_status = verification_status
+        session.verification_output = "\n\n".join(outputs)
 
     # ------------------------------------------------------------------
     # Regression guard (defect R1)
@@ -821,7 +835,7 @@ class GitSyncService:
                 "post_sync hook modified the workspace",
                 output,
             )
-        setattr(session, "post_sync_output", output)
+        session.post_sync_output = output
 
     async def _run_shell(self, command: str, repo_root: str, timeout_ms: int) -> str:
         rc, output = await self._run_shell_result(command, repo_root, timeout_ms)
@@ -849,7 +863,7 @@ class GitSyncService:
                 proc.communicate(),
                 timeout=timeout_ms / 1000.0,
             )
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise VerificationFailed(
                 f"command timed out after {timeout_ms}ms: {command}",
                 "",
@@ -1444,7 +1458,7 @@ class GitSyncService:
             # can dual-write the NDJSON into the persistent layer.
             tool_events_path=getattr(session, "tool_events_path", None),
         )
-        setattr(session, "report_path", result.persistent_markdown_path)
+        session.report_path = result.persistent_markdown_path
         return result
 
     async def _update_summary_comment(
@@ -1480,7 +1494,7 @@ class GitSyncService:
                 return
         created = await self.tracker.create_comment(issue.id, body)
         if created is not None and getattr(created, "id", None):
-            setattr(session, "summary_comment_id", created.id)
+            session.summary_comment_id = created.id
 
     def _build_summary_comment_body(
         self,

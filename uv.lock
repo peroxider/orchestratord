@@ -816,12 +816,14 @@ source = { editable = "backends/orchestratord-dsh" }
 dependencies = [
     { name = "deepseek-harness-sdk" },
     { name = "orchestratord" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "deepseek-harness-sdk", specifier = ">=0.0.0.dev0" },
     { name = "orchestratord" },
+    { name = "pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]

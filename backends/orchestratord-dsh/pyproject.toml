@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "orchestratord",
     "deepseek-harness-sdk>=0.0.0.dev0",
+    "pyyaml>=6.0",
 ]
 
 [project.entry-points."orchestratord.backends"]

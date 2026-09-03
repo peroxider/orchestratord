@@ -9,7 +9,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from ..tracker import (
@@ -112,7 +111,87 @@ def _normalize_workspace_strategy(value: Any) -> str:
     return strategy
 
 
-def _parse_repro_first_config(raw: Any) -> "ReproFirstConfig":
+def _parse_providers_config(value: Any) -> dict[str, ProviderConfig]:
+    """Build the ``agent.providers`` route table from YAML.
+
+    Tolerant of malformed entries (warn + drop, matching the
+    config-loader philosophy): a bad route is surfaced by the consuming
+    backend's preflight as an unknown-provider error, not a daemon
+    crash. ``api_key`` is kept raw (see :class:`ProviderConfig`).
+    """
+    if not isinstance(value, dict):
+        if value:
+            logger.warning("agent.providers must be a mapping; ignoring it")
+        return {}
+    out: dict[str, ProviderConfig] = {}
+    for route_name, route_raw in value.items():
+        route = str(route_name).strip()
+        if not route:
+            logger.warning("agent.providers contains an empty route name; ignored")
+            continue
+        if not isinstance(route_raw, dict):
+            logger.warning(
+                "agent.providers[%r] is not a mapping; ignored", route
+            )
+            continue
+        models_raw = route_raw.get("models")
+        models: list[Any] = []
+        if isinstance(models_raw, list):
+            models = list(models_raw)
+        elif models_raw not in (None, []):
+            logger.warning(
+                "agent.providers[%r].models must be a list; ignored", route
+            )
+        headers_raw = route_raw.get("headers")
+        headers: dict[str, str] = {}
+        if isinstance(headers_raw, dict):
+            headers = {str(k): str(v) for k, v in headers_raw.items() if v is not None}
+        elif headers_raw not in (None, {}):
+            logger.warning(
+                "agent.providers[%r].headers must be a mapping; ignored", route
+            )
+        overrides_raw = route_raw.get("model_overrides")
+        overrides: dict[str, dict[str, Any]] = {}
+        if isinstance(overrides_raw, dict):
+            overrides = {
+                str(k): dict(v) for k, v in overrides_raw.items() if isinstance(v, dict)
+            }
+        elif overrides_raw not in (None, {}):
+            logger.warning(
+                "agent.providers[%r].model_overrides must be a mapping; ignored", route
+            )
+        default_context_window = route_raw.get("default_context_window")
+        if not isinstance(default_context_window, int) or isinstance(
+            default_context_window, bool
+        ) or default_context_window <= 0:
+            default_context_window = None
+        default_max_tokens = route_raw.get("default_max_tokens")
+        if not isinstance(default_max_tokens, int) or isinstance(
+            default_max_tokens, bool
+        ) or default_max_tokens <= 0:
+            default_max_tokens = None
+        api = route_raw.get("api")
+        out[route] = ProviderConfig(
+            api=str(api).strip() if api else None,
+            base_url=(str(route_raw.get("base_url")).strip() or None)
+            if route_raw.get("base_url")
+            else None,
+            api_key=(str(route_raw.get("api_key")).strip() or None)
+            if route_raw.get("api_key")
+            else None,
+            models=models,
+            model_overrides=overrides,
+            headers=headers,
+            default_context_window=default_context_window,
+            default_max_tokens=default_max_tokens,
+            display_name=(str(route_raw.get("display_name")).strip() or None)
+            if route_raw.get("display_name")
+            else None,
+        )
+    return out
+
+
+def _parse_repro_first_config(raw: Any) -> ReproFirstConfig:
     """Build a ``ReproFirstConfig`` from the ``agent.repro_first`` YAML
     section. Tolerant of a missing/malformed section (all defaults,
     gate disabled)."""
@@ -134,7 +213,7 @@ def _parse_repro_first_config(raw: Any) -> "ReproFirstConfig":
     )
 
 
-def _parse_modes_config(raw: dict[str, Any]) -> "ModesConfig":
+def _parse_modes_config(raw: dict[str, Any]) -> ModesConfig:
     """Build a ``ModesConfig`` from the parsed ``modes`` YAML section.
 
     Tolerant of:
@@ -573,6 +652,37 @@ class ReproFirstConfig:
 
 
 @dataclass
+class ProviderConfig:
+    """One LLM provider route in ``agent.providers`` (currently consumed
+    by the dsh backend, which mounts it as a ``llm-pi-ai`` adapter route
+    in the DeepSeek Harness runtime).
+
+    Declaration vs selection: this table declares what the runtime CAN
+    serve; ``agent.provider`` / ``agent.model`` (and pipeline
+    ``stage_overrides``) merely select among the declared entries and may
+    be omitted when the choice is unambiguous (single route / single
+    model).
+
+    ``api_key`` is kept RAW (including any ``$VAR`` reference): unlike
+    ``agent.api_key`` it is resolved by the consuming backend so an
+    unresolvable reference can be reported with the route name and the
+    original variable name, and the literal secret never enters the
+    generated cordis config (it travels to the runtime subprocess via
+    the environment only).
+    """
+
+    api: str | None = None          # openai-completions | openai-responses | anthropic-messages
+    base_url: str | None = None
+    api_key: str | None = None      # raw value or $VAR reference (see docstring)
+    models: list[Any] = field(default_factory=list)  # str shorthand or {id, name, context_window, max_tokens, input}
+    model_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    headers: dict[str, str] = field(default_factory=dict)
+    default_context_window: int | None = None
+    default_max_tokens: int | None = None
+    display_name: str | None = None
+
+
+@dataclass
 class AgentConfig:
     max_concurrent_agents: int = 10
     max_turns: int = 600
@@ -584,7 +694,11 @@ class AgentConfig:
     max_concurrent_agents_by_state: dict[str, int] = field(default_factory=dict)
     # Backend configuration. The selected backend owns provider/runtime
     # semantics; the orchestrator only forwards these generic values.
-    provider: str = "anthropic"
+    # Empty default (historically "anthropic"): each backend applies its
+    # own default when unset — dsh falls back to its stock
+    # deepseek-official adapter, clawcodex requires an explicit value —
+    # so a dsh workflow needs no agent.provider line to be usable.
+    provider: str = ""
     permission_mode: str = "dontAsk"
     # Per-tool decision audit log level. "none" disables the NDJSON
     # audit trail; "minimal" records only denied decisions; "full" records
@@ -642,6 +756,13 @@ class AgentConfig:
     # "model" keys. The orchestrator builds per-stage AgentRunners on top of
     # the main agent config; missing keys inherit from the parent.
     stage_overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Named provider routes (declaration, not selection). Currently
+    # consumed by the dsh backend, which mounts each entry as a
+    # configurable ``llm-pi-ai`` route in the DeepSeek Harness runtime;
+    # ``agent.provider`` / ``agent.model`` then select among these
+    # routes. Empty dict = the backend default credential chain applies
+    # (deepseek-official + DEEPSEEK_API_KEY), fully backward compatible.
+    providers: dict[str, ProviderConfig] = field(default_factory=dict)
     # the inter-run retry queue between separate AgentRunner.run()
     # invocations; these fields govern backoff WITHIN a single run.
     rate_limit_base_delay_ms: int = 30_000
@@ -1016,12 +1137,12 @@ class WorkflowConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     modes: ModesConfig = field(default_factory=ModesConfig)
     pr_template: PrTemplateConfig = field(default_factory=PrTemplateConfig)
-    pr_conflict_scan: "PrConflictScanConfig" = field(default_factory=lambda: PrConflictScanConfig())
-    clarifier: "ClarifierConfig" = field(default_factory=lambda: ClarifierConfig())
+    pr_conflict_scan: PrConflictScanConfig = field(default_factory=lambda: PrConflictScanConfig())
+    clarifier: ClarifierConfig = field(default_factory=lambda: ClarifierConfig())
     source_path: str = ""
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "WorkflowConfig":
+    def from_dict(cls, raw: dict[str, Any]) -> WorkflowConfig:
         """Build from a raw dict (already parsed YAML front matter)."""
         raw = _normalize_keys(_drop_nil_values(raw))
 
@@ -1106,12 +1227,16 @@ class WorkflowConfig:
             git_username=_resolve_env_value(workspace_raw.get("git_username")),
             git_email=_resolve_env_value(workspace_raw.get("git_email")),
             git_token=_normalize_secret_value(_resolve_env_value(workspace_raw.get("git_token"))),
-            gitignore_patterns=workspace_raw.get(
-                "gitignore_patterns",
-                [
+            gitignore_patterns=_normalize_string_list(
+                workspace_raw.get("gitignore_patterns"),
+                default=[
                     ".orchestrator_control",
                     ".operator_hints.md",
                     ".reports",
+                    # Agent-internal session persistence (dsh SDK
+                    # transcripts) — never part of an implementation
+                    # commit (see git/sync.py for the sync-side list).
+                    ".sessions",
                     "*.pyc",
                     "__pycache__",
                     "*.egg-info",
@@ -1151,6 +1276,9 @@ class WorkflowConfig:
                 override["model"] = model
             if override:
                 stage_overrides[stage_name] = override
+        # Named provider routes (declaration table; consumed by the dsh
+        # backend — see ProviderConfig).
+        providers = _parse_providers_config(agent_raw.get("providers"))
         agent = AgentConfig(
             max_concurrent_agents=agent_raw.get("max_concurrent_agents", 10),
             max_turns=agent_raw.get("max_turns", 600),
@@ -1160,7 +1288,7 @@ class WorkflowConfig:
             max_concurrent_agents_by_state=_normalize_state_limits(
                 agent_raw.get("max_concurrent_agents_by_state")
             ),
-            provider=agent_raw.get("provider", "anthropic"),
+            provider=str(agent_raw.get("provider", "") or "").strip(),
             permission_mode=_resolve_orchestrator_permission_mode(
                 agent_raw.get("permission_mode"),
                 is_orchestrator=bool(tracker_raw),
@@ -1229,8 +1357,15 @@ class WorkflowConfig:
             api_key=_resolve_env_value(agent_raw.get("api_key")) or None,
             cordis=_resolve_env_value(agent_raw.get("cordis")) or None,
             runtime_bin=_resolve_env_value(agent_raw.get("runtime_bin")) or None,
+            # Python interpreter hint injected into agent prompts (see
+            # AgentConfig.python_executable). Historically parsed from
+            # YAML was silently dropped here — the field existed but
+            # from_dict never forwarded it.
+            python_executable=str(agent_raw.get("python_executable", "") or "").strip(),
             # Multi-model stage overrides (parsed above).
             stage_overrides=stage_overrides,
+            # Named provider routes (parsed above).
+            providers=providers,
             # Per-run env vars merged into Bash/hook subprocess env.
             env={str(k): str(v) for k, v in (agent_raw.get("env") or {}).items() if v is not None},
             # Three-channel clarification flow tuning. Keys mirror the

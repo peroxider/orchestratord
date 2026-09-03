@@ -82,6 +82,13 @@ The script:
    | `codex`     | `codex` on `PATH`                                               | `npm i -g @openai/codex`                                                               |
    | `dsh`       | `import deepseek_harness_sdk` + `dsh` on `PATH`                 | `pip install deepseek-harness-sdk`                                                     |
    | `hermes`    | `hermes` on `PATH`                                              | upstream repository                                                                    |
+
+   > **Migration note (provider default):** `agent.provider` no longer
+   > defaults to `"anthropic"` — the default is now empty and each backend
+   > applies its own (dsh falls back to its stock `deepseek-official`
+   > adapter). **clawcodex workflows MUST declare `agent.provider`
+   > explicitly**; an unset provider fails preflight with
+   > `agent.provider must be configured for clawcodex.`
    | `opencode`  | `opencode` on `PATH`                                            | `npm i -g opencode`                                                                    |
 
    If a runtime is missing, the script prints the install hint and (in interactive mode) asks whether to install the wrapper package anyway.

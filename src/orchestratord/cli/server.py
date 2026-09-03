@@ -468,7 +468,7 @@ def _run_status(args: argparse.Namespace) -> int:
 
     if pid and _is_pid_alive(pid):
         uptime = _format_uptime(started_at) if started_at else "unknown"
-        print(f"Orchestrator daemon: RUNNING")
+        print("Orchestrator daemon: RUNNING")
         print(f"  PID            : {pid}")
         print(f"  Uptime         : {uptime}")
         print(f"  Project        : {project_slug}")
@@ -485,7 +485,7 @@ def _run_status(args: argparse.Namespace) -> int:
         # Auto-clean stale metadata
         if meta_path and meta_path.exists():
             meta_path.unlink()
-            print(f"  -> Stale metadata cleaned up.")
+            print("  -> Stale metadata cleaned up.")
 
     return 0
 
@@ -613,7 +613,7 @@ def _run_stop(args: argparse.Namespace) -> int:
         # Clean up stale metadata
         if meta_path and meta_path.exists():
             meta_path.unlink()
-            print(f"  Stale metadata cleaned up.")
+            print("  Stale metadata cleaned up.")
         return 0  # idempotent
 
     # Send stop signal
@@ -652,7 +652,7 @@ def _run_stop(args: argparse.Namespace) -> int:
         meta_path.unlink()
         print(f"  Metadata cleaned up: {meta_path}")
 
-    print(f"Orchestrator daemon stopped.")
+    print("Orchestrator daemon stopped.")
     return 0
 
 
@@ -907,7 +907,7 @@ def _mount_gateway_opt_in(
                 o._apply_control_command(verb, issue_id or "", "")
                 logger.info("IM control_verb: %s issue=%s", verb, issue_id)
                 return
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("IM control_verb failed")
         logger.warning("IM control_verb: orchestrator not ready (%s %s)", verb, issue_id)
 
@@ -925,7 +925,7 @@ def _mount_gateway_opt_in(
                     f.write(f"\n{hint}\n")
                 logger.info("IM issue_inject: issue=%s hint_len=%d", issue_id, len(hint))
                 return
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("IM issue_inject failed")
         logger.warning("IM issue_inject: no workspace root")
 
@@ -1182,6 +1182,11 @@ def _run_orchestrator(
         spi_backend = backends[backend]
 
         agent = config.agent
+        # Mirror BackendRunner._build_session_spec: forward the provider
+        # route registry so startup preflight validates the same spec
+        # shape a run will use (empty registry → no extra channel change).
+        from ..backend_runner import providers_extra
+
         spec = SessionSpec(
             cwd=str(getattr(config.workspace, "root", "") or "."),
             provider=getattr(agent, "provider", None),
@@ -1191,6 +1196,7 @@ def _run_orchestrator(
             cordis=getattr(agent, "cordis", None),
             runtime_bin=getattr(agent, "runtime_bin", None),
             env=getattr(agent, "env", None) or {},
+            extra=providers_extra(agent),
         )
         try:
             spi_backend.preflight(spec)
@@ -1326,7 +1332,6 @@ def _run_orchestrator(
 
 async def _dashboard_loop(dashboard, port: int | None) -> None:
     """Periodic dashboard status print loop."""
-    import time
 
     while True:
         await asyncio.sleep(5)
