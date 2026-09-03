@@ -1058,6 +1058,23 @@ class RulesConfig:
 
 
 @dataclass
+class TelemetryConfig:
+    """Remote telemetry reporting config (daily run summary -> GitCode issue).
+
+    Local event recording is always on (~/.orchestratord/telemetry/events/);
+    this only controls the optional remote daily report. ``api_key`` left
+    empty reuses the tracker's GitCode token from the workflow.
+    """
+
+    reporting_enabled: bool = False
+    report_owner: str = ""
+    report_repo: str = ""
+    issue_title: str = "Orchestratord Telemetry"
+    api_key: str = ""
+    env_label: str = ""
+
+
+@dataclass
 class PrConflictScanConfig:
     """Configuration for the optional PR conflict scan daemon job.
 
@@ -1133,6 +1150,7 @@ class WorkflowConfig:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     review_feedback: ReviewFeedbackConfig = field(default_factory=ReviewFeedbackConfig)
     rules: RulesConfig = field(default_factory=RulesConfig)
+    telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     modes: ModesConfig = field(default_factory=ModesConfig)
@@ -1155,6 +1173,7 @@ class WorkflowConfig:
         hooks_raw = raw.get("hooks", {})
         review_feedback_raw = raw.get("review_feedback", {})
         rules_raw = raw.get("rules", {})
+        telemetry_raw = raw.get("telemetry", {})
         modes_raw = raw.get("modes", {}) or {}
         observability_raw = raw.get("observability", {})
         server_raw = raw.get("server", {})
@@ -1438,6 +1457,16 @@ class WorkflowConfig:
                 path=str(rules_raw.get("path", "")).strip(),
                 max_rules=int(rules_raw.get("max_rules", 20)),
                 min_confidence=str(rules_raw.get("min_confidence", "low")).strip().lower(),
+            ),
+            telemetry=TelemetryConfig(
+                reporting_enabled=bool(telemetry_raw.get("reporting_enabled", False)),
+                report_owner=str(telemetry_raw.get("report_owner", "")).strip(),
+                report_repo=str(telemetry_raw.get("report_repo", "")).strip(),
+                issue_title=str(
+                    telemetry_raw.get("issue_title", "Orchestratord Telemetry")
+                ).strip(),
+                api_key=str(telemetry_raw.get("api_key", "")).strip(),
+                env_label=str(telemetry_raw.get("env_label", "")).strip(),
             ),
             review_feedback=ReviewFeedbackConfig(
                 enabled=bool(review_feedback_raw.get("enabled", False)),

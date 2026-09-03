@@ -946,7 +946,7 @@ class Orchestrator:
         orch_start = time.monotonic()
         orch_session_id = self._derive_orchestrator_session_id()
         try:
-            from telemetry import record_session_start
+            from orchestratord.telemetry import record_session_start
 
             record_session_start(
                 session_id=orch_session_id,
@@ -983,7 +983,7 @@ class Orchestrator:
             # Best-effort error event with stable fingerprint.
             # Failures are swallowed.
             try:
-                from telemetry import record_error
+                from orchestratord.telemetry import record_error
 
                 record_error(session_id=orch_session_id, exc=exc)
             except Exception:
@@ -993,7 +993,7 @@ class Orchestrator:
         finally:
             # Best-effort session_end + command_run.
             try:
-                from telemetry import (
+                from orchestratord.telemetry import (
                     record_command_run,
                     record_session_end,
                 )
@@ -1033,6 +1033,32 @@ class Orchestrator:
             return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
         except Exception:
             return "orchestrator"
+
+    def _report_telemetry(self) -> None:
+        """Best-effort: push today's telemetry summary to the remote issue.
+
+        Only when ``workflow.telemetry.reporting_enabled`` is set; the
+        api_key falls back to the tracker's GitCode token. Never raises.
+        """
+        try:
+            tele = getattr(self.workflow, "telemetry", None)
+            if tele is None or not tele.reporting_enabled:
+                return
+            tracker = getattr(self.workflow, "tracker", None)
+            api_key = tele.api_key or (getattr(tracker, "api_key", "") or "")
+            if not api_key:
+                return
+            from orchestratord.telemetry.reporters import report_day
+
+            report_day(
+                owner=tele.report_owner or getattr(tracker, "owner", "") or "",
+                repo=tele.report_repo or getattr(tracker, "repo", "") or "",
+                api_key=api_key,
+                title=tele.issue_title,
+                force=True,
+            )
+        except Exception:
+            logger.debug("telemetry report skipped", exc_info=True)
 
     async def _recover_stale_running_records(self) -> None:
         reason = "Recovered stale running issue on orchestrator startup"
@@ -3901,6 +3927,9 @@ class Orchestrator:
                 if session.issue.id in self._state.running:
                     del self._state.running[session.issue.id]
 
+                # Push today's telemetry summary after the run ends
+                # (best-effort; no-op unless workflow.telemetry is enabled).
+                self._report_telemetry()
                 # Dashboard journal: one terminal event per run with the
                 # final status plus the session/PR references the issue
                 # accumulated. Best-effort — never raises.
