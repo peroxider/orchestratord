@@ -134,6 +134,7 @@ class RunSession:
     session_end_reason: str | None = None
     session_end_summary: str = ""
     previous_run_ids: list[str] = field(default_factory=list)
+    previous_verification_error: str | None = None  # last run's pre-commit/verify failure output
     # Per-session followup messages queued by the operator via the
     # chat gateway or control socket.  Appended to the next turn's
     # prompt and cleared.  Backend-agnostic: works for all backends

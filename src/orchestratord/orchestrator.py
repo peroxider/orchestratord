@@ -2953,6 +2953,14 @@ class Orchestrator:
         prev_record = self._registry.get(issue.id or "")
         if prev_record and prev_record.previous_run_ids:
             session.previous_run_ids = list(prev_record.previous_run_ids)
+        # Also propagate the last run's verification failure output (e.g.
+        # pre-commit gate failure) so the retry prompt can carry it directly
+        # to the agent — not just as a readable transcript hint.
+        if prev_record is not None:
+            session.previous_verification_error = (
+                getattr(prev_record, "verification_output", None)
+                or getattr(prev_record, "last_hook_error", None)
+            )
         self._state.running[issue.id] = session
 
         # Update persistent registry so `issue list` reflects running state
@@ -3630,8 +3638,22 @@ class Orchestrator:
                         # post-`_run_issue` failure handler would still see
                         # status=stagnation/loop_detected/etc and route the
                         # run to retry/abandoned even though the work landed.
+                        # Budget-exhausted terminations (max_turns reached /
+                        # exit_code=... / token exhaustion) must NOT be
+                        # silently salvaged into "completed": the agent ran
+                        # out of budget mid-work, so the收尾 steps (report
+                        # files, pre-commit check) never ran and the PR is
+                        # incomplete. Keep the run failed so retry/human
+                        # review handles it and the Run Summary reflects the
+                        # real termination reason instead of a fake success.
+                        _end_reason = session.session_end_reason or ""
+                        _budget_exhausted = (
+                            _end_reason == "max_turns"
+                            or _end_reason.startswith("exit_code=")
+                        )
                         if (
                             session.status != "completed"
+                            and not _budget_exhausted
                             and sync_result is not None
                             and sync_result.commit_sha
                         ):

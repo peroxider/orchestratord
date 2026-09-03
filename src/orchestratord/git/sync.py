@@ -1321,6 +1321,30 @@ class GitSyncService:
 
         if changes_summary_text:
             lines.extend(["", "## 变更摘要", "", changes_summary_text])
+        elif workspace_path:
+            # Agent never produced a changes summary (e.g. budget exhausted
+            # mid-work before the report step). Fall back to a diff-derived
+            # summary so the PR body is not silently empty.
+            try:
+                diff_stat = self._run_git_output(
+                    # `git show --stat HEAD` works for ANY commit — including
+                    # the branch's very first commit, where `HEAD~1` does not
+                    # exist and `git diff HEAD~1 HEAD` would fail silently.
+                    ["show", "--stat", "--oneline", "HEAD"],
+                    repo_root=workspace_path,
+                )
+                if diff_stat and diff_stat.strip():
+                    lines.extend(
+                        [
+                            "",
+                            "## 变更摘要",
+                            "",
+                            "（本次改动，由 diff 自动生成）",
+                            diff_stat.strip(),
+                        ]
+                    )
+            except Exception:
+                pass
         else:
             workflow_outputs = getattr(session, "workflow_stage_outputs", None)
             if workflow_outputs:

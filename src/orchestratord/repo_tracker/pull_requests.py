@@ -121,12 +121,12 @@ class RepositoryPullRequestMixin:
             return []
 
         feedback: list[PullRequestFeedback] = []
-        effective_issue_id = issue_id or pull_request.number
+        # NOTE: issue comments are intentionally NOT fetched as review
+        # feedback — once a PR exists, review feedback is collected from the
+        # PR itself only (inline comments + reviews). The originating issue's
+        # comment thread (orchestrator automation comments, issue-side
+        # chatter) must not trigger review follow-ups.
         for _name, fetcher in [
-            (
-                "conversation",
-                lambda: self._fetch_pull_request_conversation_feedback(effective_issue_id),
-            ),
             ("inline", lambda: self._fetch_pull_request_inline_feedback(pull_request.number)),
             ("review", lambda: self._fetch_pull_request_review_feedback(pull_request.number)),
         ]:

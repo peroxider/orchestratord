@@ -509,6 +509,7 @@ class BackendRunner:
             attempt=session.attempt,
             session=session,
             previous_run_ids=session.previous_run_ids,
+            previous_verification_error=session.previous_verification_error,
             conflict_files=session.conflict_files,
         )
 
