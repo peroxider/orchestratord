@@ -2581,6 +2581,37 @@ class Orchestrator:
             session.base_branch,
         )
 
+    async def _complete_read_only_chat_followup(
+        self,
+        session: AgentSession,
+    ) -> None:
+        """Finish a conversational follow-up that produced no new commit.
+
+        Chat follow-ups may legitimately ask the agent to inspect, explain,
+        or verify existing work.  Their useful result is the persisted reply,
+        so a clean workspace must return the issue to its review gate instead
+        of being misclassified as an empty implementation failure.
+        """
+        issue_id = session.issue.id or ""
+        self._registry.update_report(
+            issue_id,
+            report_path=getattr(session, "report_path", None),
+            verification_status=getattr(session, "verification_status", None),
+            verification_output=getattr(session, "verification_output", None),
+            summary_comment_id=getattr(session, "summary_comment_id", None),
+            session_end_reason=getattr(session, "session_end_reason", None),
+            session_end_summary=getattr(session, "session_end_summary", ""),
+        )
+        self._registry.increment_followup_attempt(issue_id)
+        self._registry.mark_pending_review(issue_id)
+        self._state.pending_review.add(issue_id)
+        await self._sync_tracker_issue_state(issue_id, "pending_review")
+        self.status_dashboard.on_session_complete(issue_id)
+        logger.info(
+            "Issue %s read-only chat follow-up completed; returning to pending review",
+            issue_id,
+        )
+
     async def _process_review_feedback(self) -> None:
         config = self.workflow.review_feedback
         if not config.enabled:
@@ -3021,6 +3052,11 @@ class Orchestrator:
             workspace_dirty=getattr(session, "run_workspace_dirty", None),
             cost_usd=getattr(session, "cost_usd", None),
             token_usage=getattr(session, "token_usage", None),
+            started_at=getattr(session, "started_at", None),
+            completed_at=getattr(session, "completed_at", None),
+            duration_ms=getattr(session, "duration_ms", None),
+            backend=getattr(session, "_snapshot_provider", None) or None,
+            model=getattr(session, "_snapshot_model", None) or None,
         )
         if record is None:
             if not (issue_id or "").startswith("stage-"):
@@ -3461,6 +3497,9 @@ class Orchestrator:
                             except Exception:
                                 _has_changes = True  # fail-open
                             if not _has_changes:
+                                if session.run_kind == "agent_followup":
+                                    await self._complete_read_only_chat_followup(session)
+                                    return
                                 logger.warning(
                                     "Session completed but workspace has no changes "
                                     "issue_id=%s — marking as failed",

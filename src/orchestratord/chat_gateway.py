@@ -60,6 +60,8 @@ class _RunConnection:
         self._endpoint = endpoint
         self._loop = loop
         self._subscribers: list[queue.Queue[dict[str, Any]]] = []
+        self._subscriber_lock = threading.Lock()
+        self._final_frame: dict[str, Any] | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: concurrent.futures.Future[None] | None = None
 
@@ -67,14 +69,31 @@ class _RunConnection:
 
     def subscribe(self) -> queue.Queue[dict[str, Any]]:
         q: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=500)
-        self._subscribers.append(q)
+        with self._subscriber_lock:
+            final_frame = self._final_frame
+            if final_frame is None:
+                self._subscribers.append(q)
+        if final_frame is not None:
+            q.put_nowait(dict(final_frame))
         return q
 
     def unsubscribe(self, q: queue.Queue[dict[str, Any]]) -> None:
-        try:
-            self._subscribers.remove(q)
-        except ValueError:
-            pass
+        with self._subscriber_lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+    @property
+    def is_finished(self) -> bool:
+        """Whether this connection has already published its final state."""
+        with self._subscriber_lock:
+            return self._final_frame is not None
+
+    @property
+    def is_control_ready(self) -> bool:
+        """Whether this run currently has a writable control transport."""
+        return self._writer is not None and not self.is_finished
 
     # -- start / stop ------------------------------------------------------
 
@@ -91,7 +110,7 @@ class _RunConnection:
             except (concurrent.futures.CancelledError, TimeoutError):
                 pass
             self._reader_task = None
-        self._broadcast_nowait(
+        self._finish(
             {"type": "RunEnded", "data": {"run_id": self.run_id}}
         )
 
@@ -113,9 +132,9 @@ class _RunConnection:
                 self._endpoint,
                 exc,
             )
-            self._broadcast_nowait(
+            self._finish(
                 {
-                    "type": "RunEnded",
+                    "type": "RunUnavailable",
                     "data": {"run_id": self.run_id, "reason": "connect_failed"},
                 }
             )
@@ -144,14 +163,29 @@ class _RunConnection:
                 writer.close()
             except Exception:
                 pass
-            self._broadcast_nowait(
+            self._finish(
                 {"type": "RunEnded", "data": {"run_id": self.run_id}}
             )
 
     # -- broadcast ---------------------------------------------------------
 
     def _broadcast_nowait(self, frame: dict[str, Any]) -> None:
-        for q in list(self._subscribers):
+        with self._subscriber_lock:
+            subscribers = list(self._subscribers)
+        for q in subscribers:
+            try:
+                q.put_nowait(frame)
+            except queue.Full:
+                pass
+
+    def _finish(self, frame: dict[str, Any]) -> None:
+        """Publish one replayable lifecycle frame to current and late readers."""
+        with self._subscriber_lock:
+            if self._final_frame is not None:
+                return
+            self._final_frame = frame
+            subscribers = list(self._subscribers)
+        for q in subscribers:
             try:
                 q.put_nowait(frame)
             except queue.Full:
@@ -253,7 +287,7 @@ class ChatGateway:
             for conn in list(self._connections.values()):
                 conn.stop()
             self._connections.clear()
-        if self._loop is not None:
+        if self._loop is not None and self._loop.is_running():
             # ``Future.cancel()`` acknowledges cancellation before the loop
             # has unwound the underlying coroutine. Give it one loop turn so
             # closing a dashboard does not leave a pending reader task.
@@ -266,6 +300,8 @@ class ChatGateway:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._loop_thread is not None:
             self._loop_thread.join(timeout=2.0)
+        self._loop = None
+        self._loop_thread = None
 
     # -- sync active runs --------------------------------------------------
 
@@ -279,7 +315,11 @@ class ChatGateway:
                     self._connections[run_id].stop()
                     del self._connections[run_id]
             for run_id, endpoint in run_id_to_endpoint.items():
-                if run_id not in self._connections:
+                existing = self._connections.get(run_id)
+                if existing is not None and existing.is_finished:
+                    del self._connections[run_id]
+                    existing = None
+                if existing is None:
                     conn = _RunConnection(
                         run_id=run_id,
                         endpoint=endpoint,
@@ -302,6 +342,12 @@ class ChatGateway:
             conn = self._connections.get(run_id)
             if conn is not None:
                 conn.unsubscribe(q)
+
+    def is_control_ready(self, run_id: str) -> bool:
+        """Return whether Pause/Resume/Stop can be delivered for *run_id*."""
+        with self._lock:
+            conn = self._connections.get(run_id)
+            return bool(conn is not None and conn.is_control_ready)
 
     # -- read history ------------------------------------------------------
 

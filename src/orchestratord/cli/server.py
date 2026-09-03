@@ -1082,6 +1082,27 @@ def _mount_gateway_opt_in(
     return wrapper
 
 
+def _resolve_daemon_backend(identifier: str):
+    """Resolve canonical descriptor IDs, then fall back to legacy names."""
+    from orchestratord.backend_registry import (
+        BackendNotFoundError,
+        discover_backends,
+        discover_descriptors,
+        resolve_backend,
+    )
+
+    try:
+        return resolve_backend(identifier, strict=True)
+    except BackendNotFoundError:
+        legacy_backends = discover_backends()
+        if identifier in legacy_backends:
+            return legacy_backends[identifier]
+        available = sorted(set(discover_descriptors()) | set(legacy_backends))
+        raise BackendNotFoundError(
+            f"backend {identifier!r} not found. Available: {', '.join(available)}"
+        ) from None
+
+
 def _run_orchestrator(
     workflow_path: str | None,
     dashboard: bool = False,
@@ -1141,6 +1162,49 @@ def _run_orchestrator(
         json_path=_json_log,
     )
 
+    # Resolve and validate the backend before claiming that the daemon has
+    # started.  Canonical descriptor IDs are the names shown by
+    # ``orchestratord backend list``; legacy implementation names remain a
+    # compatibility surface.
+    spi_backend = None
+    if backend is not None:
+        from orchestratord.backend_registry import (
+            BackendMismatchError,
+            BackendNotFoundError,
+        )
+        from orchestratord.spi.backend import SessionSpec
+
+        try:
+            spi_backend = _resolve_daemon_backend(backend)
+        except (BackendNotFoundError, BackendMismatchError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+
+        agent = config.agent
+        # Mirror BackendRunner._build_session_spec so daemon startup validates
+        # the same named provider routes that a real run will receive.
+        from ..backend_runner import providers_extra
+
+        spec = SessionSpec(
+            cwd=str(getattr(config.workspace, "root", "") or "."),
+            provider=getattr(agent, "provider", None),
+            model=getattr(agent, "model", None),
+            base_url=getattr(agent, "base_url", None),
+            api_key=getattr(agent, "api_key", None),
+            cordis=getattr(agent, "cordis", None),
+            runtime_bin=getattr(agent, "runtime_bin", None),
+            env=getattr(agent, "env", None) or {},
+            extra=providers_extra(agent),
+        )
+        try:
+            spi_backend.preflight(spec)
+        except RuntimeError as exc:
+            print(
+                f"error: backend '{backend}' pre-flight failed: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
     # Build repo slug for the startup banner
     _tracker_kind = getattr(config.tracker, "kind", "?")
     _owner = getattr(config.tracker, "owner", None) or ""
@@ -1163,49 +1227,7 @@ def _run_orchestrator(
 
     from orchestratord.applications import IssueToPrApplication
 
-    # Validate only the selected SPI backend. Discovery keeps legacy backend
-    # backend names stable while pre-flight runs
-    # before any session is created.
-    spi_backend = None
-    if backend is not None:
-        from orchestratord.backend_registry import discover_backends
-        from orchestratord.spi.backend import SessionSpec
-
-        backends = discover_backends()
-        if backend not in backends:
-            available = ", ".join(sorted(backends.keys()))
-            print(
-                f"error: backend '{backend}' not found. Available: {available}",
-                file=sys.stderr,
-            )
-            return 2
-        spi_backend = backends[backend]
-
-        agent = config.agent
-        # Mirror BackendRunner._build_session_spec: forward the provider
-        # route registry so startup preflight validates the same spec
-        # shape a run will use (empty registry → no extra channel change).
-        from ..backend_runner import providers_extra
-
-        spec = SessionSpec(
-            cwd=str(getattr(config.workspace, "root", "") or "."),
-            provider=getattr(agent, "provider", None),
-            model=getattr(agent, "model", None),
-            base_url=getattr(agent, "base_url", None),
-            api_key=getattr(agent, "api_key", None),
-            cordis=getattr(agent, "cordis", None),
-            runtime_bin=getattr(agent, "runtime_bin", None),
-            env=getattr(agent, "env", None) or {},
-            extra=providers_extra(agent),
-        )
-        try:
-            spi_backend.preflight(spec)
-        except RuntimeError as exc:
-            print(
-                f"error: backend '{backend}' pre-flight failed: {exc}",
-                file=sys.stderr,
-            )
-            return 2
+    if spi_backend is not None:
         print(f"  backend={backend} ({spi_backend.display_name})")
 
     subsystem = IssueToPrApplication(

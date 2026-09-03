@@ -7,15 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from orchestratord.bridge.worker import WorkerManager
 from orchestratord.spi.approval import ApprovalDecision
+from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.events import EventEnvelope, EventKind
-from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
 
 logger = logging.getLogger(__name__)
@@ -65,10 +66,12 @@ class CodexAppServerSession:
         if self._spec.model:
             args.extend(["-c", f"model={self._spec.model}"])
 
+        child_env = dict(os.environ)
+        child_env.update(self._spec.env)
         worker = WorkerManager(
             worker_cmd=args,
             cwd=self._spec.cwd,
-            env=self._spec.env,
+            env=child_env,
         )
         await worker.start()
         self._worker = worker

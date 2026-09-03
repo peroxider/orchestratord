@@ -122,11 +122,7 @@ class ControlSocket:
         and set ``session.control_socket = None`` on failure.
         """
         if self._tcp:
-            self._server = await asyncio.start_server(
-                self._on_client_connected, host="127.0.0.1", port=0
-            )
-            port = self._server.sockets[0].getsockname()[1]
-            self._endpoint = f"tcp://127.0.0.1:{port}"
+            await self._start_tcp_server()
             return
 
         assert self._path is not None
@@ -141,11 +137,34 @@ class ControlSocket:
                     self._path,
                     exc,
                 )
-        self._server = await asyncio.start_unix_server(
-            self._on_client_connected,
-            path=str(self._path),
+        try:
+            self._server = await asyncio.start_unix_server(
+                self._on_client_connected,
+                path=str(self._path),
+            )
+            self._endpoint = str(self._path)
+        except OSError as exc:
+            # macOS limits sockaddr_un.sun_path to roughly 104 bytes. Long
+            # workspaces are valid, so losing Pause/Resume/Stop merely because
+            # their derived socket path is too long is not acceptable. Keep
+            # the same local-only trust boundary by falling back to an
+            # ephemeral loopback TCP listener. Other bind errors retain their
+            # existing failure semantics.
+            if "path too long" not in str(exc).lower():
+                raise
+            logger.info(
+                "control_socket: Unix path is too long; using loopback TCP: %s",
+                self._path,
+            )
+            self._tcp = True
+            await self._start_tcp_server()
+
+    async def _start_tcp_server(self) -> None:
+        self._server = await asyncio.start_server(
+            self._on_client_connected, host="127.0.0.1", port=0
         )
-        self._endpoint = str(self._path)
+        port = self._server.sockets[0].getsockname()[1]
+        self._endpoint = f"tcp://127.0.0.1:{port}"
 
     async def stop(self) -> None:
         """Stop listening and remove the socket file. Idempotent."""

@@ -29,9 +29,7 @@ from .utils import (
     get_file_status,
     get_repo_root,
 )
-from .utils import (
-    run_git as _run_git,
-)
+from .utils import run_git as _run_git
 
 logger = logging.getLogger(__name__)
 
@@ -147,15 +145,11 @@ class GitSyncService:
             "implementation_notes.md",
             "verification_report.md",
         ])
-        # Agent-generated PR artifacts are orchestration metadata, never part
-        # of the implementation commit. Keep that invariant even when callers
-        # provide their own gitignore list.
-        for artifact in (
-            "analysis.md",
-            "changes_summary.md",
-            "implementation_notes.md",
-            "verification_report.md",
-        ):
+        # Runtime and agent-generated orchestration artifacts are never part
+        # of an implementation commit. Keep that invariant even when callers
+        # provide their own gitignore list; otherwise a read-only follow-up can
+        # look dirty solely because orchestratord wrote its own metadata.
+        for artifact in (*self._ORCHESTRATOR_ARTIFACTS, "implementation_notes.md"):
             if artifact not in self._gitignore_patterns:
                 self._gitignore_patterns.append(artifact)
 
@@ -1481,6 +1475,17 @@ class GitSyncService:
             # Forward the per-tool audit log path so report_writer
             # can dual-write the NDJSON into the persistent layer.
             tool_events_path=getattr(session, "tool_events_path", None),
+            backend=getattr(session, "_snapshot_provider", None) or None,
+            model=getattr(session, "_snapshot_model", None) or None,
+            started_at=getattr(session, "started_at", None),
+            completed_at=getattr(session, "completed_at", None),
+            duration_ms=getattr(session, "duration_ms", None),
+            cost_usd=float(getattr(session, "cost_usd", 0.0) or 0.0),
+            token_usage=getattr(session, "token_usage", None),
+            session_end_reason=getattr(session, "session_end_reason", None),
+            session_end_summary=getattr(session, "session_end_summary", ""),
+            changed_files=getattr(session, "changed_files", None),
+            diff_stats=getattr(session, "diff_stats", None),
         )
         session.report_path = result.persistent_markdown_path
         return result

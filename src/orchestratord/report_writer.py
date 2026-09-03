@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,17 @@ class RunReport:
     # existing reader code that constructs ``RunReport(**legacy_dict)``
     # keeps working (the field defaults to None).
     tool_events_path: str | None = None
+    backend: str | None = None
+    model: str | None = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    duration_ms: float | None = None
+    cost_usd: float = 0.0
+    token_usage: dict[str, Any] = field(default_factory=dict)
+    session_end_reason: str | None = None
+    session_end_summary: str = ""
+    changed_files: list[str] = field(default_factory=list)
+    diff_stats: dict[str, Any] = field(default_factory=dict)
 
 
 def write(
@@ -66,6 +77,17 @@ def write(
     verification_output: str | None = None,
     output_text: str = "",
     tool_events_path: str | None = None,
+    backend: str | None = None,
+    model: str | None = None,
+    started_at: float | None = None,
+    completed_at: float | None = None,
+    duration_ms: float | None = None,
+    cost_usd: float = 0.0,
+    token_usage: dict[str, Any] | None = None,
+    session_end_reason: str | None = None,
+    session_end_summary: str = "",
+    changed_files: list[str] | None = None,
+    diff_stats: dict[str, Any] | None = None,
 ) -> ReportResult:
     issue_id = str(getattr(issue, "id", None) or "unknown")
     safe_tracker = _safe_segment(tracker or "unknown")
@@ -93,6 +115,17 @@ def write(
         verification_output=verification_output,
         output_excerpt=_excerpt(output_text),
         tool_events_path=tool_events_path,
+        backend=backend,
+        model=model,
+        started_at=started_at,
+        completed_at=completed_at,
+        duration_ms=duration_ms,
+        cost_usd=cost_usd,
+        token_usage=dict(token_usage or {}),
+        session_end_reason=session_end_reason,
+        session_end_summary=session_end_summary,
+        changed_files=list(changed_files or []),
+        diff_stats=dict(diff_stats or {}),
     )
 
     workspace_dir = workspace_path / ".reports"
@@ -154,6 +187,13 @@ def _render_markdown(report: RunReport) -> str:
         f"- Pull request: {report.pr_url or 'n/a'}",
         f"- Turns: {report.turn_count}",
         f"- Tool calls: {report.tool_count}",
+        f"- Backend: `{report.backend or 'n/a'}`",
+        f"- Model: `{report.model or 'n/a'}`",
+        f"- Started at: `{report.started_at if report.started_at is not None else 'n/a'}`",
+        f"- Completed at: `{report.completed_at if report.completed_at is not None else 'n/a'}`",
+        f"- Duration ms: `{report.duration_ms if report.duration_ms is not None else 'n/a'}`",
+        f"- Cost: `${report.cost_usd:.6f}`",
+        f"- Token usage: `{json.dumps(report.token_usage, ensure_ascii=False)}`",
         f"- Verification: `{report.verification_status or 'skipped'}`",
     ]
     # Register the per-tool audit log path so the report reader can

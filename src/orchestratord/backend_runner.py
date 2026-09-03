@@ -671,27 +671,7 @@ class BackendRunner:
 
         # The control socket is an optional observability/control surface.
         # Its failure must never prevent the backend from running.
-        owns_control_socket = False
-        if session.control_socket is None:
-            try:
-                control_dir = session.workspace.path / ".run_control"
-                is_windows = os.name == "nt"
-                sock_path = None if is_windows else control_dir / f"{session.run_id}.sock"
-                control_socket = ControlSocket(sock_path, tcp=is_windows)
-                await control_socket.start()
-                session.control_socket = control_socket
-                session.control_socket_path = control_socket.endpoint
-                # TCP endpoints have ephemeral ports, so a separately
-                # launched dashboard needs a local discovery record.
-                if is_windows:
-                    control_dir.mkdir(parents=True, exist_ok=True)
-                    endpoint_file = control_dir / f"{session.run_id}.endpoint.json"
-                    endpoint_file.write_text(
-                        json.dumps({"endpoint": control_socket.endpoint}), encoding="utf-8"
-                    )
-                owns_control_socket = True
-            except Exception:
-                logger.debug("control socket unavailable for run_id=%s", session.run_id, exc_info=True)
+        owns_control_socket = await self._start_control_socket(session)
 
         # Fail fast on a spec the backend cannot serve (e.g. a
         # provider with no matching runtime adapter) instead of dying
@@ -772,6 +752,47 @@ class BackendRunner:
                     logger.debug("control endpoint cleanup failed", exc_info=True)
 
     @staticmethod
+    async def _start_control_socket(session: AgentSession) -> bool:
+        """Start and publish the optional live-control endpoint for one run."""
+        if session.control_socket is not None:
+            return False
+
+        control_socket: ControlSocket | None = None
+        try:
+            control_dir = session.workspace.path / ".run_control"
+            is_windows = os.name == "nt"
+            sock_path = None if is_windows else control_dir / f"{session.run_id}.sock"
+            control_socket = ControlSocket(sock_path, tcp=is_windows)
+            await control_socket.start()
+
+            # TCP endpoints use an ephemeral port. This is the normal Windows
+            # transport and the safe fallback for overlong Unix socket paths,
+            # so discovery must follow the endpoint rather than the OS name.
+            if control_socket.endpoint.startswith("tcp://"):
+                control_dir.mkdir(parents=True, exist_ok=True)
+                endpoint_file = control_dir / f"{session.run_id}.endpoint.json"
+                endpoint_file.write_text(
+                    json.dumps({"endpoint": control_socket.endpoint}),
+                    encoding="utf-8",
+                )
+
+            session.control_socket = control_socket
+            session.control_socket_path = control_socket.endpoint
+            return True
+        except Exception:
+            if control_socket is not None:
+                try:
+                    await control_socket.stop()
+                except Exception:
+                    logger.debug("control socket cleanup failed", exc_info=True)
+            logger.debug(
+                "control socket unavailable for run_id=%s",
+                session.run_id,
+                exc_info=True,
+            )
+            return False
+
+    @staticmethod
     async def _probe_resume_or_log(
         spi_session: Any, spec: SessionSpec
     ) -> ResumeStatus:
@@ -823,6 +844,7 @@ class BackendRunner:
         consecutive_noop_turns = 0
         last_diagnostics_monotonic = 0.0
         last_file_status_snapshot: dict[str, Any] | None = None
+        backend_error_message: str | None = None
 
         # Read-only spiral guard tracking
         read_only_streak = 0
@@ -830,6 +852,8 @@ class BackendRunner:
         turn_has_modifying_tool = False
 
         run_start = time.monotonic()
+        if getattr(session, "started_at", None) is None:
+            session.started_at = time.time()
         last_event_monotonic = run_start
         handshake_complete = False
         first_turn_complete = False
@@ -855,6 +879,27 @@ class BackendRunner:
             if _drain_control_commands(session):
                 session.status = "failed"
                 break
+
+            # Pause is a control-plane gate, not merely registry metadata.
+            # Hold the current event and stop requesting subsequent backend
+            # events until resume arrives.  Stop remains serviceable on every
+            # poll tick, and operator-paused time does not consume run timeout
+            # budgets.
+            if getattr(session, "paused", False):
+                pause_started = time.monotonic()
+                stop_while_paused = False
+                while getattr(session, "paused", False):
+                    await asyncio.sleep(_EVENT_POLL_INTERVAL)
+                    if _drain_control_commands(session):
+                        stop_while_paused = True
+                        break
+                paused_for = time.monotonic() - pause_started
+                run_start += paused_for
+                last_event_monotonic += paused_for
+                if stop_while_paused:
+                    session.status = "failed"
+                    break
+
             kind = event.kind if event is not None else None
             payload = event.payload if event is not None else {}
 
@@ -1034,7 +1079,16 @@ class BackendRunner:
                     break
 
             elif kind == EventKind.SESSION_COMPLETE:
+                payload.setdefault(
+                    "duration_ms", max(0.0, (time.monotonic() - run_start) * 1000)
+                )
                 reason = payload.get("reason", "success")
+                if backend_error_message and reason in ("success", "turn_complete"):
+                    # A few adapters emit their terminal frame from a
+                    # ``finally`` block.  Preserve the earlier fatal ERROR
+                    # instead of letting a generic success terminal erase it.
+                    reason = "backend_error"
+                    payload["reason"] = reason
                 session.status = "completed" if reason in ("success", "turn_complete") else "failed"
                 session.session_end_reason = reason
                 # Extract cost telemetry from the terminal payload.
@@ -1072,6 +1126,10 @@ class BackendRunner:
             elif kind == EventKind.ERROR:
                 error_msg = payload.get("message", "unknown error")
                 logger.error("BackendRunner event error: %s", error_msg)
+                backend_error_message = str(error_msg)
+                session.status = "failed"
+                session.session_end_reason = "backend_error"
+                session.session_end_summary = backend_error_message
                 if progress_reporter is not None and hasattr(progress_reporter, "on_error"):
                     progress_reporter.on_error(error_msg)
 
@@ -1162,6 +1220,9 @@ class BackendRunner:
             if _drain_control_commands(session):
                 session.status = "failed"
                 break
+
+        session.completed_at = time.time()
+        session.duration_ms = max(0.0, (time.monotonic() - run_start) * 1000)
 
     # ------------------------------------------------------------------
     # Tool call handling

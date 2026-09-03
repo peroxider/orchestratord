@@ -99,6 +99,9 @@ class RunSession:
     # _update_run_diagnostics.
     cost_usd: float = 0.0
     token_usage: dict = field(default_factory=dict)
+    started_at: float | None = None
+    completed_at: float | None = None
+    duration_ms: float | None = None
     verification_status: str | None = None
     verification_output: str | None = None
     report_path: str | None = None

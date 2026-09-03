@@ -133,6 +133,11 @@ class IssueRecord:
     # that report it (clawcodex), token usage dict from dsh.
     run_cost_usd: float = 0.0
     run_token_usage: dict = field(default_factory=dict)
+    run_started_at: float | None = None
+    run_completed_at: float | None = None
+    run_duration_ms: float | None = None
+    run_backend: str | None = None
+    run_model: str | None = None
     # Retry context: list of run_ids from previous attempts for this
     # issue.  The retrying agent can Read() the transcript at
     # ~/.orchestratord/sessions/<run_id>/transcript.jsonl to learn what was

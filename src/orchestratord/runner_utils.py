@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,23 +41,57 @@ def _event_to_broadcast_dict(event: Any) -> dict:
     if kind is not None and isinstance(payload, dict):
         kind_value = getattr(kind, "value", kind)
         if kind_value in ("text", "text_delta"):
-            return {"content": str(payload.get("text", payload.get("delta", "")))}
+            data = {
+                "content": str(payload.get("text", payload.get("delta", ""))),
+                "turn": payload.get("turn"),
+                "timestamp_quality": payload.get("timestamp_quality"),
+            }
+            return {key: value for key, value in data.items() if value is not None}
         if kind_value == "tool_call":
-            return {
+            arguments = payload.get("arguments", payload.get("params", {}))
+            data = {
                 "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
                 "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
-                "params": dict(payload.get("arguments", payload.get("params", {})) or {}),
+                "params": dict(arguments) if isinstance(arguments, Mapping) else arguments,
+                "turn": payload.get("turn"),
+                "timestamp_quality": payload.get("timestamp_quality"),
             }
+            return {key: value for key, value in data.items() if value is not None}
         if kind_value == "tool_result":
-            return {
+            data = {
                 "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
                 "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
                 "result": payload.get("result", payload.get("output", payload)),
+                "is_error": not bool(payload.get("ok", True)),
+                "exit_code": payload.get("exit_code"),
+                "turn": payload.get("turn"),
+                "timestamp_quality": payload.get("timestamp_quality"),
             }
+            return {key: value for key, value in data.items() if value is not None}
         if kind_value == "turn_complete":
-            return {"turn": payload.get("turn", 0)}
+            return {
+                key: payload[key]
+                for key in ("turn", "reason", "usage", "duration_ms")
+                if key in payload
+            }
         if kind_value == "session_complete":
-            return {"reason": str(payload.get("reason", ""))}
+            return {
+                key: payload[key]
+                for key in (
+                    "reason",
+                    "usage",
+                    "duration_ms",
+                    "total_cost_usd",
+                    "session_id",
+                )
+                if key in payload
+            }
+        if kind_value == "error":
+            return {
+                key: payload[key]
+                for key in ("code", "message", "reason")
+                if key in payload
+            }
 
     try:
         from orchestratord.events.agent_events import (
@@ -123,6 +158,7 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
             "tool_result": "ToolResultEvent",
             "turn_complete": "TurnComplete",
             "session_complete": "SessionComplete",
+            "error": "Error",
         }
         frame = {
             "type": type_map.get(kind_value, event.__class__.__name__),
@@ -132,7 +168,9 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
             await session.control_socket.send_event(frame)
         # Persist to transcript so the chat UI can replay history after
         # a page refresh and the CLI can tail a live run.
-        _write_transcript_frame(getattr(session, "run_id", None), frame)
+        transcript_frame = dict(frame)
+        transcript_frame["ts"] = getattr(event, "timestamp", None)
+        _write_transcript_frame(getattr(session, "run_id", None), transcript_frame)
     except Exception:
         pass
 
@@ -155,6 +193,8 @@ def _transcript_message_from_frame(frame: dict) -> dict:
         return {
             "role": "assistant",
             "content": [{"type": "text", "text": str(data.get("content", ""))}],
+            "turn": data.get("turn"),
+            "timestamp_quality": data.get("timestamp_quality"),
         }
     if frame_type == "ToolCallEvent":
         return {
@@ -165,8 +205,10 @@ def _transcript_message_from_frame(frame: dict) -> dict:
                     "id": str(data.get("tool_use_id") or ""),
                     "name": str(data.get("tool_name", "")),
                     "input": data.get("params", {}),
+                    "turn": data.get("turn"),
                 }
             ],
+            "timestamp_quality": data.get("timestamp_quality"),
         }
     if frame_type == "ToolResultEvent":
         return {
@@ -176,14 +218,25 @@ def _transcript_message_from_frame(frame: dict) -> dict:
                     "type": "tool_result",
                     "tool_use_id": str(data.get("tool_use_id") or ""),
                     "content": data.get("result"),
+                    "is_error": data.get("is_error", False),
+                    "turn": data.get("turn"),
                 }
             ],
+            "timestamp_quality": data.get("timestamp_quality"),
         }
     if frame_type == "InjectDelivered":
         return {
             "role": "user",
             "content": [{"type": "text", "text": str(data.get("hint_snippet", ""))}],
             "origin": "inject",
+        }
+    if frame_type == "Error":
+        return {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": str(data.get("message", "Backend error"))}
+            ],
+            "code": str(data.get("code", "backend_error")),
         }
     # Lifecycle / unknown events: keep the raw frame for audit value but
     # give it a role so the readers can filter deterministically.
@@ -210,7 +263,7 @@ def _write_transcript_frame(run_id: str | None, frame: dict) -> None:
         transcript_path = sessions_dir / run_id / "transcript.jsonl"
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         entry = _transcript_message_from_frame(frame)
-        entry["ts"] = _time.time()
+        entry["ts"] = frame.get("ts") or _time.time()
         line = json.dumps(entry, ensure_ascii=False, default=str)
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
@@ -256,6 +309,7 @@ def _apply_resume_session(session: Any, prompt_override: str | None = None) -> N
     if prompt_override:
         session.prompt_override = prompt_override
     session.paused = False
+    session.pause_reason = ""
     if session.pause_resume_event is not None:
         session.pause_resume_event.set()
     if session._pause_gate is not None:
