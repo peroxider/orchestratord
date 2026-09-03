@@ -46,6 +46,22 @@ class _StalledSpiSession:
         )
 
 
+class _ImmediateSpiSession:
+    async def events(self):
+        yield EventEnvelope(
+            seq=1,
+            timestamp=0,
+            kind=EventKind.TEXT_DELTA,
+            payload={"delta": "must wait for resume"},
+        )
+        yield EventEnvelope(
+            seq=2,
+            timestamp=0,
+            kind=EventKind.SESSION_COMPLETE,
+            payload={"reason": "success"},
+        )
+
+
 def _agent_session(with_stop: bool) -> SimpleNamespace:
     queue: asyncio.Queue[ControlCommand] = asyncio.Queue()
     if with_stop:
@@ -62,10 +78,45 @@ def _agent_session(with_stop: bool) -> SimpleNamespace:
         tool_count=0,
         control_socket=SimpleNamespace(_command_queue=queue),
         pause_resume_event=None,
+        paused=False,
+        pause_reason="",
+        prompt_override="",
+        _pause_gate=None,
+        state_cache=None,
         _on_pause_state_change=None,
         _pending_followups=[],
         _transcript_storage=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_pause_blocks_backend_events_until_resume() -> None:
+    """Pause must stop event consumption, not merely change registry metadata."""
+    session = _agent_session(with_stop=False)
+    session.control_socket._command_queue.put_nowait(ControlCommand(cmd="pause"))
+    task = asyncio.create_task(
+        _runner()._process_events(
+            _ImmediateSpiSession(),
+            session,
+            {},
+            None,
+            None,
+            None,
+            None,
+            timeouts=_timeouts(),
+        )
+    )
+
+    await asyncio.sleep(0.35)
+    assert task.done() is False
+    assert session.output_text == ""
+    assert session.paused is True
+
+    session.control_socket._command_queue.put_nowait(ControlCommand(cmd="resume"))
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert session.paused is False
+    assert session.output_text == "must wait for resume"
 
 
 def _timeouts(**overrides: float) -> dict[str, float]:

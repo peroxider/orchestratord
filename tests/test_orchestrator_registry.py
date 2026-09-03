@@ -202,12 +202,20 @@ class TestRunDiagnosticsCost(unittest.TestCase):
                 run_id="run-9",
                 cost_usd=0.1234,
                 token_usage={"inputTokens": 4287, "outputTokens": 34},
+                started_at=100.0,
+                completed_at=106.5,
+                duration_ms=6500.0,
+                backend="codex",
+                model="gpt-5.6-sol",
             )
             assert record is not None
             self.assertEqual(record.run_cost_usd, 0.1234)
             self.assertEqual(
                 record.run_token_usage, {"inputTokens": 4287, "outputTokens": 34}
             )
+            self.assertEqual(record.run_duration_ms, 6500.0)
+            self.assertEqual(record.run_backend, "codex")
+            self.assertEqual(record.run_model, "gpt-5.6-sol")
             # Persisted to disk.
             reloaded = IssueRegistry(Path(tmp) / "r.json").get("9")
             assert reloaded is not None
@@ -215,6 +223,9 @@ class TestRunDiagnosticsCost(unittest.TestCase):
             self.assertEqual(
                 reloaded.run_token_usage, {"inputTokens": 4287, "outputTokens": 34}
             )
+            self.assertEqual(reloaded.run_started_at, 100.0)
+            self.assertEqual(reloaded.run_completed_at, 106.5)
+            self.assertEqual(reloaded.run_duration_ms, 6500.0)
 
 
 def test_tracker_config_has_no_dead_cordis_key() -> None:

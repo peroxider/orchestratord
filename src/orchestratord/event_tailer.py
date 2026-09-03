@@ -34,31 +34,102 @@ logger = logging.getLogger(__name__)
 _MAX_QUEUE_SIZE = 1000
 _TAIL_POLL_INTERVAL_S = 0.5
 _MAX_RESULT_CONTENT_CHARS = 500
+_CODEX_TOOL_ITEM_TYPES = {"command_execution", "file_change", "mcp_tool_call", "web_search"}
 
 
-def _truncate_content(raw: Any, max_chars: int = _MAX_RESULT_CONTENT_CHARS) -> str:
-    """Flatten tool_result content to a truncated string.
-
-    Content can be a string, a list of ``{type:"text", text:"..."}`` blocks,
-    or other JSON.  Returns at most ``max_chars`` characters.
-    """
+def _flatten_content(raw: Any) -> str:
+    """Flatten transcript content blocks into displayable text."""
     if raw is None:
         return ""
     if isinstance(raw, str):
-        text = raw
-    elif isinstance(raw, list):
+        return raw
+    if isinstance(raw, list):
         parts: list[str] = []
         for item in raw:
             if isinstance(item, dict):
                 parts.append(str(item.get("text", item.get("content", ""))))
             else:
                 parts.append(str(item))
-        text = "\n".join(parts)
-    else:
-        text = json.dumps(raw, ensure_ascii=False)
+        return "\n".join(parts)
+    return json.dumps(raw, ensure_ascii=False)
+
+
+def _truncate_content(raw: Any, max_chars: int = _MAX_RESULT_CONTENT_CHARS) -> str:
+    """Flatten transcript content and return a bounded display string."""
+    text = _flatten_content(raw)
     if len(text) > max_chars:
         return text[:max_chars] + "…"
     return text
+
+
+def _history_text(content: Any) -> str | None:
+    """Return text when a history payload contains text blocks only."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            return None
+        parts.append(str(block.get("text", "")))
+    return "".join(parts)
+
+
+def _append_history_message(
+    messages: list[dict[str, Any]], message: dict[str, Any]
+) -> None:
+    """Coalesce transport fragments that belong to one assistant message."""
+    if messages and message.get("role") == "assistant" and message.get("ts") not in (None, ""):
+        previous = messages[-1]
+        if previous.get("role") == "assistant" and previous.get("ts") == message.get("ts"):
+            previous_text = _history_text(previous.get("content"))
+            message_text = _history_text(message.get("content"))
+            if previous_text is not None and message_text is not None:
+                previous["content"] = [
+                    {"type": "text", "text": previous_text + message_text}
+                ]
+                return
+    messages.append(message)
+
+
+def _coalesce_agent_text_events(
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collapse same-message text fragments before assigning SSE cursors."""
+    coalesced: list[dict[str, Any]] = []
+    text_positions: dict[tuple[Any, ...], int] = {}
+    for event in events:
+        if event.get("event_type") != "agent_text" or event.get("source_ts") in (None, ""):
+            coalesced.append(event)
+            continue
+        data = event.get("data") or {}
+        key = (
+            event.get("run_id"),
+            event.get("issue_id"),
+            event.get("source_ts"),
+            data.get("turn"),
+        )
+        position = text_positions.get(key)
+        if position is None:
+            text_positions[key] = len(coalesced)
+            coalesced.append(event)
+            continue
+
+        previous = coalesced[position]
+        previous_data = previous.setdefault("data", {})
+        combined = str(previous_data.get("content") or "") + str(data.get("content") or "")
+        previous_count = int(previous_data.get("content_char_count") or 0)
+        current_count = int(data.get("content_char_count") or 0)
+        total_count = previous_count + current_count
+        previous_data["content"] = _truncate_content(combined, _MAX_RESULT_CONTENT_CHARS)
+        previous_data["content_char_count"] = total_count
+        previous_data["content_truncated"] = bool(
+            previous_data.get("content_truncated")
+            or data.get("content_truncated")
+            or total_count > _MAX_RESULT_CONTENT_CHARS
+        )
+    return coalesced
 
 
 def read_history_direct(run_id: str) -> list[dict[str, Any]]:
@@ -95,15 +166,16 @@ def read_history_direct(run_id: str) -> list[dict[str, Any]]:
                 # 1. Classic transcript: {"role": "...", "content": "...", "ts": "..."}
                 # 2. Live frames:       {"type": "TextDelta|ToolCallEvent|...", "data": {...}}
                 if "role" in entry:
-                    messages.append(
-                        {
-                            "role": entry.get("role", "unknown"),
-                            "content": entry.get("content", ""),
-                            "ts": entry.get("ts", ""),
-                        }
-                    )
+                    message = {
+                        "role": entry.get("role", "unknown"),
+                        "content": entry.get("content", ""),
+                        "ts": entry.get("ts", ""),
+                    }
+                    if entry.get("origin"):
+                        message["origin"] = entry["origin"]
+                    _append_history_message(messages, message)
                 elif "type" in entry:
-                    messages.append(_frame_to_history_entry(entry))
+                    _append_history_message(messages, _frame_to_history_entry(entry))
     except (FileNotFoundError, OSError):
         return []
 
@@ -258,7 +330,7 @@ class EventTailerManager:
                 events.append(self._event_queue.get_nowait())
             except queue.Empty:
                 break
-        return events
+        return _coalesce_agent_text_events(events)
 
     def load_historical(self, run_id: str, issue_id: str, workspace: Path) -> None:
         """One-shot read of all historical events for a completed session.
@@ -307,7 +379,8 @@ class _SessionTailer:
         self._events_ndjson_fallback = (
             Path.home() / ".cache" / "orchestratord" / "tool-events" / run_id / "events.ndjson"
         )
-        self._transcript_path = (
+        self._transcript_path = SESSIONS_DIR / run_id / "transcript.jsonl"
+        self._transcript_fallback = (
             Path.home() / ".cache" / "orchestratord" / "sessions" / run_id / "transcript.jsonl"
         )
 
@@ -320,6 +393,13 @@ class _SessionTailer:
         # tool_use_id → tool_name mapping, so tool_result events can show
         # the human-readable tool name instead of the opaque ID.
         self._tool_name_map: dict[str, str] = {}
+        # Codex ``stream-json`` records may be split across multiple
+        # transcript text blocks.  Reassemble them before exposing events so
+        # the dashboard counts semantic messages and tool activity rather
+        # than transport chunks.
+        self._codex_wire_buffer = ""
+        self._codex_wire_ts: Any = None
+        self._codex_started_tools: set[str] = set()
 
     def start(self) -> None:
         self._running = True
@@ -338,7 +418,7 @@ class _SessionTailer:
             try:
                 self._tail_events_ndjson()
                 self._tail_transcript()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - tailers must survive malformed rows
                 logger.debug("Tailer %s error: %s", self._run_id, exc)
             time.sleep(_TAIL_POLL_INTERVAL_S)
 
@@ -363,6 +443,7 @@ class _SessionTailer:
                         "tool_call",
                         {
                             "tool": entry.get("tool", "?"),
+                            "tool_use_id": entry.get("tool_use_id"),
                             "approved": entry.get("approved"),
                             "turn": entry.get("turn", 0),
                             "deny_reason": entry.get("deny_reason"),
@@ -384,10 +465,15 @@ class _SessionTailer:
         This makes the dashboard work even when ``audit_log=minimal`` (events.ndjson only
         records denied calls) because transcript.jsonl is always written per-turn.
         """
-        if not self._transcript_path.exists():
+        transcript_path = (
+            self._transcript_path
+            if self._transcript_path.exists()
+            else self._transcript_fallback
+        )
+        if not transcript_path.exists():
             return
         try:
-            with open(self._transcript_path, "r", encoding="utf-8") as f:
+            with open(transcript_path, "r", encoding="utf-8") as f:
                 f.seek(self._transcript_offset)
                 for line in f:
                     line = line.strip()
@@ -404,6 +490,8 @@ class _SessionTailer:
                         self._process_assistant_message(entry)
                     elif role == "user":
                         self._process_user_message(entry)
+                    elif role == "system":
+                        self._process_system_message(entry)
 
                 self._transcript_offset = f.tell()
         except FileNotFoundError:
@@ -436,19 +524,178 @@ class _SessionTailer:
                             {
                                 "tool": tool_name,
                                 "approved": True,
-                                "turn": 0,
+                                "turn": block.get("turn", entry.get("turn", 0)),
                                 "deny_reason": None,
                                 "tool_use_id": tool_use_id,
                                 "params": block.get("input"),
+                                "ts": entry.get("timestamp") or entry.get("ts"),
                             },
                         )
                 elif block_type == "text":
                     text = block.get("text", "")
                     if text and text.strip():
+                        source_ts = entry.get("timestamp") or entry.get("ts")
+                        if self._consume_codex_wire_text(str(text), source_ts):
+                            continue
+                        flattened = _flatten_content(text)
                         self._emit_event(
                             "agent_text",
-                            {"content": _truncate_content(text, 500)},
+                            {
+                                "content": _truncate_content(flattened, 500),
+                                "content_truncated": len(flattened) > 500,
+                                "content_char_count": len(flattened),
+                                "turn": entry.get("turn", 0),
+                                "timestamp_quality": entry.get("timestamp_quality"),
+                                "ts": source_ts,
+                            },
                         )
+
+    def _consume_codex_wire_text(self, text: str, source_ts: Any) -> bool:
+        """Consume a complete or chunked Codex ``stream-json`` record."""
+        if not self._codex_wire_buffer:
+            stripped = text.lstrip()
+            try:
+                candidate = json.loads(stripped)
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict) and self._is_codex_wire_event(candidate):
+                self._process_codex_wire_event(candidate, source_ts)
+                return True
+            if not stripped.startswith('{"type"'):
+                return False
+            self._codex_wire_ts = source_ts
+
+        self._codex_wire_buffer += text
+        while "\n" in self._codex_wire_buffer:
+            line, self._codex_wire_buffer = self._codex_wire_buffer.split("\n", 1)
+            self._process_codex_wire_line(line, self._codex_wire_ts)
+            self._codex_wire_ts = source_ts if self._codex_wire_buffer else None
+        return True
+
+    @staticmethod
+    def _is_codex_wire_event(candidate: dict[str, Any]) -> bool:
+        event_type = candidate.get("type")
+        return isinstance(event_type, str) and (
+            event_type.startswith(("thread.", "turn.", "item.")) or event_type == "error"
+        )
+
+    def _process_codex_wire_line(self, line: str, source_ts: Any) -> None:
+        value = line.strip()
+        if not value:
+            return
+        try:
+            event = json.loads(value)
+        except json.JSONDecodeError:
+            self._emit_agent_text(value, source_ts)
+            return
+        if self._is_codex_wire_event(event):
+            self._process_codex_wire_event(event, source_ts)
+        else:
+            self._emit_agent_text(value, source_ts)
+
+    def _process_codex_wire_event(self, event: dict[str, Any], source_ts: Any) -> None:
+        event_type = event.get("type")
+        if event_type == "turn.completed":
+            metrics = {
+                key: event[key]
+                for key in ("usage", "duration_ms", "total_cost_usd")
+                if key in event
+            }
+            if metrics:
+                metrics["ts"] = source_ts
+                self._emit_event("run_metrics", metrics)
+            return
+        item = event.get("item") or {}
+        if not isinstance(item, dict):
+            return
+        item_type = item.get("type")
+        if event_type == "item.completed" and item_type == "agent_message":
+            self._emit_agent_text(str(item.get("text") or ""), source_ts)
+            return
+        if item_type not in _CODEX_TOOL_ITEM_TYPES:
+            return
+
+        tool_use_id = str(item.get("id") or "")
+        if not tool_use_id:
+            return
+        tool_name, params = self._codex_tool_identity(item)
+        self._tool_name_map[tool_use_id] = tool_name
+        if event_type == "item.started":
+            if self._events_ndjson_seen:
+                self._codex_started_tools.add(tool_use_id)
+            else:
+                self._emit_codex_tool_call(tool_use_id, tool_name, params, source_ts)
+            return
+        if event_type != "item.completed":
+            return
+        if tool_use_id not in self._codex_started_tools and not self._events_ndjson_seen:
+            self._emit_codex_tool_call(tool_use_id, tool_name, params, source_ts)
+
+        output = item.get("aggregated_output")
+        if output in (None, ""):
+            output = item.get("result") or item.get("status") or "completed"
+        flattened = _flatten_content(output)
+        exit_code = item.get("exit_code")
+        is_error = item.get("status") == "failed" or (
+            isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code != 0
+        )
+        self._emit_event(
+            "tool_result",
+            {
+                "tool": tool_name,
+                "is_error": is_error,
+                "tool_use_id": tool_use_id,
+                "result_content": _truncate_content(flattened, 500),
+                "content_truncated": len(flattened) > 500,
+                "content_char_count": len(flattened),
+                "ts": source_ts,
+            },
+        )
+
+    @staticmethod
+    def _codex_tool_identity(item: dict[str, Any]) -> tuple[str, Any]:
+        item_type = item.get("type")
+        if item_type == "command_execution":
+            return "Command", {"command": item.get("command") or ""}
+        if item_type == "file_change":
+            return "File change", item.get("changes") or []
+        if item_type == "web_search":
+            return "Web search", {"query": item.get("query") or ""}
+        return str(item.get("name") or "MCP tool"), item.get("arguments") or {}
+
+    def _emit_codex_tool_call(
+        self,
+        tool_use_id: str,
+        tool_name: str,
+        params: Any,
+        source_ts: Any,
+    ) -> None:
+        self._codex_started_tools.add(tool_use_id)
+        self._emit_event(
+            "tool_call",
+            {
+                "tool": tool_name,
+                "approved": True,
+                "turn": 0,
+                "deny_reason": None,
+                "tool_use_id": tool_use_id,
+                "params": params,
+                "ts": source_ts,
+            },
+        )
+
+    def _emit_agent_text(self, text: str, source_ts: Any) -> None:
+        if not text.strip():
+            return
+        self._emit_event(
+            "agent_text",
+            {
+                "content": _truncate_content(text, 500),
+                "content_truncated": len(text) > 500,
+                "content_char_count": len(text),
+                "ts": source_ts,
+            },
+        )
 
     def _process_user_message(self, entry: dict[str, Any]) -> None:
         """Extract tool_result events from a user message's content blocks."""
@@ -464,7 +711,8 @@ class _SessionTailer:
                     tool_name = self._tool_name_map.get(tool_use_id or "", tool_use_id or "?")
                     raw_content = block.get("content")
                     # Truncate content to avoid queue bloat (keep first 500 chars)
-                    result_content = _truncate_content(raw_content, 500)
+                    flattened = _flatten_content(raw_content)
+                    result_content = _truncate_content(flattened, 500)
                     self._emit_event(
                         "tool_result",
                         {
@@ -472,22 +720,47 @@ class _SessionTailer:
                             "is_error": is_error,
                             "tool_use_id": tool_use_id,
                             "result_content": result_content,
+                            "content_truncated": len(flattened) > 500,
+                            "content_char_count": len(flattened),
+                            "turn": block.get("turn", entry.get("turn", 0)),
+                            "timestamp_quality": entry.get("timestamp_quality"),
+                            "ts": entry.get("timestamp") or entry.get("ts"),
                         },
                     )
+
+    def _process_system_message(self, entry: dict[str, Any]) -> None:
+        """Surface terminal telemetry persisted by the backend runner."""
+        if entry.get("type") != "SessionComplete":
+            return
+        data = entry.get("data")
+        if not isinstance(data, dict):
+            return
+        metrics = {
+            key: data[key]
+            for key in ("usage", "duration_ms", "total_cost_usd", "reason", "turn")
+            if key in data
+        }
+        if not any(key in metrics for key in ("usage", "duration_ms", "total_cost_usd")):
+            return
+        metrics["ts"] = entry.get("timestamp") or entry.get("ts")
+        self._emit_event("run_metrics", metrics)
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         """Push a normalized event dict onto the queue."""
         try:
-            self._event_queue.put_nowait(
-                {
-                    "type": "event",
-                    "event_type": event_type,
-                    "issue_id": self._issue_id,
-                    "run_id": self._run_id,
-                    "data": data,
-                    "ts": time.time(),
-                }
-            )
+            event = {
+                "type": "event",
+                "event_type": event_type,
+                "issue_id": self._issue_id,
+                "run_id": self._run_id,
+                "data": data,
+                # Ingestion time remains the stable SSE ordering clock.
+                "ts": time.time(),
+            }
+            source_ts = data.get("ts")
+            if source_ts not in (None, ""):
+                event["source_ts"] = source_ts
+            self._event_queue.put_nowait(event)
         except queue.Full:
             pass  # Queue full — skip this event, offset still advances
 

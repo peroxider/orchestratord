@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -37,14 +38,73 @@ from orchestratord.config.schema import (
     PrConflictScanConfig,
     WorkflowConfig,
 )
+from orchestratord.git import GitSyncService, get_file_status
 from orchestratord.git.sync import PRRebaseResult
-from orchestratord.issue_registry.issue import Issue
 from orchestratord.issue_registry import (
     IssueRegistry,
     IssueStatus,
 )
+from orchestratord.issue_registry.issue import Issue
 from orchestratord.orchestrator import Orchestrator
 from orchestratord.tracker import Intent, MergeableStatus, PullRequestRef
+
+
+class TestReadOnlyChatFollowup(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_read_only_followup_returns_to_review(self) -> None:
+        """A conversational follow-up is valid even without a new commit."""
+        orch = Orchestrator.__new__(Orchestrator)
+        orch._registry = MagicMock()
+        orch._state = SimpleNamespace(pending_review=set())
+        orch.status_dashboard = MagicMock()
+        orch._sync_tracker_issue_state = AsyncMock()
+        orch._emit_im_event = MagicMock()
+        session = SimpleNamespace(
+            issue=SimpleNamespace(id="7"),
+            run_id="run-followup-7",
+            report_path="/tmp/run-followup-7.json",
+            verification_status="passed",
+            verification_output="7 passed",
+            summary_comment_id=None,
+            session_end_reason="success",
+            session_end_summary="",
+        )
+
+        await orch._complete_read_only_chat_followup(session)
+
+        orch._registry.update_report.assert_called_once_with(
+            "7",
+            report_path="/tmp/run-followup-7.json",
+            verification_status="passed",
+            verification_output="7 passed",
+            summary_comment_id=None,
+            session_end_reason="success",
+            session_end_summary="",
+        )
+        orch._registry.increment_followup_attempt.assert_called_once_with("7")
+        orch._registry.mark_pending_review.assert_called_once_with("7")
+        self.assertIn("7", orch._state.pending_review)
+        orch._sync_tracker_issue_state.assert_awaited_once_with("7", "pending_review")
+        orch.status_dashboard.on_session_complete.assert_called_once_with("7")
+
+
+class TestWorkspaceIgnoreInvariants(unittest.TestCase):
+    def test_runtime_artifacts_do_not_make_read_only_followup_dirty(self) -> None:
+        """Configured ignore patterns must retain orchestratord internals."""
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(["git", "init", "-q", tmp], check=True)
+            runtime_dir = Path(tmp) / ".orchestrator_workspace"
+            runtime_dir.mkdir()
+            (runtime_dir / "README.md").write_text("runtime metadata\n", encoding="utf-8")
+
+            orch = Orchestrator.__new__(Orchestrator)
+            orch.git_sync = GitSyncService(
+                tracker=MagicMock(),
+                branch_prefix="agent/",
+                gitignore_patterns=["*.log"],
+            )
+            orch._sync_gitignore_to_workspace(SimpleNamespace(path=tmp))
+
+            self.assertEqual(get_file_status(tmp), [])
 
 
 # ---------------------------------------------------------------------------

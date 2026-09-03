@@ -22,6 +22,8 @@ Verifies that:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shutil
 import subprocess
 from unittest.mock import patch
@@ -30,6 +32,7 @@ import pytest
 
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
+from orchestratord.spi.events import EventKind
 
 from orchestratord_codex import CodexAppServerSession, CodexSession
 from orchestratord_codex.backend import (
@@ -183,12 +186,217 @@ def test_create_session_picks_cli_session_when_runtime_cli() -> None:
     assert not isinstance(session, CodexAppServerSession)
 
 
+def test_cli_session_translates_codex_jsonl_to_typed_events() -> None:
+    session = CodexSession(_spec())
+
+    assert session._translate_wire_event(  # noqa: SLF001
+        {"type": "thread.started", "thread_id": "thread-7"}, timestamp=10.0
+    ) == []
+    session._translate_wire_event({"type": "turn.started"}, timestamp=11.0)  # noqa: SLF001
+    started = session._translate_wire_event(  # noqa: SLF001
+        {
+            "type": "item.started",
+            "item": {
+                "id": "command-1",
+                "type": "command_execution",
+                "command": "python -m pytest -q",
+                "status": "in_progress",
+            },
+        },
+        timestamp=12.0,
+    )
+    completed = session._translate_wire_event(  # noqa: SLF001
+        {
+            "type": "item.completed",
+            "item": {
+                "id": "command-1",
+                "type": "command_execution",
+                "command": "python -m pytest -q",
+                "aggregated_output": "3 passed",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        },
+        timestamp=15.5,
+    )
+    finished = session._translate_wire_event(  # noqa: SLF001
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 120, "output_tokens": 14},
+        },
+        timestamp=16.0,
+    )
+
+    events = started + completed + finished
+    assert session.session_id == "thread-7"
+    assert [event.kind for event in events] == [
+        EventKind.TOOL_CALL,
+        EventKind.TOOL_RESULT,
+        EventKind.TURN_COMPLETE,
+    ]
+    assert events[0].timestamp == 12.0
+    assert events[0].payload["arguments"] == {
+        "command": "python -m pytest -q"
+    }
+    assert events[1].timestamp == 15.5
+    assert events[1].payload["output"] == "3 passed"
+    assert events[2].payload["usage"]["input_tokens"] == 120
+
+
+@pytest.mark.asyncio
+async def test_cli_session_streams_events_while_process_is_running() -> None:
+    release = asyncio.Event()
+    spawned: dict[str, object] = {}
+    lines = [
+        {"type": "turn.started"},
+        {
+            "type": "item.completed",
+            "item": {"id": "msg-1", "type": "agent_message", "text": "Working."},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {"input_tokens": 9, "output_tokens": 2},
+        },
+    ]
+
+    class FakeStdout:
+        def __init__(self) -> None:
+            self.index = 0
+
+        async def readline(self) -> bytes:
+            if self.index == 0:
+                await release.wait()
+            if self.index >= len(lines):
+                return b""
+            value = (json.dumps(lines[self.index]) + "\n").encode()
+            self.index += 1
+            return value
+
+    class FakeStderr:
+        async def read(self) -> bytes:
+            return b""
+
+    class FakeStdin:
+        def write(self, value: bytes) -> None:
+            return None
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = FakeStdout()
+            self.stderr = FakeStderr()
+            self.returncode = None
+
+        async def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+    async def fake_exec(*args, **kwargs):
+        spawned.update(kwargs)
+        return FakeProcess()
+
+    session = CodexSession(SessionSpec(cwd="/tmp", env={"ORCH_TEST_ENV": "1"}))
+    with patch(
+        "orchestratord_codex.session.asyncio.create_subprocess_exec",
+        side_effect=fake_exec,
+    ):
+        await session.send("inspect")
+        assert session._run_task is not None  # noqa: SLF001
+        assert session._run_task.done() is False  # noqa: SLF001
+        release.set()
+        events = [event async for event in session.events()]
+
+    assert [event.kind for event in events] == [
+        EventKind.TEXT,
+        EventKind.TURN_COMPLETE,
+        EventKind.SESSION_COMPLETE,
+    ]
+    assert events[0].payload["text"] == "Working."
+    assert events[-1].payload["usage"] == {"input_tokens": 9, "output_tokens": 2}
+    assert spawned["env"]["ORCH_TEST_ENV"] == "1"
+    assert "PATH" in spawned["env"]
+
+
 def test_create_session_picks_app_server_session_when_runtime_as() -> None:
     """The AppServer branch yields a :class:`CodexAppServerSession`."""
     backend = CodexBackend()
     backend._runtime = "as"  # noqa: SLF001
     session = backend.create_session(_spec())
     assert isinstance(session, CodexAppServerSession)
+
+
+def test_cli_session_reads_new_prompt_from_stdin() -> None:
+    """Prompts beginning with dashes must not be parsed as CLI options."""
+    session = CodexSession(SessionSpec(cwd="/tmp", model="gpt-5.5"))
+
+    argv, stdin_payload = session._build_argv("---\noperator follow-up")  # noqa: SLF001
+
+    assert argv == ["codex", "exec", "--json", "-m", "gpt-5.5", "-"]
+    assert stdin_payload == b"---\noperator follow-up"
+
+
+def test_cli_session_applies_workflow_reasoning_override_before_exec() -> None:
+    """A per-workflow override must bypass an incompatible global config."""
+    session = CodexSession(
+        SessionSpec(
+            cwd="/tmp",
+            model="gpt-5.5",
+            env={"ORCHESTRATORD_CODEX_REASONING_EFFORT": "xhigh"},
+        )
+    )
+
+    argv, stdin_payload = session._build_argv("inspect")  # noqa: SLF001
+
+    assert argv == [
+        "codex",
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "exec",
+        "--json",
+        "-m",
+        "gpt-5.5",
+        "-",
+    ]
+    assert stdin_payload == b"inspect"
+
+
+@pytest.mark.asyncio
+async def test_app_server_session_inherits_process_environment() -> None:
+    """App-server subprocesses need PATH plus explicit workflow overrides."""
+    captured: dict[str, object] = {}
+
+    class FakeWorker:
+        def __init__(self, *, worker_cmd, cwd, env):
+            captured.update(worker_cmd=worker_cmd, cwd=cwd, env=env)
+
+        async def start(self) -> None:
+            return None
+
+    session = CodexAppServerSession(
+        SessionSpec(cwd="/tmp", env={"ORCH_TEST_ENV": "1"})
+    )
+    with patch(
+        "orchestratord_codex.app_server_session.WorkerManager",
+        FakeWorker,
+    ):
+        await session._ensure_worker()  # noqa: SLF001
+
+    child_env = captured["env"]
+    assert isinstance(child_env, dict)
+    assert child_env["ORCH_TEST_ENV"] == "1"
+    assert "PATH" in child_env
 
 
 def test_runtime_property_reflects_probe() -> None:

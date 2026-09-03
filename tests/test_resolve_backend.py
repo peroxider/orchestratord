@@ -193,6 +193,41 @@ def test_codex_descriptor_forces_preferred_runtime() -> None:
     assert caps_cli.resumable is True
 
 
+def test_daemon_backend_resolution_accepts_descriptor_name(monkeypatch) -> None:
+    """The daemon CLI must accept names advertised by ``backend list``."""
+    from orchestratord.cli.server import _resolve_daemon_backend
+
+    expected = object()
+    monkeypatch.setattr(
+        "orchestratord.backend_registry.resolve_backend",
+        lambda identifier, strict: expected if identifier == "codex-cli" else None,
+    )
+
+    assert _resolve_daemon_backend("codex-cli") is expected
+
+
+def test_daemon_backend_resolution_keeps_legacy_implementation_name(monkeypatch) -> None:
+    """Existing ``--backend codex`` scripts remain supported."""
+    from orchestratord.backend_registry import BackendNotFoundError
+    from orchestratord.cli.server import _resolve_daemon_backend
+
+    expected = object()
+
+    def missing_descriptor(_identifier, *, strict):
+        raise BackendNotFoundError("not a descriptor")
+
+    monkeypatch.setattr(
+        "orchestratord.backend_registry.resolve_backend",
+        missing_descriptor,
+    )
+    monkeypatch.setattr(
+        "orchestratord.backend_registry.discover_backends",
+        lambda: {"codex": expected},
+    )
+
+    assert _resolve_daemon_backend("codex") is expected
+
+
 def test_descriptor_entry_point_group_constant() -> None:
     """``DESCRIPTOR_ENTRY_POINT_GROUP`` matches the string used by all backend
     ``pyproject.toml`` files (drift detector relies on this)."""

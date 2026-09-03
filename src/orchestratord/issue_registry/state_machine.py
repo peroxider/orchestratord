@@ -248,6 +248,13 @@ class StateMachineMixin:
         record.run_output_len = 0
         record.run_timeout_deadline_at = None
         record.run_workspace_dirty = None
+        record.run_cost_usd = 0.0
+        record.run_token_usage = {}
+        record.run_started_at = None
+        record.run_completed_at = None
+        record.run_duration_ms = None
+        record.run_backend = None
+        record.run_model = None
         record.touch()
         self._save()
         return record
@@ -267,6 +274,11 @@ class StateMachineMixin:
         workspace_dirty: bool | None = None,
         cost_usd: float | None = None,
         token_usage: dict | None = None,
+        started_at: float | None = None,
+        completed_at: float | None = None,
+        duration_ms: float | None = None,
+        backend: str | None = None,
+        model: str | None = None,
     ) -> IssueRecord | None:
         """Update high-frequency run diagnostics fields (throttled save).
 
@@ -299,6 +311,16 @@ class StateMachineMixin:
             record.run_cost_usd = cost_usd
         if token_usage is not None:
             record.run_token_usage = token_usage
+        if started_at is not None:
+            record.run_started_at = started_at
+        if completed_at is not None:
+            record.run_completed_at = completed_at
+        if duration_ms is not None:
+            record.run_duration_ms = duration_ms
+        if backend is not None:
+            record.run_backend = backend
+        if model is not None:
+            record.run_model = model
         record.touch()
         # When the run_id transitions from None to a concrete value we
         # must persist immediately — the dashboard discovers active runs

@@ -84,6 +84,61 @@ async def test_turn_complete_uses_progress_event_contract() -> None:
 
 
 @pytest.mark.asyncio
+async def test_backend_error_cannot_be_overwritten_by_success_terminal() -> None:
+    """A fatal backend event must remain visible and fail the run.
+
+    Some adapters emit their terminal event from ``finally``.  A success
+    terminal after a spawn/protocol error must not turn that failed session
+    back into a successful one.
+    """
+    runner = object.__new__(BackendRunner)
+    runner._check_file_changes = lambda *_args: _changed()  # type: ignore[method-assign]
+    reporter = _ProgressReporter()
+    session = SimpleNamespace(
+        turn_count=0,
+        tool_count=0,
+        status="running",
+        session_end_reason=None,
+        session_end_summary=None,
+        control_socket=None,
+    )
+    spi_session = _Session(
+        [
+            EventEnvelope(
+                seq=1,
+                timestamp=0,
+                kind=EventKind.ERROR,
+                payload={
+                    "code": "codex_spawn_error",
+                    "message": "failed to spawn worker: codex not found",
+                },
+            ),
+            EventEnvelope(
+                seq=2,
+                timestamp=0,
+                kind=EventKind.SESSION_COMPLETE,
+                payload={"reason": "success"},
+            ),
+        ]
+    )
+
+    await runner._process_events(
+        spi_session,
+        session,
+        {},
+        None,
+        None,
+        None,
+        reporter,
+    )
+
+    assert session.status == "failed"
+    assert session.session_end_reason == "backend_error"
+    assert session.session_end_summary == "failed to spawn worker: codex not found"
+    assert reporter.completions == [(SessionComplete(reason="backend_error"), session)]
+
+
+@pytest.mark.asyncio
 async def test_approval_request_is_resolved_before_stream_continues() -> None:
     runner = object.__new__(BackendRunner)
     runner._approval_policy = get_approval_policy("approve-safe-only")
