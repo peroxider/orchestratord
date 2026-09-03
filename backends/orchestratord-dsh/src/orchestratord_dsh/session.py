@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 from orchestratord.spi.approval import ApprovalDecision
@@ -87,19 +89,109 @@ class DshSession:
     def _default_harness_factory(self) -> Any:
         from deepseek_harness.api import DeepSeekHarness, DeepSeekHarnessConfig
 
+        env_extra: dict[str, str] = {}
+        cordis = self._spec.cordis
+        provider, model = self._resolve_provider_model()
+        # Approval policy: map the orchestrator's permission_mode onto
+        # the runtime's user-approval seam. Without this the approval
+        # service defaults to "ask", which no one can answer in a
+        # headless SDK session — bash calls that trip the policy are
+        # denied outright.
+        from orchestratord_dsh.cordis_gen import permission_mode_to_approval_policy
+
+        approval_policy = permission_mode_to_approval_policy(self._spec.permission_mode)
+        providers = dict(self._spec.extra.get("providers") or {})
+        needs_cordis = bool(providers) or approval_policy is not None
+        # Custom provider routes: generate the cordis config mounting the
+        # registry's llm-pi-ai routes and inject each route's credential
+        # as an environment variable (never into the config file).
+        if provider != "deepseek-official":
+            from orchestratord_dsh.cordis_gen import (
+                generate_cordis_file,
+                resolve_route_credential,
+                route_env_var_name,
+            )
+
+            cordis = str(
+                generate_cordis_file(
+                    providers,
+                    Path(self._spec.cwd) / ".reports",
+                    run_id=self._spec.run_id,
+                    environ=dict(os.environ),
+                    approval_policy=approval_policy,
+                )
+            )
+            key = resolve_route_credential(
+                (providers.get(provider) or {}).get("api_key"), dict(os.environ)
+            )
+            if key:
+                env_extra[route_env_var_name(provider)] = key
+            logger.info(
+                "dsh custom provider route: provider=%s model=%s cordis=%s",
+                provider,
+                model,
+                cordis,
+            )
+        elif needs_cordis:
+            from orchestratord_dsh.cordis_gen import generate_cordis_file
+
+            cordis = str(
+                generate_cordis_file(
+                    providers or None,
+                    Path(self._spec.cwd) / ".reports",
+                    run_id=self._spec.run_id,
+                    environ=dict(os.environ),
+                    approval_policy=approval_policy,
+                )
+            )
+            logger.info(
+                "dsh generated cordis: permission_mode=%s approval_policy=%s cordis=%s",
+                self._spec.permission_mode,
+                approval_policy,
+                cordis,
+            )
         config = DeepSeekHarnessConfig(
             cwd=self._spec.cwd,
-            model=self._spec.model or "deepseek-v4-flash",
-            provider=self._spec.provider or "deepseek-official",
-            env=self._spec.env,
+            model=model,
+            provider=provider,
+            env={**self._spec.env, **env_extra},
             base_url=self._spec.base_url,
             api_key=self._spec.api_key,
-            cordis=self._spec.cordis,
+            cordis=cordis,
             runtime_bin=self._spec.runtime_bin,
+            # Keep the SDK's session persistence (session.jsonl.zstd) out
+            # of the git workspace root: the runtime defaults to
+            # ./.sessions in the process cwd, which git-sync's
+            # ``git add -A`` would otherwise commit into the PR. Park it
+            # under .reports/ — already orchestratord-ignored.
+            session_root=str(Path(self._spec.cwd) / ".reports" / "dsh-sessions"),
         )
         harness = DeepSeekHarness(config)
         harness.start()
         return harness
+
+    def _resolve_provider_model(self) -> tuple[str, str]:
+        """The (provider, model) pair for the runtime's initialize call."""
+        default_model = "deepseek-v4-flash"
+        providers = dict(self._spec.extra.get("providers") or {})
+        if not providers:
+            return (
+                self._spec.provider or "deepseek-official",
+                self._spec.model or default_model,
+            )
+        from orchestratord_dsh.cordis_gen import CordisConfigError, resolve_route
+
+        try:
+            return resolve_route(
+                providers,
+                self._spec.provider,
+                self._spec.model,
+                default_model=default_model,
+            )
+        except CordisConfigError as exc:
+            # Preflight normally catches this; a hand-built spec may
+            # still be wrong. Surface it as a session init error.
+            raise RuntimeError(str(exc)) from exc
 
     def _ensure_harness(self) -> Any:
         if self._harness is None:

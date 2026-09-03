@@ -114,6 +114,14 @@ _NON_RETRYABLE_END_REASONS = frozenset({
     "operator_stopped",
 })
 
+# End reasons produced by explicit operator action. They are
+# terminal states — the auto-retry loop must not revive them.
+_NON_RETRYABLE_END_REASONS = frozenset({
+    "operator_stop",
+    "operator_takeover",
+    "operator_stopped",
+})
+
 
 def _operator_failure_detail(exc: BaseException) -> str:
     """Return a concise failure detail suitable for IM and registry records."""

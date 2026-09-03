@@ -11,6 +11,13 @@ import os
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.session import AgentSession
+from orchestratord_dsh.cordis_gen import (
+    CordisConfigError,
+    probe_llm_pi_ai_available,
+    resolve_route,
+    resolve_route_credential,
+    validate_providers,
+)
 from orchestratord_dsh.session import DshSession
 
 logger = logging.getLogger(__name__)
@@ -28,10 +35,12 @@ class DshBackend:
     name = "dsh"
     display_name = "DeepSeek Harness (SdkProcess/Cli)"
 
-    # Providers the DeepSeek Harness runtime ships adapters for. A
-    # provider outside this set can never work — fail at preflight with
-    # an actionable message instead of mid-stage with the runtime's
-    # opaque "no adapter registered" error.
+    # Providers the stock runtime auto-mounts. With no ``agent.providers``
+    # registry a provider outside this set can never work — fail at
+    # preflight with an actionable message instead of mid-stage with the
+    # runtime's opaque "no adapter registered" error. When a registry IS
+    # configured the runtime mounts one llm-pi-ai adapter route per entry
+    # (see cordis_gen.py) and any declared route name becomes valid.
     SUPPORTED_PROVIDERS = frozenset({"deepseek-official"})
 
     def __init__(self) -> None:
@@ -56,6 +65,79 @@ class DshBackend:
                 "deepseek_harness.api is missing required exports: "
                 + ", ".join(missing)
             )
+        providers = dict((getattr(spec, "extra", {}) or {}).get("providers") or {})
+        if providers:
+            self._preflight_provider_routes(spec, providers)
+            return
+        self._preflight_legacy(spec)
+
+    # ------------------------------------------------------------------
+    # Route path: agent.providers registry configured
+    # ------------------------------------------------------------------
+
+    def _preflight_provider_routes(
+        self, spec: SessionSpec, providers: dict[str, dict]
+    ) -> None:
+        # The registry owns route generation; an explicit cordis config
+        # would be silently replaced (or, worse, half-composed with it)
+        # — reject the ambiguous combination instead.
+        if (getattr(spec, "cordis", None) or "").strip():
+            raise RuntimeError(
+                "agent.cordis and agent.providers are mutually exclusive — "
+                "a custom cordis config owns its own adapter mounts, so "
+                "provider route generation is disabled. Remove one of the two."
+            )
+        try:
+            validate_providers(providers)
+            provider, _model = resolve_route(
+                providers,
+                getattr(spec, "provider", None),
+                getattr(spec, "model", None),
+                default_model="deepseek-v4-flash",
+            )
+        except CordisConfigError as exc:
+            raise RuntimeError(str(exc)) from exc
+        # The legacy stock adapter remains reachable alongside a registry
+        # (initialize() auto-mounts it for deepseek-official); its
+        # credential chain is checked by the legacy path.
+        if provider == "deepseek-official":
+            self._preflight_legacy(spec)
+            return
+        cfg = providers.get(provider) or {}
+        try:
+            resolve_route_credential(cfg.get("api_key"))
+        except CordisConfigError as exc:
+            raise RuntimeError(str(exc)) from exc
+        self._probe_runtime_plugin(spec)
+
+    def _probe_runtime_plugin(self, spec: SessionSpec) -> None:
+        """Best-effort guard against runtime builds without llm-pi-ai.
+
+        The scan can only inspect the BUNDLED runtime executable, so it
+        is inconclusive — not negative — whenever the launch resolves
+        outside it: a custom ``agent.runtime_bin`` or the dev-only node
+        carrier (``DSH_RUNTIME_MODE=node``). Both skip the probe; an
+        incompatible build surfaces at turn time with the runtime's own
+        error.
+        """
+        if os.environ.get("DSH_RUNTIME_MODE") == "node":
+            return
+        if (getattr(spec, "runtime_bin", None) or "").strip():
+            return
+        if not probe_llm_pi_ai_available():
+            raise RuntimeError(
+                "the installed DeepSeek Harness runtime does not ship the "
+                "llm-pi-ai adapter plugin — custom provider routes "
+                "(agent.providers) need a runtime build that includes "
+                "@deepseek-ai/dsh-llm-pi-ai. Upgrade deepseek-harness-"
+                "runtime-bin or point agent.runtime_bin at a newer build."
+            )
+
+    # ------------------------------------------------------------------
+    # Legacy path: no agent.providers registry (deepseek-official only)
+    # ------------------------------------------------------------------
+
+    def _preflight_legacy(self, spec: SessionSpec) -> None:
         # Reject providers the runtime cannot serve, with a message
         # that points at the real fix (agent.provider in the config file).
         provider = (getattr(spec, "provider", None) or "").strip()
@@ -65,7 +147,8 @@ class DshBackend:
                 "Harness runtime. Backend dsh requires "
                 "agent.provider: deepseek-official — set it in the "
                 "--config file (agent.provider) or remove the override "
-                "so the backend default applies."
+                "so the backend default applies. To serve other providers, "
+                "declare them under agent.providers."
             )
         # Verify the credential source up front. The SDK runtime
         # inherits the caller's environment (DEEPSEEK_API_KEY), or the

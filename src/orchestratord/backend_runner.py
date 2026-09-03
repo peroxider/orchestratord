@@ -19,7 +19,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
@@ -41,6 +41,29 @@ from .runner_utils import _broadcast_to_socket, _drain_control_commands
 from .session_state import AgentSession, RunSession, RunSubject
 
 logger = logging.getLogger(__name__)
+
+
+def providers_extra(agent_config: Any) -> dict[str, Any]:
+    """Serialize ``agent.providers`` into the SPI ``SessionSpec.extra``
+    channel: ``{"providers": {route: {...}}}``.
+
+    Shared by the per-run spec build (``BackendRunner._build_session_spec``)
+    and the daemon startup preflight (``cli/server.py``) so both validate
+    and run against the same spec shape. Returns ``{}`` when the registry
+    is empty — backends that ignore it see no extra-channel change. Raw
+    ``$VAR`` api_key references are forwarded unresolved: the consuming
+    backend owns resolution and actionable reporting.
+    """
+    providers_cfg = getattr(agent_config, "providers", None) or {}
+    if not providers_cfg:
+        return {}
+    from dataclasses import asdict
+
+    return {
+        "providers": {
+            route: asdict(cfg) for route, cfg in providers_cfg.items()
+        }
+    }
 
 # Reuse the same noop-detection threshold as AgentRunner.
 _NOOP_DETECTION_MAX_TURNS = 5
@@ -456,7 +479,7 @@ class BackendRunner:
         for transcript directory names, so tracker punctuation (notably the
         ``#`` prefix used by GitCode issue identifiers) must not leak through.
         """
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         identifier = str(getattr(session.issue, "identifier", None) or "")
         safe_identifier = "".join(
             char if char.isalnum() or char in "_-" else "-"
@@ -545,6 +568,11 @@ class BackendRunner:
                 extra["skill_tools"] = skill_tools
         except Exception:
             logger.exception("skill tool description injection failed; continuing")
+        # Named provider routes (agent.providers). Only injected when
+        # non-empty so backends that ignore the registry see no extra
+        # channel change. Raw $VAR api_key references are forwarded
+        # unresolved — the consuming backend owns resolution + reporting.
+        extra.update(providers_extra(self.agent_config))
         total_timeout_s = self.agent_config.run_timeout_ms / 1000.0
         inactivity_timeout_s = self.agent_config.stall_timeout_ms / 1000.0
         stall_warn_s = self.agent_config.stall_warn_ms / 1000.0
