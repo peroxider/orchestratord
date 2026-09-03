@@ -135,6 +135,7 @@ class PromptBuilder:
         session: Any | None = None,
         python_executable: str | None = None,
         previous_run_ids: list[str] | None = None,
+        previous_verification_error: str | None = None,
         conflict_files: tuple[str, ...] | list[str] | None = None,
     ) -> str:
         """Build prompt using workflow's WORKFLOW.md body template + task data.
@@ -321,6 +322,22 @@ class PromptBuilder:
                 f"{rendered}"
             )
 
+        if previous_verification_error:
+            rendered = (
+                "---\n"
+                "## 上次运行的验证失败（必须处理）\n"
+                "\n"
+                "上次提交前的检查（pre-commit / 验证命令）失败，输出如下——\n"
+                "请先针对失败原因修正代码，确保检查通过后再提交：\n"
+                "\n"
+                "```\n"
+                f"{previous_verification_error[:1500]}\n"
+                "```\n"
+                "---\n"
+                "\n"
+                f"{rendered}"
+            )
+
         if python_executable:
             rendered = (
                 f"⛔ **约束提醒**：始终用 `{python_executable}` 绝对路径运行 Python，"
@@ -410,6 +427,7 @@ class PromptBuilder:
         session: Any | None = None,
         python_executable: str | None = None,
         previous_run_ids: list[str] | None = None,
+        previous_verification_error: str | None = None,
         conflict_files: tuple[str, ...] | list[str] | None = None,
     ) -> tuple[str, str]:
         """Render prompt split into (system, user) by USER_MESSAGE_MARKER.
@@ -442,6 +460,7 @@ class PromptBuilder:
             session=session,
             python_executable=python_executable,
             previous_run_ids=previous_run_ids,
+            previous_verification_error=previous_verification_error,
             conflict_files=conflict_files,
         )
         marker = PromptBuilder.USER_MESSAGE_MARKER

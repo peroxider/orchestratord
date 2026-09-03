@@ -79,6 +79,7 @@ class ClawcodexSession:
         self._cumulative_tokens: int = 0
         self._cumulative_cost_usd: float = 0.0
         self._native_turn_count = 0
+        self._turn_open = False  # True while a model output batch is in flight
         self._events_buffer: list[EventEnvelope] = []
 
         if spec.goal_condition:
@@ -444,7 +445,13 @@ class ClawcodexSession:
         finishes (success or failure), so ``events()`` never hangs.
         """
         try:
-            from extensions.api.query import QueryConfig, QueryRunner
+            from extensions.api.query import (
+                QueryConfig,
+                QueryRunner,
+                TextDelta,
+                ToolCallEvent,
+                ToolResultEvent,
+            )
 
             # Honor the workflow's per-turn timeout (sandbox.turn_timeout_ms)
             # forwarded via spec.extra: clawcodex freeze settings read
@@ -501,10 +508,33 @@ class ClawcodexSession:
             runner = QueryRunner(config)
             self._current_runner = runner
             async for event in runner.stream():
+                # Turn accounting: clawcodex never emits TurnComplete/
+                # PhaseComplete events, so derive turns from the stream —
+                # a new model output batch (TextDelta/ToolCallEvent) after a
+                # tool result starts a new turn.
+                if isinstance(event, (TextDelta, ToolCallEvent)) and not self._turn_open:
+                    self._native_turn_count += 1
+                    self._turn_open = True
+                elif isinstance(event, ToolResultEvent):
+                    self._turn_open = False
                 translated = self._translate_event(event)
                 if translated is not None:
                     await self._event_queue.put(translated)
                     self._events_buffer.append(translated)
+                # Emit TURN_COMPLETE after each turn's tool results so the
+                # orchestrator's turn_count accumulates (Run Summary, stats).
+                if isinstance(event, ToolResultEvent) and self._native_turn_count:
+                    await self._event_queue.put(
+                        EventEnvelope(
+                            seq=self._next_seq(),
+                            timestamp=self._now(),
+                            kind=EventKind.TURN_COMPLETE,
+                            payload={
+                                "turn": self._native_turn_count,
+                                "turn_delta": 1,
+                            },
+                        )
+                    )
             # After turn completes, run goal evaluation if active
             await self._evaluate_goal()
         except ImportError as exc:
