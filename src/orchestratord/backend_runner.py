@@ -1112,6 +1112,24 @@ class BackendRunner:
                         if isinstance(value, (int, float)):
                             merged[key] = merged.get(key, 0) + int(value)
                     session.token_usage = merged
+                # Record run-level usage into orchestratord telemetry
+                # (best-effort; local JSONL — independent of clawcodex).
+                try:
+                    from orchestratord.telemetry import record_usage
+
+                    record_usage(
+                        session_id=getattr(session, "session_id", None) or "",
+                        run_id=getattr(session, "run_id", None) or "",
+                        issue_id=(
+                            session.issue.id
+                            if getattr(session, "issue", None) is not None
+                            else ""
+                        ),
+                        cost_usd=session.cost_usd,
+                        token_usage=getattr(session, "token_usage", None) or {},
+                    )
+                except Exception:
+                    pass
                 if progress_reporter is not None and hasattr(progress_reporter, "on_session_complete"):
                     progress_reporter.on_session_complete(
                         SessionComplete(reason=reason), session
@@ -1343,15 +1361,11 @@ class BackendRunner:
 
     @staticmethod
     def _telemetry_flush() -> None:
-        """Flush telemetry after a run, best-effort."""
-        try:
-            from telemetry.recorder import get_recorder
+        """Flush telemetry after a run, best-effort.
 
-            recorder = get_recorder()
-            if not getattr(recorder, "enabled", False):
-                return
-            if not recorder.config.reporting.reporting_enabled:
-                return
-            recorder.flush()
-        except Exception:
-            pass
+        Orchestratord telemetry appends events immediately (no buffered
+        flush) and records locally regardless of remote-reporting config,
+        so there is nothing to flush here. Kept as a no-op so existing call
+        sites stay intact.
+        """
+        return
