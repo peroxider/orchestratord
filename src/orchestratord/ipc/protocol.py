@@ -78,7 +78,7 @@ class GatewayFrame:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayFrame:
         if not isinstance(data, dict):
-            raise ValueError("frame must be a JSON object")
+            raise ValueError("frame must be a JSON object")  # noqa: TRY004
         ftype = data.get("type")
         if ftype is None:
             raise ValueError("frame missing 'type'")
@@ -145,6 +145,15 @@ class GatewayFrame:
     def event(cls, *, event_type: str,
               payload: dict[str, Any] | None = None) -> GatewayFrame:
         return cls(type=FrameType.EVENT, event_type=event_type, payload=payload)
+
+    @classmethod
+    def processing_complete(cls, *, message_id: str, outcome: str,
+                            reason: str | None = None) -> GatewayFrame:
+        """Report a terminal processing outcome for a pushed DELIVER frame."""
+        payload: dict[str, Any] = {"message_id": message_id, "outcome": outcome}
+        if reason:
+            payload["reason"] = reason
+        return cls.event(event_type="processing.complete", payload=payload)
 
     @classmethod
     def outbound(cls, *, origin: str, text: str,

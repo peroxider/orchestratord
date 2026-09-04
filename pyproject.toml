@@ -33,6 +33,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# IM Message Gateway channel adapters. ``gateway`` is the pure-stdlib
+# webhook surface; app-based adapters use the dedicated extras below.
+gateway = []
+gateway-feishu = [
+    "lark-oapi==1.7.0",
+    "qrcode==7.4.2",
+]
+gateway-wechat = [
+    "cryptography>=42.0.0",
+]
+gateway-all = [
+    "orchestratord[gateway-feishu]",
+    "orchestratord[gateway-wechat]",
+]
 backends = [
     "orchestratord-claude",
     "orchestratord-clawcodex",

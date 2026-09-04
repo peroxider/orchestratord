@@ -409,6 +409,159 @@ cross-daemon traffic uses the HTTP endpoints above, and
 `orchestratord peer group …` manages decentralized groups (D26) whose
 membership is local state.
 
+## IM Message Gateway
+
+An optional gateway daemon that bridges orchestratord to IM channels (Feishu,
+WeChat, Slack, Discord): chat messages become orchestrator input, and
+orchestrator events flow back to the chat. v1 is POSIX/WSL only (UDS socket).
+
+### Architecture
+
+```
+┌────────────────┐  UDS JSONL   ┌──────────────────────┐
+│ orchestratord   │◄────────────►│  gateway daemon     │◄──► feishu / wechat /
+│ (opt-in peer)  │  DELIVER /   │ ~/.orchestratord/    │     slack / discord
+│                │  OUTBOUND    │ gateway/gateway.sock │     (channel adapters)
+└────────────────┘              └──────────────────────┘
+```
+
+- The gateway runs as its own daemon (`orchestratord gateway start`); an
+  orchestrator opts in with `server start --gateway` and registers as an IPC
+  peer for the origins it binds (`im:direct:*:*` by default).
+- Inbound: channel adapter → dedupe → classify → route → command allowlist →
+  DELIVER push to the registered orchestrator.
+- Outbound: the orchestrator event sink (events carry `issue_id`,
+  `event_type`, `level`, and `markdown` metadata) → OUTBOUND frame → the
+  gateway resolves the origin and delivers to the channel, with NACK
+  backoff retry, outbox, and dead-letter handling.
+
+### Install
+
+The base install already covers the webhook channels (Feishu/Slack/Discord
+webhooks) — `import orchestratord` never fails without extras. App-based
+modes pull their SDKs through extras:
+
+| Extra            | Adds                   | Needed for                              |
+| ---------------- | ---------------------- | --------------------------------------- |
+| `gateway-feishu` | `lark-oapi`, `qrcode`  | Feishu websocket mode + QR setup        |
+| `gateway-wechat` | `cryptography`         | WeChat iLink channel                    |
+| `gateway-all`    | both extras above      | everything                              |
+
+```bash
+pip install 'orchestratord[gateway-feishu]'
+pip install 'orchestratord[gateway-wechat]'
+pip install 'orchestratord[gateway-all]'
+```
+
+### Quick start (WSL)
+
+```bash
+# 1. Configure channels — interactive wizard (add/edit/remove; feishu scan
+#    or manual, wechat QR login, slack/discord webhook fields)
+orchestratord gateway setup
+
+# 2. Start the daemon and check its health
+orchestratord gateway start
+orchestratord gateway status
+
+# 3. Attach an orchestrator
+orchestratord server start --workflow WORKFLOW.md --backend codex --gateway
+```
+
+`--gateway` opts the orchestrator into all supported direct/private messages;
+`--gateway-origin` narrows the binding and `--gateway-sock` relocates the
+socket (env equivalents: `ORCHESTRATORD_GATEWAY_ORIGIN` /
+`ORCHESTRATORD_GATEWAY_SOCK`; the same flags work on `daemon start`). A
+running orchestrator can attach or detach without a restart — these write
+control files that the daemon picks up:
+
+```bash
+orchestratord server connect-gateway
+orchestratord server disconnect-gateway
+```
+
+Per-channel operations:
+
+```bash
+orchestratord gateway login wechat        # WeChat iLink QR login
+orchestratord gateway restart feishu      # rebuild one channel adapter
+orchestratord gateway disconnect feishu   # drop that channel connection
+orchestratord gateway stop                # stop the daemon
+```
+
+### IM command surface
+
+Inbound messages are routed by semantics:
+
+| Semantics     | Meaning                                                             |
+| ------------- | ------------------------------------------------------------------- |
+| `newPrompt`   | plain text while idle → a new prompt                                 |
+| `command`     | whitelisted slash command                                            |
+| `followUp`    | plain text while a session is busy → queued follow-up                |
+| `approval`    | structured approval reply (bound wait-point; a bare "yes" is not)     |
+| `interrupt`   | structured interrupt — never guessed from natural language            |
+| `contextOnly` | context recorded for the operator without triggering a run           |
+
+Slash commands recognized for the orchestrator host:
+
+```
+/server status
+/issue list|show|tail|stop|pause|resume|clarify|inject|feedback|review|retry|workspace|rebase
+/agent retry|follow-up|unblock
+/pause  /resume  /stop  /takeover  /inject  /detach  /clarify  /review  /feedback
+```
+
+Commands outside the allowlist are not pushed to the orchestrator; the sender
+gets a bounded notice instead.
+
+### Configuration reference
+
+Channels are configured in `~/.orchestratord/gateway/channels.yaml` (normally
+maintained by `gateway setup`). Key fields:
+
+```yaml
+enabled: true
+state_dir: ~/.orchestratord/gateway
+channels:
+  - name: slack-main
+    type: slack
+    webhook_url: https://hooks.slack.com/services/...
+    enabled: true
+```
+
+State-dir layout (`~/.orchestratord/gateway`):
+
+| File                        | Purpose                                     |
+| --------------------------- | ------------------------------------------- |
+| `channels.yaml`             | channel + reliability configuration         |
+| `gateway.pid`, `gateway.lock` | daemon PID and single-instance lock        |
+| `gateway.sock`              | UDS JSONL IPC socket                        |
+| `health.json`               | daemon health snapshot                      |
+| `gateway.log`               | rotating daemon log                         |
+| `processed_inbound.ndjson`, `outbox.ndjson`, `dead_letter.ndjson` | dedupe / deferred outbound / exhausted retries |
+| `audit.ndjson`              | redacted audit trail (secrets never logged)  |
+
+Environment variables:
+
+| Variable                          | Purpose                                            |
+| --------------------------------- | -------------------------------------------------- |
+| `ORCHESTRATORD_IM_SECRET`         | Fernet key encrypting WeChat credentials at rest   |
+| `ORCHESTRATORD_GATEWAY_ORIGIN`    | default gateway origin for `--gateway` opt-in      |
+| `ORCHESTRATORD_GATEWAY_SOCK`      | gateway socket override (client and daemon)       |
+| `ORCHESTRATORD_GATEWAY_LOG_LEVEL` | pin the daemon log level (`INFO`, `DEBUG`, …)     |
+| `ORCHESTRATORD_DEBUG`             | set to `1` for DEBUG logging                       |
+
+### FAQ
+
+**What if the gateway is not running when I start `server ... --gateway`?**
+The orchestrator does not crash — it keeps retrying by heartbeat and attaches
+as soon as the gateway daemon appears.
+
+**Why is a timed-out outbound message not retried?**
+A timeout is ambiguous: the message may already be in the chat, and retrying
+could duplicate it. Timed-out sends stay pending without automatic resend,
+while explicit NACK failures retry with backoff (dead-lettered when exhausted).
+
 ## Development
 
 ```bash

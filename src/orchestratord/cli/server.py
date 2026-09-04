@@ -1061,15 +1061,35 @@ def _mount_gateway_opt_in(
         _issue_inject(issue_id, text)
 
     def _queue_pending(issue_id, text):
-        # Pending-message queue lives on RuntimeTaskRegistry; without an
-        # active task for this issue we record the intent for the next run.
-        logger.info("IM followup queued: issue=%s text_len=%d", issue_id, len(text))
+        # Real follow-up path on the live orchestrator (SPEC Phase 4):
+        # hints + the existing chat follow-up control handler.
+        o = _orch()
+        if o is not None and hasattr(o, "_apply_im_followup"):
+            try:
+                o._apply_im_followup(issue_id, text)
+                return
+            except Exception:
+                logger.exception("IM followup control failed")
+        # Orchestrator not constructed yet — record the follow-up text in
+        # .operator_hints.md so the next run picks it up.
+        _issue_inject(issue_id, text)
+        logger.warning(
+            "IM followup: orchestrator not ready; hints recorded (issue=%s)", issue_id
+        )
 
     def _agent_intent(verb, issue_id):
         _control_verb(verb, issue_id)
 
     def _issue_cli(verb, issue_id, payload):
-        logger.info("IM issue_cli: %s issue=%s", verb, issue_id)
+        o = _orch()
+        if o is not None and hasattr(o, "_apply_im_issue_cli"):
+            try:
+                o._apply_im_issue_cli(verb, issue_id, payload)
+                logger.info("IM issue_cli: %s issue=%s", verb, issue_id)
+                return
+            except Exception:
+                logger.exception("IM issue_cli failed")
+        logger.warning("IM issue_cli: orchestrator not ready (%s %s)", verb, issue_id)
 
     def _bridge_interrupt(issue_id, payload):
         _control_verb("stop", issue_id)
@@ -1154,21 +1174,28 @@ def _mount_gateway_opt_in(
 
     wrapper._heartbeat_loop = _heartbeat_loop
 
-    # Outbound: orchestrator events → WeChat via OUTBOUND frames.
+    # Outbound: orchestrator events → IM via OUTBOUND frames.
     # _build_session_sink reads im_event_deliver at sink-build time inside
     # Orchestrator.run(); inject it through the KernelHooks seam right after
     # subsystem.run() constructs the orchestrator, before it starts polling.
+    from orchestratord.sinks.channel import deliver_event_via_client
+
     def _sync_deliver(event, text):
         try:
             loop = asyncio.get_event_loop()
-            loop.create_task(wrapper.send_outbound(text))
         except RuntimeError:
             logger.warning("orchestrator IM: no loop; dropping event")
+            return
+        # Forward the event metadata envelope (issue_id/event_type/
+        # level/markdown) through the client when it supports it.
+        deliver_event_via_client(wrapper, event, text, loop=loop)
 
     class _ImGatewayKernelHooks:
         """DESIGN §4.7：宿主经 KernelHooks 注入 IM 网关装配（取代 monkey-patch）。"""
 
         async def on_kernel_start(self, kernel) -> None:
+            # Inject the gateway runtime onto the freshly constructed
+            # orchestrator before it starts polling / building session sinks.
             kernel._im_gateway_wrapper = wrapper
             kernel._im_gateway_session_id = session_id
             kernel._im_gateway_heartbeat_task = getattr(wrapper, "_heartbeat_task", None)

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -183,6 +184,34 @@ def _extract_error_message(payload: Any) -> str | None:
                 if nested:
                     return nested
     return None
+
+
+def _im_command_flags(payload: str) -> dict[str, str]:
+    """Parse ``--flag value`` / ``--flag=value`` pairs from an IM command.
+
+    Supports the flag shapes used by the IM issue-cli verbs (``--id``,
+    ``--approve``, ``--feedback "..."`` etc.). A flag with no value maps to
+    ``""`` so callers can distinguish presence via ``name in flags``.
+    """
+    try:
+        tokens = shlex.split((payload or "").strip())
+    except ValueError:
+        tokens = (payload or "").split()
+    flags: dict[str, str] = {}
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token.startswith("--") and len(token) > 2:
+            name, sep, value = token.partition("=")
+            if sep:
+                flags[name[2:]] = value
+            elif i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
+                flags[name[2:]] = tokens[i + 1]
+                i += 1
+            else:
+                flags[name[2:]] = ""
+        i += 1
+    return flags
 
 
 class Orchestrator:
@@ -4251,6 +4280,148 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             logger.debug("gateway control: failed to write result %s", path, exc_info=True)
 
+    def _spawn_im_control(self, coro) -> None:
+        """Run an async IM control handler off the gateway read loop.
+
+        The IM handlers are invoked from the IPC read loop's sequential
+        ``on_deliver`` dispatch, so async control paths must not be awaited
+        inline. The task is tracked in ``self._tasks`` (cancelled by the
+        normal shutdown path) and failures are logged.
+        """
+        tasks = getattr(self, "_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._tasks = tasks
+        task = asyncio.create_task(coro)
+        tasks.add(task)
+        task.add_done_callback(self._on_im_control_task_done)
+
+    def _on_im_control_task_done(self, task: asyncio.Task) -> None:
+        tasks = getattr(self, "_tasks", None)
+        if tasks is not None:
+            tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning("IM gateway control task failed", exc_info=task.exception())
+
+    def _im_followup_hints_path(self, issue_id: str) -> Path:
+        """Resolve where an IM follow-up's hints text should be recorded.
+
+        The follow-up prompt is read from ``.operator_hints.md`` in the
+        issue's workspace by ``prompt_builder`` at launch time, so prefer
+        the registry record's workspace; fall back to the workspace root.
+        """
+        record = None
+        registry = getattr(self, "_registry", None)
+        if issue_id and registry is not None:
+            try:
+                record = registry.get(issue_id)
+            except Exception:  # noqa: BLE001
+                record = None
+        workspace_path = getattr(record, "workspace_path", None) if record else None
+        if workspace_path:
+            return Path(workspace_path) / ".operator_hints.md"
+        return self._workspace_root / ".operator_hints.md"
+
+    def _apply_im_followup(self, issue_id: str, text: str) -> None:
+        """IM ``followUp`` handler — record hints + requeue via follow-up control.
+
+        SPEC im-gateway Phase 4: a follow-up must reach the real control
+        path, not just be logged. The text lands in ``.operator_hints.md``
+        (the follow-up prompt source), and the existing
+        ``_handle_followup_control`` re-queues the issue for a FOLLOWUP
+        re-run. Without an issue_id the hints file is the durable fallback.
+        """
+        try:
+            hints_path = self._im_followup_hints_path(issue_id)
+            hints_path.parent.mkdir(parents=True, exist_ok=True)
+            with hints_path.open("a", encoding="utf-8") as f:
+                f.write(f"\n{text}\n")
+        except Exception:
+            logger.warning("IM followup: failed to write operator hints", exc_info=True)
+        if not issue_id:
+            logger.info(
+                "IM followup without issue_id: text recorded in .operator_hints.md; "
+                "no issue re-queue"
+            )
+            return
+        self._spawn_im_control(self._handle_followup_control(issue_id, text))
+        logger.info("IM followup queued: issue=%s text_len=%d", issue_id, len(text))
+
+    def _apply_im_issue_cli(self, verb: str, issue_id: str, payload: str) -> None:
+        """IM issue-cli handler — map verbs onto existing control handlers.
+
+        Mirrors the control-file commands consumed by
+        ``_process_control_commands`` so IM slash commands hit the same
+        paths as the CLI: review approvals/rejections, PR feedback
+        follow-ups, retries, rebases, and clarification answers.
+        """
+        verb = (verb or "").strip().lower()
+        if not verb:
+            return
+        flags = _im_command_flags(payload or "")
+        issue_id = issue_id or flags.get("id") or ""
+
+        if verb == "retry":
+            self._apply_control_command("retry", issue_id, flags.get("reason", ""))
+            return
+        if verb == "rebase":
+            extra = f"force={'1' if 'force' in flags else '0'}\n{flags.get('reason', '')}"
+            self._spawn_im_control(self._handle_rebase_control(issue_id, extra))
+            return
+        if verb == "review":
+            if "approve" in flags:
+                self._spawn_im_control(
+                    self._handle_review_approve_control(issue_id, flags.get("comment", ""))
+                )
+                return
+            if "reject" in flags:
+                feedback = flags.get("feedback", "")
+                if not feedback:
+                    logger.warning("IM review reject without --feedback: issue=%s", issue_id)
+                    return
+                self._spawn_im_control(self._handle_review_retry_control(issue_id, feedback))
+                return
+            logger.warning("IM review without --approve/--reject: issue=%s", issue_id)
+            return
+        if verb == "feedback":
+            if "dismiss" in flags:
+                self._im_dismiss_feedback(issue_id, flags.get("feedback-id", ""))
+                return
+            # Default mirrors the CLI: approve pending feedback by queueing
+            # a review follow-up that addresses it.
+            self._spawn_im_control(
+                self._handle_review_followup_control(issue_id, flags.get("feedback-id", ""))
+            )
+            return
+        if verb == "clarify":
+            answer = flags.get("answer", "")
+            if not answer:
+                logger.info("IM clarify without --answer: issue=%s (ignored)", issue_id)
+                return
+            resolved = self._clarification_queue.resolve(
+                issue_id, answer, source="clarification_queue"
+            )
+            if resolved is None:
+                logger.info("IM clarify: no pending clarification for issue=%s", issue_id)
+            else:
+                logger.info("IM clarify answered: issue=%s", issue_id)
+            return
+        logger.info("IM issue_cli verb %s has no direct control path; ignored", verb)
+
+    def _im_dismiss_feedback(self, issue_id: str, feedback_id: str) -> None:
+        """IM ``/feedback --dismiss`` — mark pending feedback items processed."""
+        record = self._registry.get(issue_id) if issue_id else None
+        target_ids = (
+            [fid.strip() for fid in feedback_id.split(",") if fid.strip()]
+            if feedback_id
+            else list(getattr(record, "pending_feedback_ids", None) or [])
+        )
+        if record is None or not target_ids:
+            logger.info("IM feedback dismiss: nothing pending for issue=%s", issue_id)
+            return
+        self._registry.mark_feedback_processed(issue_id, target_ids)
+        logger.info("IM feedback dismissed: issue=%s items=%d", issue_id, len(target_ids))
+
     async def _connect_gateway_runtime(self, *, origin: str, sock: str) -> dict[str, Any]:
         if not origin:
             return {"ok": False, "message": "gateway origin is required"}
@@ -4280,16 +4451,17 @@ class Orchestrator:
                 f.write(f"\n{hint}\n")
 
         handlers = OrchestratorHandlers(
-            queue_pending_message=lambda issue_id, text: logger.info(
-                "IM followup queued: issue=%s text_len=%d", issue_id, len(text)
-            ),
+            # followUp → real follow-up control path (hints + requeue).
+            queue_pending_message=self._apply_im_followup,
             control_verb=_control_verb,
             issue_inject=_issue_inject,
+            # contextOnly → hints only, never triggers a new run.
             operator_hints=_issue_inject,
             agent_intent=_control_verb,
-            issue_cli=lambda verb, issue_id, payload: logger.info(
-                "IM issue_cli: %s issue=%s", verb, issue_id
-            ),
+            # clarify/review/feedback (and defensive retry/rebase) → the
+            # daemon's existing issue control handlers.
+            issue_cli=self._apply_im_issue_cli,
+            # interrupt → stop (cancels the running issue task).
             bridge_interrupt=lambda issue_id, payload: _control_verb("stop", issue_id),
         )
         session_id = f"orchestrator-{os.getpid()}-{int(time.time() * 1000)}"
@@ -4344,10 +4516,14 @@ class Orchestrator:
         return {"ok": True, "message": "connected"}
 
     def _build_gateway_ipc_deliver(self, wrapper) -> Any:
+        from .sinks.channel import deliver_event_via_client
+
         loop = asyncio.get_running_loop()
 
         def _sync_deliver(event, text):
-            loop.create_task(wrapper.send_outbound(text))
+            # Forward the event metadata envelope (issue_id/event_type/
+            # level/markdown) through the client when it supports it.
+            deliver_event_via_client(wrapper, event, text, loop=loop)
 
         return _sync_deliver
 
