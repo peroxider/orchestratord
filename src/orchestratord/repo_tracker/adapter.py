@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 import httpx
@@ -342,12 +343,29 @@ class RepositoryTrackerAdapter(TrackerAdapter):
         )
         if existing is not None:
             return existing
-        return await self.client.create_pull_request(
-            title=title,
-            head_branch=head_branch,
-            base_branch=base_branch,
-            body=body,
-        )
+        try:
+            return await self.client.create_pull_request(
+                title=title,
+                head_branch=head_branch,
+                base_branch=base_branch,
+                body=body,
+            )
+        except RepositoryTrackerError as exc:
+            # 409 "Another open merge request already exists for this source
+            # branch: !NNN" — the branch already has an open PR that the find
+            # above missed (head format mismatch / race). Refresh that PR
+            # instead of failing the run.
+            match = re.search(r"!(\d+)", str(exc))
+            if match:
+                try:
+                    return await self.client.update_pull_request(
+                        pull_request=PullRequestRef(number=match.group(1)),
+                        title=title,
+                        body=body,
+                    )
+                except Exception:
+                    pass
+            raise
 
     async def update_pull_request(
         self,

@@ -676,11 +676,15 @@ class ClawcodexSession:
                 },
             )
         elif isinstance(event, SessionComplete):
+            payload: dict[str, Any] = {"reason": event.reason}
+            usage = getattr(event, "usage", None)
+            if usage:
+                payload["usage"] = dict(usage)
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),
                 kind=EventKind.SESSION_COMPLETE,
-                payload={"reason": event.reason},
+                payload=payload,
             )
         return None
 

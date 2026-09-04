@@ -504,7 +504,7 @@ class BackendRunner:
             return "", session.prompt_override
 
         task = session.task or issue
-        return PromptBuilder.render_parts(
+        system_append, user_prompt = PromptBuilder.render_parts(
             task,
             attempt=session.attempt,
             session=session,
@@ -512,6 +512,20 @@ class BackendRunner:
             previous_verification_error=session.previous_verification_error,
             conflict_files=session.conflict_files,
         )
+        run_kind = getattr(session, "run_kind", "") or ""
+        if run_kind in ("agent_followup", "review_retry", "review_followup"):
+            # /agent follow-up = 检视意见处理的重试：复用现有分支/PR，agent 只应
+            # 处理检视/CI 报错——不要重做整个 issue 任务/重写报告文件。
+            user_prompt = (
+                f"{user_prompt}\n\n"
+                "# Follow-up 模式（只处理检视反馈）\n"
+                "本次运行是检视意见处理（/agent follow-up）——issue 的代码任务已完成"
+                "（PR 已存在，复用现有分支）。请【只处理检视意见 / CI 报错 / PR 上的"
+                "反馈】——针对对应问题修改代码即可；【不要重做整个 issue 任务】，"
+                "【不要重写 changes_summary.md / implementation_notes.md】"
+                "（除非检视意见明确要求）。修改完成后提交并推送（更新现有 PR）。\n"
+            )
+        return system_append, user_prompt
 
     @staticmethod
     def _append_skill_index(system_prompt_append: str) -> str:

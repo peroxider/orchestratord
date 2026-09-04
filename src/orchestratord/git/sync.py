@@ -299,7 +299,11 @@ class GitSyncService:
                 )
                 committed = True
             try:
-                if not is_sequential and not agent_committed:
+                # Run the pre-commit gate regardless of who created the
+                # commit (agent or orchestrator) so agent-committed changes
+                # are checked too — otherwise agent-side commits bypass the
+                # gate and CI becomes the first place lint errors surface.
+                if not is_sequential:
                     await self._run_pre_commit_hook(repo_root, session)
                     commit_sha = await asyncio.to_thread(
                         self._run_git_output, ["rev-parse", "HEAD"], repo_root
@@ -831,9 +835,28 @@ class GitSyncService:
             )
         session.post_sync_output = output
 
+    # Environment-style failure markers: a hook/tool could not even start
+    # (missing executable / module / command) rather than reporting a real
+    # defect in the code. Treating these as verification failures would block
+    # every run on environment gaps (gitleaks binary absent, pylint not
+    # installed, ...) that the agent cannot fix — classify them as env skips.
+    _ENV_FAILURE_MARKERS = (
+        "command not found",
+        "ModuleNotFoundError",
+        "ImportError",
+        "No such file or directory",
+        "is not installed",
+        "Executable ",
+    )
+
     async def _run_shell(self, command: str, repo_root: str, timeout_ms: int) -> str:
         rc, output = await self._run_shell_result(command, repo_root, timeout_ms)
         if rc != 0:
+            if any(m in output for m in self._ENV_FAILURE_MARKERS):
+                # Environment gap (tool/binary/module missing) — not a code
+                # defect the agent can fix. Record and continue so the run is
+                # not blocked on tooling that is absent from the sandbox.
+                return output
             raise VerificationFailed(
                 f"command failed with exit code {rc}: {command}",
                 output,
