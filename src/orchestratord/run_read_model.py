@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .conversation_store import ConversationStore
+
 ISSUE_STATUSES: tuple[str, ...] = (
     "queued",
     "pending",
@@ -184,6 +186,24 @@ class RunReadModel:
         run_id = str(record.get("run_id") or "")
         workspace_short = self._short_workspace(workspace_path)
         execution = self._execution(record, report, observations, created_at, updated_at)
+        conversation_id = record.get("conversation_id") or (run_id or None)
+        run_metadata: dict[str, Any] = {}
+        if conversation_id and run_id:
+            try:
+                manifest = ConversationStore().get(str(conversation_id))
+                run_metadata = next(
+                    (
+                        item
+                        for item in (manifest or {}).get("runs", [])
+                        if item.get("run_id") == run_id
+                    ),
+                    {},
+                )
+            except Exception:
+                run_metadata = {}
+        for key in ("backend", "backend_session_id"):
+            if not execution.get(key) and run_metadata.get(key) is not None:
+                execution[key] = run_metadata[key]
         data_quality = self._data_quality(
             observations,
             created_at=_number(execution.get("started_at")) or created_at,
@@ -221,6 +241,10 @@ class RunReadModel:
             "age_seconds": max(0, int(now - created_at)) if created_at else 0,
             "idle_seconds": max(0, int(now - updated_at)) if updated_at else 0,
             "run_id": run_id or None,
+            "conversation_id": conversation_id,
+            "parent_run_id": record.get("parent_run_id") or run_metadata.get("parent_run_id"),
+            "stage_id": record.get("stage_id") or run_metadata.get("stage_id"),
+            "branch_id": record.get("branch_id") or run_metadata.get("branch_id"),
             "run_turn_count": execution["turn_count"],
             "run_tool_count": execution["tool_count"],
             "run_output_len": execution["output_chars"],
@@ -365,6 +389,7 @@ class RunReadModel:
             "completed_at": report.get("completed_at")
             or record.get("run_completed_at"),
             "backend": report.get("backend") or record.get("run_backend") or "",
+            "backend_session_id": report.get("backend_session_id") or record.get("backend_session_id") or "",
             "runtime": report.get("runtime") or record.get("run_runtime") or "",
             "model": report.get("model") or record.get("run_model") or "",
             "workspace_dirty": record.get("run_workspace_dirty"),

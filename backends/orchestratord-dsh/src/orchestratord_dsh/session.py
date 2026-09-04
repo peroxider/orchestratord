@@ -357,15 +357,28 @@ class DshSession:
             chunk = data.get("chunk", {}) if isinstance(data.get("chunk"), dict) else {}
             chunk_type = chunk.get("type", "")
             if chunk_type in ("text-delta", "reasoning-delta"):
+                payload = {
+                    "text": str(chunk.get("text", "")),
+                    "raw": dict(chunk),
+                }
+                if chunk_type == "reasoning-delta":
+                    payload["reasoning-delta"] = payload["text"]
                 return [
                     EventEnvelope(
                         seq=self._next_seq(),
                         timestamp=self._now(),
                         kind=EventKind.TEXT_DELTA,
-                        payload={"text": str(chunk.get("text", ""))},
+                        payload=payload,
                     )
                 ]
-            return []
+            return [
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.UNKNOWN,
+                    payload={"event": event_type, "raw": dict(event)},
+                )
+            ]
 
         elif event_type == "tool/call":
             return [
@@ -462,7 +475,17 @@ class DshSession:
                 )
             return envelopes
 
-        return []
+        # Preserve provider events that have not yet acquired a normalized
+        # mapping.  Dropping them makes cross-backend transcript audits
+        # impossible and hides forward-compatible SDK additions.
+        return [
+            EventEnvelope(
+                seq=self._next_seq(),
+                timestamp=self._now(),
+                kind=EventKind.UNKNOWN,
+                payload={"event": event_type, "raw": dict(event)},
+            )
+        ]
 
     def events(self) -> AsyncIterator[EventEnvelope]:
         return self._stream()

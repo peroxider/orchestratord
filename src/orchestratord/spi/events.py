@@ -30,6 +30,8 @@ class EventKind(Enum):
     # human decision (DESIGN_chat_gateway.md §5.3).  Payload:
     # {request_id, call_id, tool_name, arguments}.
     APPROVAL_REQUEST = "approval_request"
+    # Forward-compatible envelope for provider events not yet normalized.
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)

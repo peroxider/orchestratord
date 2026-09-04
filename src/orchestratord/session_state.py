@@ -57,6 +57,15 @@ class RunSession:
     issue: Any  # DEPRECATED compatibility alias; use task/subject data instead
     workspace: Workspace
     task: "AgentTask | None" = None  # NEW: generic task abstraction
+    # Orchestrator logical conversation metadata.  None remains valid for
+    # legacy callers that construct a session directly.
+    conversation_id: str | None = None
+    parent_run_id: str | None = None
+    backend_name: str | None = None
+    backend_session_id: str | None = None
+    stage_id: str | None = None
+    stage_name: str | None = None
+    branch_id: str | None = None
     turn_count: int = 0
     status: str = "running"  # running, completed, failed
     output_text: str = ""

@@ -334,6 +334,11 @@ class PipelineModeRunner:
         last_attempt_note = ""
         for attempt in range(self._max_retries_per_stage + 1):
             self._reset_session_for_next_stage(session)
+            # Keep the logical conversation stable while making each stage
+            # attempt a distinct run in the transcript/manifest.
+            session.stage_id = f"pipeline:{stage}"
+            session.stage_name = stage
+            session.branch_id = None
             session.prompt_override = self._build_stage_prompt(
                 stage, prior, session, retry_note=last_attempt_note
             )
@@ -668,6 +673,10 @@ class PipelineModeRunner:
         session.output_text = ""
         session.session_end_reason = None
         session.session_end_summary = ""
+        # Link the new run to the preceding attempt/stage, while keeping
+        # conversation_id untouched across the whole pipeline.
+        if getattr(session, "run_id", None):
+            session.parent_run_id = session.run_id
         # Force a brand-new run_id for each stage so transcripts /
         # tool-events end up in separate per-stage directories.
         session.run_id = None

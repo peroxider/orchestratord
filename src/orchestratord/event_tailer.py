@@ -493,6 +493,25 @@ class _SessionTailer:
                     elif role == "system":
                         self._process_system_message(entry)
 
+                    # Transcript v2 deliberately keeps provider-specific and
+                    # unknown events visible.  They are audit observations,
+                    # not reasons to fail the rest of the stream.
+                    if entry.get("schema_version") == 2 and (
+                        entry.get("kind") == "unknown" or entry.get("raw")
+                    ):
+                        self._emit_event(
+                            "raw_event",
+                            {
+                                "kind": entry.get("kind", "unknown"),
+                                "raw": entry.get("raw", {}),
+                                "content": entry.get("thinking") or entry.get("text") or "",
+                                "stage_id": entry.get("stage_id"),
+                                "branch_id": entry.get("branch_id"),
+                                "conversation_id": entry.get("conversation_id"),
+                                "ts": entry.get("timestamp") or entry.get("ts"),
+                            },
+                        )
+
                 self._transcript_offset = f.tell()
         except FileNotFoundError:
             pass

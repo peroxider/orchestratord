@@ -40,58 +40,38 @@ def _event_to_broadcast_dict(event: Any) -> dict:
     payload = getattr(event, "payload", None)
     if kind is not None and isinstance(payload, dict):
         kind_value = getattr(kind, "value", kind)
+        # Preserve the provider payload first.  The aliases below keep the
+        # pre-v2 browser vocabulary stable while making every provider field
+        # available to transcript consumers and future renderers.
+        data = dict(payload)
         if kind_value in ("text", "text_delta"):
-            data = {
-                "content": str(payload.get("text", payload.get("delta", ""))),
-                "turn": payload.get("turn"),
-                "timestamp_quality": payload.get("timestamp_quality"),
-            }
-            return {key: value for key, value in data.items() if value is not None}
-        if kind_value == "tool_call":
-            arguments = payload.get("arguments", payload.get("params", {}))
-            data = {
-                "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
-                "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
-                "params": dict(arguments) if isinstance(arguments, Mapping) else arguments,
-                "turn": payload.get("turn"),
-                "timestamp_quality": payload.get("timestamp_quality"),
-            }
-            return {key: value for key, value in data.items() if value is not None}
-        if kind_value == "tool_result":
-            data = {
-                "tool_name": str(payload.get("name", payload.get("tool_name", ""))),
-                "tool_use_id": payload.get("call_id", payload.get("tool_use_id")),
-                "result": payload.get("result", payload.get("output", payload)),
-                "is_error": not bool(payload.get("ok", True)),
-                "exit_code": payload.get("exit_code"),
-                "turn": payload.get("turn"),
-                "timestamp_quality": payload.get("timestamp_quality"),
-            }
-            return {key: value for key, value in data.items() if value is not None}
-        if kind_value == "turn_complete":
-            return {
-                key: payload[key]
-                for key in ("turn", "reason", "usage", "duration_ms")
-                if key in payload
-            }
-        if kind_value == "session_complete":
-            return {
-                key: payload[key]
-                for key in (
-                    "reason",
-                    "usage",
-                    "duration_ms",
-                    "total_cost_usd",
-                    "session_id",
-                )
-                if key in payload
-            }
-        if kind_value == "error":
-            return {
-                key: payload[key]
-                for key in ("code", "message", "reason")
-                if key in payload
-            }
+            data.setdefault("content", payload.get("text", payload.get("delta", "")))
+            # Keep the original minimal wire shape for ordinary text deltas;
+            # richer/provider-specific payloads still retain every field.
+            if set(payload).issubset({"text", "delta", "turn", "timestamp_quality"}):
+                data = {
+                    "content": data["content"],
+                    **{key: payload[key] for key in ("turn", "timestamp_quality") if key in payload},
+                }
+        elif kind_value == "tool_call":
+            arguments = payload.get("arguments", payload.get("input", payload.get("params", {})))
+            data.setdefault("tool_name", payload.get("name", payload.get("tool_name", "")))
+            data.setdefault("tool_use_id", payload.get(
+                "call_id", payload.get("tool_use_id", payload.get("toolCallId", payload.get("callId")))
+            ))
+            data.setdefault("params", dict(arguments) if isinstance(arguments, Mapping) else arguments)
+        elif kind_value == "tool_result":
+            data.setdefault("tool_use_id", payload.get(
+                "call_id", payload.get("tool_use_id", payload.get("toolCallId", payload.get("callId")))
+            ))
+            data.setdefault("result", payload.get("result", payload.get("output", payload)))
+            data.setdefault("is_error", not bool(payload.get("ok", True)))
+        elif kind_value in ("error", "approval_request"):
+            # Stable control-socket consumers historically read ``code`` and
+            # ``message`` without checking presence first.
+            data.setdefault("code", "")
+            data.setdefault("message", "")
+        return data
 
     try:
         from orchestratord.events.agent_events import (
@@ -159,18 +139,56 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
             "turn_complete": "TurnComplete",
             "session_complete": "SessionComplete",
             "error": "Error",
+            "approval_request": "ApprovalRequest",
+            "phase_complete": "PhaseComplete",
+            "unknown": "UnknownEvent",
         }
         frame = {
             "type": type_map.get(kind_value, event.__class__.__name__),
             "data": _event_to_broadcast_dict(event),
         }
+        # New consumers can join the logical conversation directly; legacy
+        # consumers that construct bare sessions retain the old frame shape.
+        if getattr(session, "conversation_id", None) or getattr(session, "run_id", None):
+            frame.update({
+                "conversation_id": getattr(session, "conversation_id", None),
+                "run_id": getattr(session, "run_id", None),
+                "backend": getattr(session, "backend_name", None),
+                "backend_session_id": getattr(session, "backend_session_id", None),
+                "stage_id": getattr(session, "stage_id", None),
+                "branch_id": getattr(session, "branch_id", None),
+                "parent_run_id": getattr(session, "parent_run_id", None),
+            })
         if session.control_socket is not None:
             await session.control_socket.send_event(frame)
+        conversation_id = getattr(session, "conversation_id", None)
+        if conversation_id and getattr(session, "run_id", None):
+            try:
+                from .conversation_store import ConversationStore
+
+                ConversationStore().register_run(
+                    conversation_id=conversation_id,
+                    run_id=session.run_id,
+                    backend=getattr(session, "backend_name", None),
+                    backend_session_id=getattr(session, "backend_session_id", None),
+                    issue_id=getattr(getattr(session, "issue", None), "id", None),
+                    parent_run_id=getattr(session, "parent_run_id", None),
+                    stage_id=getattr(session, "stage_id", None),
+                    stage_name=getattr(session, "stage_name", None),
+                    branch_id=getattr(session, "branch_id", None),
+                )
+            except Exception:
+                logger.debug("conversation manifest event update failed", exc_info=True)
         # Persist to transcript so the chat UI can replay history after
         # a page refresh and the CLI can tail a live run.
         transcript_frame = dict(frame)
         transcript_frame["ts"] = getattr(event, "timestamp", None)
-        _write_transcript_frame(getattr(session, "run_id", None), transcript_frame)
+        _write_transcript_frame(
+            getattr(session, "run_id", None),
+            transcript_frame,
+            session=session,
+            event=event,
+        )
     except Exception:
         pass
 
@@ -202,7 +220,13 @@ def _transcript_message_from_frame(frame: dict) -> dict:
             "content": [
                 {
                     "type": "tool_use",
-                    "id": str(data.get("tool_use_id") or ""),
+                    "id": str(
+                        data.get("tool_use_id")
+                        or data.get("call_id")
+                        or data.get("toolCallId")
+                        or data.get("callId")
+                        or ""
+                    ),
                     "name": str(data.get("tool_name", "")),
                     "input": data.get("params", {}),
                     "turn": data.get("turn"),
@@ -216,7 +240,13 @@ def _transcript_message_from_frame(frame: dict) -> dict:
             "content": [
                 {
                     "type": "tool_result",
-                    "tool_use_id": str(data.get("tool_use_id") or ""),
+                    "tool_use_id": str(
+                        data.get("tool_use_id")
+                        or data.get("call_id")
+                        or data.get("toolCallId")
+                        or data.get("callId")
+                        or ""
+                    ),
                     "content": data.get("result"),
                     "is_error": data.get("is_error", False),
                     "turn": data.get("turn"),
@@ -229,6 +259,12 @@ def _transcript_message_from_frame(frame: dict) -> dict:
             "role": "user",
             "content": [{"type": "text", "text": str(data.get("hint_snippet", ""))}],
             "origin": "inject",
+        }
+    if frame_type == "UserMessage":
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": str(data.get("content", ""))}],
+            "origin": data.get("origin", "prompt"),
         }
     if frame_type == "Error":
         return {
@@ -245,7 +281,13 @@ def _transcript_message_from_frame(frame: dict) -> dict:
     return msg
 
 
-def _write_transcript_frame(run_id: str | None, frame: dict) -> None:
+def _write_transcript_frame(
+    run_id: str | None,
+    frame: dict,
+    *,
+    session: Any | None = None,
+    event: Any | None = None,
+) -> None:
     """Append a frame to the session transcript JSONL file.
 
     The frame is stored as a claude-style message (see
@@ -264,6 +306,70 @@ def _write_transcript_frame(run_id: str | None, frame: dict) -> None:
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
         entry = _transcript_message_from_frame(frame)
         entry["ts"] = frame.get("ts") or _time.time()
+        data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+        kind = getattr(getattr(event, "kind", None), "value", None) or str(frame.get("type", "unknown"))
+        entry.update({
+            "schema_version": 2,
+            "conversation_id": getattr(session, "conversation_id", None),
+            "run_id": run_id,
+            "backend": getattr(session, "backend_name", None),
+            "backend_session_id": getattr(session, "backend_session_id", None),
+            "stage_id": getattr(session, "stage_id", None),
+            "stage_name": getattr(session, "stage_name", None),
+            "branch_id": getattr(session, "branch_id", None),
+            "parent_run_id": getattr(session, "parent_run_id", None),
+            "seq": getattr(event, "seq", None),
+            "timestamp": getattr(event, "timestamp", None) or entry["ts"],
+            "kind": kind,
+        })
+        # Keep the normalized projection flat for old readers, while also
+        # exposing the v2 family envelopes for field-presence rendering.
+        for key, value in data.items():
+            if key not in {"content"} or "content" not in entry:
+                entry[key] = value
+        if kind in ("text", "text_delta"):
+            entry.setdefault("text", data.get("text", data.get("delta", data.get("content", ""))))
+            if kind == "text_delta":
+                entry.setdefault("delta", data.get("delta", data.get("text", data.get("content", ""))))
+        if kind in ("tool_call", "tool_result") or any(
+            key in data for key in ("call_id", "callId", "tool_use_id", "toolCallId", "name", "tool_name")
+        ):
+            entry["tool"] = {
+                "call_id": data.get(
+                    "call_id", data.get("tool_use_id", data.get("toolCallId", data.get("callId")))
+                ),
+                "name": data.get("name", data.get("tool_name")),
+                "arguments": data.get("arguments", data.get("input", data.get("params"))),
+                "result": data.get("result", data.get("output")),
+                "output": data.get("output"),
+                "ok": data.get("ok"),
+                "is_error": data.get("is_error", data.get("isError")),
+            }
+        if kind.startswith("approval") or any(key in data for key in ("request_id", "decision", "deny_reason")):
+            entry["approval"] = {key: data.get(key) for key in (
+                "request_id", "call_id", "callId", "tool_name", "arguments", "message", "decision", "deny_reason"
+            )}
+        if any(key in data for key in ("thinking", "reasoning", "reasoning_text", "reasoning-delta")):
+            entry["reasoning"] = {
+                "text": data.get(
+                    "thinking", data.get("reasoning", data.get("reasoning_text", data.get("reasoning-delta")))
+                ),
+                "is_summary": bool(data.get("is_summary", False)),
+            }
+        if isinstance(data.get("usage"), dict) or any(key in data for key in ("input_tokens", "output_tokens", "total_tokens", "total_cost_usd")):
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            entry["usage"] = {
+                "input_tokens": usage.get("input_tokens", data.get("input_tokens")),
+                "output_tokens": usage.get("output_tokens", data.get("output_tokens")),
+                "total_tokens": usage.get("total_tokens", data.get("total_tokens")),
+                "cost_usd": usage.get("cost_usd", data.get("total_cost_usd")),
+            }
+        if any(key in data for key in ("turn", "turn_delta", "phase", "status", "reason", "error_code", "error_message", "code", "message")):
+            entry["lifecycle"] = {key: data.get(key) for key in (
+                "turn", "turn_delta", "phase", "turn_count", "reason", "status", "code", "error_code", "error_message", "message"
+            )}
+        if "raw" in data and data.get("raw") is not None:
+            entry["raw"] = data["raw"]
         line = json.dumps(entry, ensure_ascii=False, default=str)
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")

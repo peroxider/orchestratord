@@ -686,7 +686,21 @@ class ClawcodexSession:
                 kind=EventKind.SESSION_COMPLETE,
                 payload=payload,
             )
-        return None
+        # Keep forward-compatible SDK events visible to the common
+        # transcript/event stream instead of silently discarding them.
+        raw = (
+            dict(event)
+            if isinstance(event, dict)
+            else vars(event)
+            if hasattr(event, "__dict__")
+            else {"value": str(event)}
+        )
+        return EventEnvelope(
+            seq=self._next_seq(),
+            timestamp=self._now(),
+            kind=EventKind.UNKNOWN,
+            payload={"event": type(event).__name__, "raw": raw},
+        )
 
     # ------------------------------------------------------------------
     # Internal: helpers

@@ -44,6 +44,7 @@ class Checkpoint:
     run_context: dict[str, Any] | None = None
     issue_context: dict[str, Any] | None = None
     finished_at: str | None = None
+    conversation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -74,6 +75,7 @@ class Checkpoint:
             "run_context": self.run_context,
             "issue_context": self.issue_context,
             "finished_at": self.finished_at,
+            "conversation_id": self.conversation_id,
         }
 
     @classmethod
@@ -114,6 +116,7 @@ class Checkpoint:
             run_context=run_context,
             issue_context=issue_context,
             finished_at=data.get("finished_at"),
+            conversation_id=data.get("conversation_id"),
         )
 
 
@@ -164,6 +167,7 @@ class CheckpointManager:
             run_context=_serialize_run_context(state.run_context or state.issue_context),
             issue_context=_serialize_run_context(state.run_context or state.issue_context),
             finished_at=state.finished_at,
+            conversation_id=state.conversation_id,
         )
 
         try:
@@ -219,6 +223,7 @@ class CheckpointManager:
         state.run_context = checkpoint.run_context or checkpoint.issue_context
         state.issue_context = state.run_context
         state.finished_at = checkpoint.finished_at
+        state.conversation_id = checkpoint.conversation_id or (state.run_context or {}).get("conversation_id")
         state.decision_history = DecisionHistory.from_dict_list(checkpoint.decision_history)
         # 兼容旧检查点：workflow_state_metadata 与 metadata 同义
         if checkpoint.workflow_state_metadata:

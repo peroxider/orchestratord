@@ -43,7 +43,7 @@ class IssueRecord:
     # File-format version guard. All writers ship the same release, so
     # this is a forward guard only: a registry written by a NEWER build
     # refuses to load in this build instead of silently misreading.
-    schema_version: int = 1
+    schema_version: int = 2
     branch_name: str | None = None
     commit_sha: str | None = None
     pr_number: str | None = None
@@ -125,6 +125,9 @@ class IssueRecord:
     # Comment-command incremental-scan cursor.
     command_cursor: str | None = None
     run_id: str | None = None
+    # Stable logical conversation identity.  Older registry files omit this
+    # field and are loaded as None until the next logical run.
+    conversation_id: str | None = None
     debug_log_path: str | None = None
     run_turn_count: int = 0
     run_tool_count: int = 0

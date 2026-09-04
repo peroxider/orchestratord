@@ -36,8 +36,9 @@ from .approval_policy import (
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
 from .control_socket import ControlSocket
+from .conversation_store import ensure_conversation_id
 from .prompt_builder import PromptBuilder
-from .runner_utils import _broadcast_to_socket, _drain_control_commands
+from .runner_utils import _broadcast_to_socket, _drain_control_commands, _write_transcript_frame
 from .session_state import AgentSession, RunSession, RunSubject
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,7 @@ class BackendRunner:
             python_executable=task.context.get("issue_python_executable", ""),
             priority=task.priority,
         )
+        task.conversation_id = ensure_conversation_id(task.conversation_id)
         session = RunSession(
             issue=subject,
             task=task,
@@ -289,6 +291,11 @@ class BackendRunner:
             run_id=f"{task.id}-{uuid.uuid4().hex[:8]}",
             attempt=task.attempt,
             previous_run_ids=task.previous_run_ids,
+            conversation_id=task.conversation_id,
+            stage_id=str(task.context.get("stage_id")) if task.context.get("stage_id") is not None else None,
+            stage_name=str(task.context.get("stage_name")) if task.context.get("stage_name") is not None else None,
+            branch_id=str(task.context.get("branch_id")) if task.context.get("branch_id") is not None else None,
+            parent_run_id=task.context.get("parent_run_id"),
             prompt_override=task.prompt_override,
         )
 
@@ -319,6 +326,7 @@ class BackendRunner:
         result = AgentTaskResult(
             task_id=task.id,
             kind=task.kind,
+            conversation_id=session.conversation_id,
             status=session.status or "completed",
             output_text=session.output_text,
             turn_count=session.turn_count,
@@ -376,6 +384,7 @@ class BackendRunner:
         # transcript to resume.  A run id generated below identifies this
         # fresh run and must never be fed back as ``resume_session_id``.
         resume_session_id = session.run_id
+        session.conversation_id = ensure_conversation_id(session.conversation_id)
         if session.run_id is None:
             session.run_id = self._build_run_id(session)
 
@@ -588,6 +597,12 @@ class BackendRunner:
         # channel change. Raw $VAR api_key references are forwarded
         # unresolved — the consuming backend owns resolution + reporting.
         extra.update(providers_extra(self.agent_config))
+        # Observability-only identity metadata.  Backend adapters must not
+        # interpret these values as native resume keys.
+        for key in ("conversation_id", "parent_run_id", "stage_id", "branch_id"):
+            value = getattr(session, key, None)
+            if value is not None:
+                extra[key] = value
         total_timeout_s = self.agent_config.run_timeout_ms / 1000.0
         inactivity_timeout_s = self.agent_config.stall_timeout_ms / 1000.0
         stall_warn_s = self.agent_config.stall_warn_ms / 1000.0
@@ -695,6 +710,33 @@ class BackendRunner:
 
         # Create the SPI session.
         spi_session = self.backend.create_session(spec)
+        # The backend-native id is obtained only after the SPI session exists;
+        # it must never be used as the logical conversation id.
+        session.backend_name = getattr(self.backend, "name", None)
+        session.backend_session_id = getattr(spi_session, "session_id", None)
+        try:
+            from .conversation_store import ConversationStore
+
+            if session.conversation_id and session.run_id:
+                ConversationStore().register_run(
+                    conversation_id=session.conversation_id,
+                    run_id=session.run_id,
+                    backend=session.backend_name,
+                    backend_session_id=session.backend_session_id,
+                    issue_id=getattr(session.issue, "id", None),
+                    parent_run_id=session.parent_run_id,
+                    stage_id=session.stage_id,
+                    stage_name=session.stage_name,
+                    branch_id=session.branch_id,
+                    started_at=session.started_at,
+                )
+        except Exception:
+            logger.debug("conversation manifest registration failed", exc_info=True)
+        if diagnostics_callback is not None:
+            try:
+                diagnostics_callback(session)
+            except Exception:
+                logger.debug("native session diagnostics callback failed", exc_info=True)
         session_context = {
             "issue_id": session.issue.id,
             "workspace_path": str(session.workspace.path),
@@ -741,6 +783,15 @@ class BackendRunner:
 
         try:
             # Send the prompt and start processing events.
+            _write_transcript_frame(
+                session.run_id,
+                {
+                    "type": "UserMessage",
+                    "data": {"content": getattr(session, "_user_prompt", "") or "", "origin": "prompt"},
+                    "ts": time.time(),
+                },
+                session=session,
+            )
             await spi_session.send(getattr(session, "_user_prompt", "") or "")
             await self._process_events(
                 spi_session, session, session_context,
@@ -764,6 +815,19 @@ class BackendRunner:
                     endpoint_file.unlink(missing_ok=True)
                 except OSError:
                     logger.debug("control endpoint cleanup failed", exc_info=True)
+            try:
+                from .conversation_store import ConversationStore
+
+                if session.conversation_id and session.run_id:
+                    ConversationStore().update_run(
+                        session.conversation_id,
+                        session.run_id,
+                        status="completed" if session.status == "completed" else "failed",
+                        finished_at=time.time(),
+                        backend_session_id=session.backend_session_id,
+                    )
+            except Exception:
+                logger.debug("conversation manifest completion update failed", exc_info=True)
 
     @staticmethod
     async def _start_control_socket(session: AgentSession) -> bool:
@@ -916,6 +980,8 @@ class BackendRunner:
 
             kind = event.kind if event is not None else None
             payload = event.payload if event is not None else {}
+            if kind == EventKind.SESSION_COMPLETE and payload.get("session_id"):
+                session.backend_session_id = str(payload["session_id"])
 
             # Keep the operator-visible diagnostics alive —
             # Turns/Tools/Output Chars used to be written once at run

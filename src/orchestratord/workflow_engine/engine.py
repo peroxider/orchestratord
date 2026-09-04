@@ -200,6 +200,7 @@ class WorkflowResult:
     total_stages: int
     total_cost_usd: float
     total_duration_seconds: float
+    conversation_id: str | None = None
     error: str | None = None
     stage_results: dict[int, StageResult] = field(default_factory=dict)
     # Stage_id -> backend session run_id, for `run logs`.
@@ -308,6 +309,7 @@ class DeclarativeWorkflowEngine:
                 total_cost_usd=0.0,
                 total_duration_seconds=0.0,
                 error=str(exc),
+                conversation_id=self.state.conversation_id,
             )
 
         # 初始化所有阶段状态
@@ -464,6 +466,7 @@ class DeclarativeWorkflowEngine:
             total_cost_usd=self.cost_tracker.total_usd,
             total_duration_seconds=total_duration,
             error=error_msg,
+            conversation_id=self.state.conversation_id,
             stage_results=dict(self.state.stage_results),
             stage_run_ids={
                 sid: res.run_id
@@ -701,6 +704,7 @@ class DeclarativeWorkflowEngine:
             artifacts=getattr(run_result, "artifacts", {}),
             cost_usd=cost,
             run_id=getattr(run_result, "run_id", None),
+            conversation_id=self.state.conversation_id,
         )
 
     async def _run_gate_stage(self, stage: StageNode) -> StageResult:

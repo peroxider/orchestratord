@@ -1824,6 +1824,10 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const attention = attentionFor(issue);
       const runSubtitle = attention ? attention.detail : outcomeFor(issue);
       const facts = [
+        issue.conversation_id ? `<span>conversation <strong class="mono">${esc(issue.conversation_id)}</strong></span>` : "",
+        issue.execution && issue.execution.backend ? `<span>backend <strong>${esc(issue.execution.backend)}</strong></span>` : "",
+        issue.stage_id ? `<span>stage <strong>${esc(issue.stage_id)}</strong></span>` : "",
+        issue.branch_id ? `<span>branch <strong>${esc(issue.branch_id)}</strong></span>` : "",
         issue.collaboration_mode ? `<span>mode <strong>${esc(issue.collaboration_mode)}</strong></span>` : "",
         issue.branch_name ? `<span>branch <strong class="mono">${esc(issue.branch_name)}</strong></span>` : "",
         issue.commit_sha ? `<span>commit <strong class="mono">${esc(shortSha(issue.commit_sha))}</strong></span>` : "",

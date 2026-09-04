@@ -28,6 +28,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from ..chat_gateway import ChatGateway
+from ..conversation_store import ConversationStore
 from ..event_tailer import EventTailerManager
 from ..paths import ORCHESTRATOR_DIR, ORCHESTRATORD_BASE
 from ..run_read_model import RunReadModel
@@ -564,6 +565,54 @@ def _build_dashboard_html() -> str:
     )
 
 
+def _conversation_transcript_rows(conversation_id: str) -> list[dict[str, Any]]:
+    """Read all v2/legacy transcript rows referenced by a manifest."""
+    manifest = ConversationStore().get(conversation_id)
+    if not manifest:
+        return []
+    rows: list[dict[str, Any]] = []
+    for run in manifest.get("runs", []):
+        run_id = str(run.get("run_id") or "")
+        if not run_id or "/" in run_id or "\\" in run_id:
+            continue
+        path = Path.home() / ".orchestratord" / "sessions" / run_id / "transcript.jsonl"
+        if not path.exists():
+            path = Path.home() / ".cache" / "orchestratord" / "sessions" / run_id / "transcript.jsonl"
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(row, dict):
+                        continue
+                    # Old rows have no identity metadata; the manifest is
+                    # authoritative for their owning run.
+                    row.setdefault("run_id", run_id)
+                    row.setdefault("conversation_id", conversation_id)
+                    for key in ("backend", "backend_session_id", "stage_id", "branch_id", "parent_run_id"):
+                        if key not in row and run.get(key) is not None:
+                            row[key] = run[key]
+                    rows.append(row)
+        except (FileNotFoundError, OSError):
+            continue
+    def _sort_key(row: dict[str, Any]) -> tuple[float, int]:
+        value = row.get("timestamp", row.get("ts", 0))
+        try:
+            stamp = float(value)
+        except (TypeError, ValueError):
+            stamp = 0.0
+        try:
+            seq = int(row.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        return stamp, seq
+
+    rows.sort(key=_sort_key)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # HTTP server
 # ---------------------------------------------------------------------------
@@ -876,11 +925,54 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if rid:
                     runs.append({
                         "run_id": rid,
+                        "conversation_id": issue.get("conversation_id") or rid,
+                        "backend": (issue.get("execution") or {}).get("backend", ""),
+                        "stage_id": issue.get("stage_id"),
+                        "branch_id": issue.get("branch_id"),
                         "issue_id": issue["issue_id"],
                         "status": issue["status"],
                         "workspace_path": issue.get("workspace_path", ""),
                     })
             self._send_json({"runs": runs, "server_ts": time.time()})
+            return
+
+        if path == "/api/conversations":
+            manifests = ConversationStore().list()
+            self._send_json({
+                "conversations": [
+                    {
+                        **manifest,
+                        "run_count": len(manifest.get("runs", [])),
+                    }
+                    for manifest in manifests
+                ],
+                "server_ts": time.time(),
+            })
+            return
+
+        if path.startswith("/api/conversations/"):
+            suffix = path[len("/api/conversations/") :]
+            if "/" in suffix:
+                conversation_id, operation = suffix.split("/", 1)
+            else:
+                conversation_id, operation = suffix, ""
+            if not conversation_id or "/" in conversation_id or "\\" in conversation_id:
+                self._send_json({"error": "invalid conversation id"}, status=400)
+                return
+            manifest = ConversationStore().get(conversation_id)
+            if manifest is None:
+                manifest = ConversationStore().ensure_legacy_run(conversation_id)
+            if manifest is None:
+                self._send_json({"error": "conversation not found", "conversation_id": conversation_id}, status=404)
+                return
+            if operation == "events":
+                self._stream_conversation_events(conversation_id)
+                return
+            if operation:
+                self.send_error(404, "Not Found")
+                return
+            rows = _conversation_transcript_rows(conversation_id)
+            self._send_json({"conversation": manifest, "events": rows, "conversation_id": conversation_id})
             return
 
         if path.startswith("/api/runs/") and path.endswith("/events"):
@@ -936,6 +1028,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path or "/"
+        conversation_prefix = "/api/conversations/"
+        if path.startswith(conversation_prefix) and path.endswith("/messages"):
+            conversation_id = path[len(conversation_prefix) : -len("/messages")]
+            if not conversation_id or "/" in conversation_id or "\\" in conversation_id:
+                self._send_json({"error": "invalid conversation id"}, status=400)
+                return
+            body: dict[str, Any] = {}
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+                if content_length > 64 * 1024:
+                    self._send_json({"error": "request body too large"}, status=413)
+                    return
+                if content_length:
+                    body = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                    if not isinstance(body, dict):
+                        raise ValueError("request body must be an object")
+            except (ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                self._send_json({"error": "invalid JSON body"}, status=400)
+                return
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                self._send_json({"error": "text is required"}, status=400)
+                return
+            manifest = ConversationStore().get(conversation_id)
+            if manifest is None:
+                self._send_json({"error": "conversation not found"}, status=404)
+                return
+            runs = manifest.get("runs", [])
+            run_id = next((str(run.get("run_id")) for run in reversed(runs) if run.get("status") == "running"), None)
+            if run_id and self.state.chat_gateway.send_message(run_id, text.strip()):
+                self._send_json({"accepted": True, "conversation_id": conversation_id, "run_id": run_id}, status=202)
+                return
+            if runs:
+                run_id = str(runs[-1].get("run_id") or "")
+                if run_id and _followup_completed_run(self.state.workspace, run_id, text.strip()):
+                    self._send_json({"accepted": True, "conversation_id": conversation_id, "run_id": run_id, "mode": "followup_queued"}, status=202)
+                    return
+            self._send_json({"error": "conversation has no writable run", "conversation_id": conversation_id}, status=409)
+            return
+
         prefix = "/api/runs/"
         if not path.startswith(prefix):
             self.send_error(404, "Not Found")
@@ -1183,6 +1315,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
             logger.debug("Chat SSE disconnected for run_id=%s: %s", run_id, exc)
         finally:
             gw.unsubscribe(run_id, live)
+
+    def _stream_conversation_events(self, conversation_id: str) -> None:
+        """SSE stream for a logical conversation, retaining run metadata."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            rows = _conversation_transcript_rows(conversation_id)
+            self._write_sse({
+                "type": "conversation",
+                "conversation_id": conversation_id,
+                "events": rows,
+            })
+            self._write_sse({"type": "boundary", "conversation_id": conversation_id})
+            sent = len(rows)
+            while True:
+                time.sleep(self.state.snapshot_interval)
+                rows = _conversation_transcript_rows(conversation_id)
+                for row in rows[sent:]:
+                    self._write_sse({
+                        "type": "event",
+                        "conversation_id": conversation_id,
+                        "event": row,
+                    })
+                sent = len(rows)
+                self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
 
 class DashboardHTTPServer(ThreadingHTTPServer):

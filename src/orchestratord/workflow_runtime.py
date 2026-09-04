@@ -59,6 +59,7 @@ class WorkflowRunner:
         self.engine.state = WorkflowState(
             workflow_name=self.schema.name,
             workflow_version=self.schema.version,
+            conversation_id=task.conversation_id,
         )
         self.engine.state.run_context = {
             "id": task.id,

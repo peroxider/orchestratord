@@ -16,7 +16,7 @@ Translation table → :class:`EventEnvelope` / :class:`EventKind`:
 * assistant ``text`` block          → ``TEXT_DELTA``
 * assistant ``tool_use`` block      → ``TOOL_CALL``
 * user    ``tool_result`` block     → ``TOOL_RESULT``
-* assistant ``thinking`` block      → dropped (we don't expose thinking)
+* assistant ``thinking`` block      → ``UNKNOWN`` with a raw/reasoning payload
 * ``result``                        → ``TURN_COMPLETE`` + ``SESSION_COMPLETE`` with cost
 * spawn / parse / CLI-error         → ``ERROR``
 
@@ -322,8 +322,17 @@ class ClaudeSession:
             return self._translate_assistant(evt)
         if etype == "user":
             return self._translate_user(evt)
-        # ``system`` (init/hooks) and anything else we don't model → drop.
-        return []
+        # Keep system and future provider events auditable.  They are
+        # intentionally marked UNKNOWN so renderers can show a collapsed raw
+        # event without mistaking it for user-visible assistant text.
+        return [
+            EventEnvelope(
+                seq=self._next_seq(),
+                timestamp=self._now(),
+                kind=EventKind.UNKNOWN,
+                payload={"event": etype, "raw": dict(evt)},
+            )
+        ]
 
     def _translate_assistant(self, evt: dict[str, Any]) -> list[EventEnvelope]:
         """Translate an assistant message into TEXT_DELTA / TOOL_CALL events."""
@@ -352,10 +361,23 @@ class ClaudeSession:
                             "call_id": str(block.get("id", "")),
                             "name": str(block.get("name", "")),
                             "arguments": block.get("input", {}) or {},
+                            "session_id": evt.get("session_id"),
                         },
                     )
                 )
-            # ``thinking`` blocks are intentionally ignored.
+            elif btype == "thinking":
+                out.append(
+                    EventEnvelope(
+                        seq=self._next_seq(),
+                        timestamp=self._now(),
+                        kind=EventKind.UNKNOWN,
+                        payload={
+                            "thinking": str(block.get("thinking", "")),
+                            "session_id": evt.get("session_id"),
+                            "raw": dict(block),
+                        },
+                    )
+                )
 
         if text_parts:
             out.insert(

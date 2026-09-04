@@ -77,6 +77,9 @@ class AgentSession(Protocol):
     """
 
     session_id: str
+    # Optional orchestrator-level identity; native ``session_id`` remains
+    # the backend resume/debug key.
+    conversation_id: str | None
     capabilities: BackendCapabilities
 
     async def send(self, content: str | list[Any]) -> None:

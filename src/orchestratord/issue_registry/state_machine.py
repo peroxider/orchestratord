@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from ..conversation_store import ensure_conversation_id
 from .models import TERMINAL_STATUSES, IssueRecord, IssueStatus
 
 
@@ -127,6 +128,9 @@ class StateMachineMixin:
             sequence_index=sequence_index,
             status=status or IssueStatus.PENDING,
             author_login=author_login,
+            conversation_id=(
+                existing.conversation_id if existing is not None else ensure_conversation_id()
+            ),
         )
         if existing is not None:
             record.commit_sha = existing.commit_sha

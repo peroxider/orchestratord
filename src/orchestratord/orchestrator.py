@@ -2211,6 +2211,8 @@ class Orchestrator:
         session = AgentSession(
             issue=issue,
             workspace=workspace,
+            conversation_id=record.conversation_id if record is not None else None,
+            parent_run_id=record.run_id if record is not None else None,
             pause_resume_event=asyncio.Event(),
             event_queue=asyncio.Queue(),
         )
@@ -2784,6 +2786,8 @@ class Orchestrator:
         session = AgentSession(
             issue=issue,
             workspace=workspace,
+            conversation_id=followup.record.conversation_id,
+            parent_run_id=followup.record.run_id,
             pause_resume_event=asyncio.Event(),
             event_queue=asyncio.Queue(),
             prompt_override=prompt,
@@ -2883,7 +2887,13 @@ class Orchestrator:
         recorded_workspace_path = (
             str(self._workspace_root) if workspace_strategy == "sequential" else str(workspace.path)
         )
-        self._registry.register(
+        existing_record = self._registry.get(issue.id or "")
+        parent_run_id = (
+            existing_record.run_id
+            if existing_record is not None and existing_record.run_id
+            else (existing_record.previous_run_ids[-1] if existing_record and existing_record.previous_run_ids else None)
+        )
+        record = self._registry.register(
             issue_id=issue.id or "",
             issue_identifier=issue.identifier or "",
             branch_name=branch_name,
@@ -3003,6 +3013,8 @@ class Orchestrator:
         session = AgentSession(
             issue=issue,
             workspace=workspace,
+            conversation_id=record.conversation_id,
+            parent_run_id=parent_run_id,
             pause_resume_event=asyncio.Event(),
             event_queue=asyncio.Queue(),
         )
@@ -3103,6 +3115,8 @@ class Orchestrator:
         # session so the agent + git_sync know to reuse the existing
         # branch / PR rather than create a new run.
         self._prepare_intent_session(session)
+        if session.run_kind == "review_followup":
+            session.stage_id = "review_followup"
         # Retry context: propagate previous_run_ids from the registry
         # to the session so the prompt builder can inject them.
         prev_record = self._registry.get(issue.id or "")
@@ -3486,6 +3500,7 @@ class Orchestrator:
                     clarification_source=session.clarification_source,
                     conflict_files=session.conflict_files,
                     prompt_override=session.prompt_override,
+                    conversation_id=session.conversation_id,
                 )
                 ran_agent = True
                 try:

@@ -322,6 +322,21 @@ class OpenCodeSession:
                 tool_name=str(payload.get("tool_name", "")),
                 arguments=payload.get("arguments", {}) or {},
             )
+            self._events.append(
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.APPROVAL_REQUEST,
+                    payload={
+                        "request_id": request_id,
+                        "call_id": payload.get("call_id", ""),
+                        "tool_name": payload.get("tool_name", ""),
+                        "arguments": payload.get("arguments", {}) or {},
+                        "message": payload.get("message", ""),
+                        "raw": dict(payload),
+                    },
+                )
+            )
         elif kind == "turn.complete":
             reason = payload.get("reason", "success")
             self._events.append(
@@ -344,9 +359,17 @@ class OpenCodeSession:
                     },
                 )
             )
-        # Unknown event kinds are silently dropped — they may be
-        # forward-compat additions the orchestrator core has not yet
-        # learned about.
+        else:
+            # Preserve forward-compatible provider events instead of making
+            # them disappear from the normalized stream.
+            self._events.append(
+                EventEnvelope(
+                    seq=self._next_seq(),
+                    timestamp=self._now(),
+                    kind=EventKind.UNKNOWN,
+                    payload={"event": kind, "raw": dict(payload)},
+                )
+            )
 
     # --- SPI async-iterator -------------------------------------------
 

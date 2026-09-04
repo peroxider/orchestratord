@@ -23,6 +23,13 @@ class RunRecord:
     cost_usd: float = 0.0
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    conversation_id: str | None = None
+
+    def __post_init__(self) -> None:
+        # A run created by the pre-conversation store is still queryable as a
+        # one-run conversation without a migration pass.
+        if self.conversation_id is None:
+            self.conversation_id = self.run_id
 
 
 class RunStore:
@@ -41,7 +48,9 @@ class RunStore:
         path = self.root / run_id / "run.json"
         if not path.exists():
             return None
-        return RunRecord(**json.loads(path.read_text(encoding="utf-8")))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("conversation_id", run_id)
+        return RunRecord(**data)
 
     def list(self, status: str | None = None) -> list[RunRecord]:
         records: list[RunRecord] = []
@@ -49,7 +58,9 @@ class RunStore:
             return records
         for path in self.root.glob("*/run.json"):
             try:
-                record = RunRecord(**json.loads(path.read_text(encoding="utf-8")))
+                data = json.loads(path.read_text(encoding="utf-8"))
+                data.setdefault("conversation_id", path.parent.name)
+                record = RunRecord(**data)
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 continue
             if status is None or record.status == status:

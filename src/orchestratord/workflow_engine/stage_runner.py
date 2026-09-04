@@ -183,6 +183,7 @@ class StageRunner:
                     prompt=self._build_decision_prompt(stage_node, state),
                     stage_node=stage_node,
                     parent_task=(state.run_context or state.issue_context or {}).get("task"),
+                    state=state,
                 )
                 output_text = session.output_text if session else ""
                 outcome = self._parse_decision_outcome(output_text, stage_node)
@@ -239,6 +240,7 @@ class StageRunner:
             prompt=prompt,
             stage_node=stage_node,
             parent_task=(state.run_context or state.issue_context or {}).get("task"),
+            state=state,
         )
 
         if session is None:
@@ -269,6 +271,7 @@ class StageRunner:
         prompt: str,
         stage_node: StageNode,
         parent_task: Any = None,
+        state: WorkflowState | None = None,
     ) -> Any:
         """Build a generic work unit and execute it through the capability API."""
 
@@ -281,6 +284,7 @@ class StageRunner:
             task = AgentTask(
                 id=f"stage-{stage_node.id:02d}",
                 kind="workflow_stage",
+                conversation_id=getattr(state, "conversation_id", None),
                 title=f"[{stage_node.phase}] {stage_node.name}",
                 description=prompt,
                 context={
@@ -358,7 +362,7 @@ class StageRunner:
                 f"Stage: {stage_node.name}\n"
                 f"Prompt: {stage_node.prompt}\n"
             )
-            session = await self._run_agent_task(prompt=prompt, stage_node=stage_node)
+            session = await self._run_agent_task(prompt=prompt, stage_node=stage_node, state=state)
             output_text = session.output_text if session else ""
             score = self._extract_score(output_text)
             approved = score >= stage_node.gate_threshold

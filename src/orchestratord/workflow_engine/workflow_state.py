@@ -93,6 +93,7 @@ class StageResult:
     decision_next_stage: int | None = None
     # Backend session run_id for `run logs` transcript resolution.
     run_id: str | None = None
+    conversation_id: str | None = None
     timestamp: str = field(
         default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     )
@@ -106,6 +107,7 @@ class WorkflowState:
     """
 
     workflow_name: str
+    conversation_id: str | None = None
     workflow_version: str = "1.0"
     current_stage: int = 0
     completed_stages: list[int] = field(default_factory=list)

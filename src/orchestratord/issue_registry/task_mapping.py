@@ -26,6 +26,7 @@ def issue_to_agent_task(
     clarification_source: str | None = None,
     conflict_files: tuple[str, ...] | None = None,
     prompt_override: str | None = None,
+    conversation_id: str | None = None,
 ) -> AgentTask:
     """Convert an Issue to a generic AgentTask.
 
@@ -62,6 +63,7 @@ def issue_to_agent_task(
     return AgentTask(
         id=issue.id or "",
         kind="issue",
+        conversation_id=conversation_id,
         title=issue.title or "",
         description=issue.description or "",
         context=context,

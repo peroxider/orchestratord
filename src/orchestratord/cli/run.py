@@ -12,6 +12,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..conversation_store import ensure_conversation_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -119,6 +121,7 @@ async def _start(args: argparse.Namespace) -> int:
     task = AgentTask(
         id=str(data.get("id") or "manual-run"),
         kind=str(data.get("kind") or "generic"),
+        conversation_id=ensure_conversation_id(data.get("conversation_id")),
         title=str(data.get("title") or "Manual workflow run"),
         description=str(data.get("description") or ""),
         context=dict(data.get("context") or {}),
@@ -128,6 +131,7 @@ async def _start(args: argparse.Namespace) -> int:
     )
     record = RunRecord(
         run_id=run_id,
+        conversation_id=task.conversation_id,
         workflow=orchestrator.schema.name,
         task_id=task.id,
         task_kind=task.kind,
@@ -161,6 +165,7 @@ async def _start(args: argparse.Namespace) -> int:
     store.save(record)
     print(json.dumps({
         "run_id": run_id,
+        "conversation_id": task.conversation_id,
         "success": result.success,
         "workflow": result.workflow_name,
         "completed_stages": result.completed_stages,

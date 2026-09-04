@@ -356,6 +356,7 @@ class WorkflowOrchestrator:
             "labels": task.labels,
             "task": task,
         }
+        self._engine.state.conversation_id = task.conversation_id
         # Compatibility for old checkpoints and integrations. New engine
         # code reads ``run_context``.
         self._engine.state.issue_context = self._engine.state.run_context

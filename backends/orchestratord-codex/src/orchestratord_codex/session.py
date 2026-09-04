@@ -322,7 +322,13 @@ class CodexSession:
 
         item = native.get("item")
         if not isinstance(item, dict):
-            return []
+            return [
+                self._envelope(
+                    EventKind.UNKNOWN,
+                    {"event": event_type, "raw": dict(native)},
+                    timestamp=arrived_at,
+                )
+            ]
         item_type = str(item.get("type") or "")
         if event_type == "item.completed" and item_type == "agent_message":
             text = str(item.get("text") or "")
@@ -343,7 +349,13 @@ class CodexSession:
                 else []
             )
         if item_type not in _TOOL_ITEM_TYPES:
-            return []
+            return [
+                self._envelope(
+                    EventKind.UNKNOWN,
+                    {"event": event_type, "raw": dict(native)},
+                    timestamp=arrived_at,
+                )
+            ]
 
         call_id = str(item.get("id") or f"codex-tool-{self._seq + 1}")
         name, arguments = self._tool_identity(item)
@@ -357,7 +369,13 @@ class CodexSession:
             )
             return output
         if event_type != "item.completed":
-            return []
+            return [
+                self._envelope(
+                    EventKind.UNKNOWN,
+                    {"event": event_type, "raw": dict(native)},
+                    timestamp=arrived_at,
+                )
+            ]
         if call_id not in self._started_tools:
             self._started_tools.add(call_id)
             output.append(

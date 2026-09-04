@@ -53,6 +53,9 @@ class AgentTask:
     # ── Identity ──────────────────────────────────────────────
     id: str
     kind: str = "generic"
+    # Stable orchestrator-level logical conversation identity.  This is
+    # deliberately independent from a backend's native session key.
+    conversation_id: str | None = None
 
     # ── Core content ──────────────────────────────────────────
     title: str = ""
@@ -90,6 +93,7 @@ class AgentTask:
         return {
             "id": self.id,
             "kind": self.kind,
+            "conversation_id": self.conversation_id,
             "title": self.title,
             "description": self.description,
             "labels": self.labels,
@@ -110,6 +114,7 @@ class AgentTaskResult:
 
     task_id: str
     kind: str = "generic"
+    conversation_id: str | None = None
 
     # ── Terminal status ───────────────────────────────────────
     # One of: "completed", "failed", "stagnation", "loop_detected",

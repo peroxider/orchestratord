@@ -294,6 +294,9 @@ class DebateModeRunner:
         # Reset isolation still resets the original dir to baseline
         # before judge — judge starts clean and implements the winner.
         self._reset_session_for_next_stage(session)
+        session.stage_id = f"debate:{_JUDGE_STAGE}"
+        session.stage_name = _JUDGE_STAGE
+        session.branch_id = None
         if self._isolation == "reset":
             self._reset_workspace_to(session, baseline_ref)
         session.prompt_override = self._build_judge_prompt(proposer_results, session)
@@ -336,6 +339,9 @@ class DebateModeRunner:
         results: list[_StageResult] = []
         for index, name in enumerate(self._proposers):
             self._reset_session_for_next_stage(session)
+            session.stage_id = f"debate:{name}"
+            session.stage_name = name
+            session.branch_id = name
             lens = self._lens_for_index(index)
             worktree_path = self._apply_isolation_before_stage(
                 session, baseline_ref, stage_label=name
@@ -406,6 +412,9 @@ class DebateModeRunner:
         for index, name in enumerate(self._proposers):
             branch_session = self._fork_session_for_branch(session, name)
             self._reset_session_for_next_stage(branch_session)
+            branch_session.stage_id = f"debate:{name}"
+            branch_session.stage_name = name
+            branch_session.branch_id = name
             lens = self._lens_for_index(index)
             worktree_path = self._create_worktree_and_swap(
                 branch_session, baseline_ref, stage_label=name
@@ -508,6 +517,7 @@ class DebateModeRunner:
         branch.turn_count = 0
         branch.status = "running"
         branch.output_text = ""
+        branch.parent_run_id = getattr(session, "run_id", None)
         branch.run_id = None
         branch.session_end_reason = None
         branch.session_end_summary = ""
@@ -890,6 +900,8 @@ class DebateModeRunner:
         session.output_text = ""
         session.session_end_reason = None
         session.session_end_summary = ""
+        if getattr(session, "run_id", None):
+            session.parent_run_id = session.run_id
         session.run_id = None  # force a fresh transcript per stage
         session.consecutive_429_count = 0
         session.rate_limit_pending_turn = None

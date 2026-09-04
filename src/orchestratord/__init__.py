@@ -2,6 +2,7 @@
 
 from ._version import __version__, __version_info__
 from .backend_runner import BackendRunner
+from .conversation_store import ConversationStore, ensure_conversation_id
 from .session_state import AgentSession
 
 # The public runner is backend-neutral. Keep the historical name as an alias
@@ -29,6 +30,8 @@ __all__ = [
     "AgentTask",
     "AgentTaskResult",
     "AgentTaskRunner",
+    "ConversationStore",
+    "ensure_conversation_id",
     "LinearAdapter",
     "LinearGraphQLClient",
     "LocalTrackerAdapter",
