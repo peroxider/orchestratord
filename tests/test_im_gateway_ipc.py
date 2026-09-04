@@ -407,7 +407,7 @@ async def test_ipc_resolve_wildcard_origin_uses_adapter_context_token(tmp_path) 
     real inbound sender, else a persisted context-token user (survives a
     gateway restart with no new inbound)."""
     from orchestratord.channels.models import ChannelType
-    from orchestratord.im_gateway.ipc_server import _resolve_origin
+    from orchestratord.im_gateway.origin_utils import resolve_origin
 
     class _Cfg:
         type = ChannelType.WECHAT
@@ -427,7 +427,7 @@ async def test_ipc_resolve_wildcard_origin_uses_adapter_context_token(tmp_path) 
     class _Gateway:
         registry = _Registry()
 
-    channel, target = _resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, _Gateway())
+    channel, target = resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, _Gateway())
     assert channel == "wechat"
     assert target == "user@im.wechat"
 
@@ -435,7 +435,7 @@ async def test_ipc_resolve_wildcard_origin_uses_adapter_context_token(tmp_path) 
 @pytest.mark.asyncio
 async def test_ipc_resolve_feishu_wildcard_origin_uses_adapter_last_sender(tmp_path) -> None:
     from orchestratord.channels.models import ChannelType
-    from orchestratord.im_gateway.ipc_server import _resolve_origin
+    from orchestratord.im_gateway.origin_utils import resolve_origin
 
     class _Cfg:
         type = ChannelType.FEISHU
@@ -454,7 +454,7 @@ async def test_ipc_resolve_feishu_wildcard_origin_uses_adapter_last_sender(tmp_p
     class _Gateway:
         registry = _Registry()
 
-    channel, target = _resolve_origin(FEISHU_DM_ALL_ORIGIN, _Gateway())
+    channel, target = resolve_origin(FEISHU_DM_ALL_ORIGIN, _Gateway())
     assert channel == "feishu"
     assert target == "oc_chat"
 
@@ -462,7 +462,7 @@ async def test_ipc_resolve_feishu_wildcard_origin_uses_adapter_last_sender(tmp_p
 @pytest.mark.asyncio
 async def test_ipc_resolve_generic_origin_prefers_known_im_adapter_sender(tmp_path) -> None:
     from orchestratord.channels.models import ChannelType
-    from orchestratord.im_gateway.ipc_server import _resolve_origin
+    from orchestratord.im_gateway.origin_utils import resolve_origin
 
     class _Cfg:
         type = ChannelType.FEISHU
@@ -481,9 +481,84 @@ async def test_ipc_resolve_generic_origin_prefers_known_im_adapter_sender(tmp_pa
     class _Gateway:
         registry = _Registry()
 
-    channel, target = _resolve_origin(IM_DIRECT_ALL_ORIGIN, _Gateway())
+    channel, target = resolve_origin(IM_DIRECT_ALL_ORIGIN, _Gateway())
     assert channel == "feishu"
     assert target == "oc_chat"
+
+
+def test_report_targets_fan_out_and_support_targetless_webhook() -> None:
+    from orchestratord.channels.models import ChannelType
+    from orchestratord.im_gateway.origin_utils import resolve_report_targets
+
+    class _Cfg:
+        def __init__(self, channel_type):
+            self.type = channel_type
+
+    class _Adapter:
+        def __init__(self, channel_id, channel_type, recipient):
+            self.channel_id = channel_id
+            self._config = _Cfg(channel_type)
+            self._recipient = recipient
+
+        def authorized_recipients(self):
+            return [self._recipient]
+
+    wechat = _Adapter("wechat", ChannelType.WECHAT, "wx_operator")
+    feishu = _Adapter("feishu", ChannelType.FEISHU, "ou_operator")
+    webhook = object()
+
+    class _Registry:
+        def all_adapters(self):
+            return [wechat, feishu]
+
+        def get(self, name):
+            return webhook if name == "slack-ops" else None
+
+    class _Gateway:
+        registry = _Registry()
+        config = SimpleNamespace(
+            report_targets=[
+                WECHAT_DIRECT_ALL_ORIGIN,
+                FEISHU_DM_ALL_ORIGIN,
+                "slack-ops",
+                FEISHU_DM_ALL_ORIGIN,
+            ]
+        )
+
+    assert resolve_report_targets(IM_DIRECT_ALL_ORIGIN, _Gateway()) == [
+        ("wechat", "wx_operator"),
+        ("feishu", "ou_operator"),
+        ("slack-ops", None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_report_fanout_continues_after_one_target_raises(tmp_path) -> None:
+    gw = _FakeGateway()
+    gw.config = SimpleNamespace(
+        report_targets=[
+            "wechat:direct:default:wx_operator",
+            "feishu:dm:app:ou_operator",
+        ]
+    )
+    attempted: list[str] = []
+
+    async def _send(message):
+        attempted.append(message.channel)
+        if message.channel == "wechat":
+            raise RuntimeError("wechat unavailable")
+        gw.sent.append(message)
+        return ChannelSendResult.success(message.channel)
+
+    gw.send = _send
+    server = GatewayIpcServer(tmp_path / "gw.sock", gw)
+    response = await server._handle_outbound(
+        GatewayFrame.outbound(origin=IM_DIRECT_ALL_ORIGIN, text="run completed")
+    )
+
+    assert attempted == ["wechat", "feishu"]
+    assert [message.channel for message in gw.sent] == ["feishu"]
+    assert response is not None and response.type is FrameType.ACK
 
 
 @pytest.mark.asyncio
@@ -491,12 +566,12 @@ async def test_ipc_resolve_wildcard_origin_nacks_when_no_sender_known(tmp_path) 
     """If the WeChat adapter knows no sender (no recent inbound, no persisted
     context token), the wildcard cannot be resolved — the caller NACKs
     instead of silently treating ``*`` as a real recipient."""
-    from orchestratord.im_gateway.ipc_server import _resolve_origin
+    from orchestratord.im_gateway.origin_utils import resolve_origin
 
     class _Gateway:
         registry = None
 
-    channel, target = _resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, _Gateway())
+    channel, target = resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, _Gateway())
     assert channel is None and target is None
 
 
@@ -514,7 +589,7 @@ async def test_ipc_wildcard_outbound_delivers_via_real_adapter_context_token(tmp
         WeChatIlinkChannelAdapter,
     )
     from orchestratord.im_gateway.config import ReliabilityConfig
-    from orchestratord.im_gateway.ipc_server import _resolve_origin
+    from orchestratord.im_gateway.origin_utils import resolve_origin
     from orchestratord.im_gateway.store import ReliabilityStore
     from orchestratord.ipc.models import OutboundMessage
 
@@ -573,7 +648,7 @@ async def test_ipc_wildcard_outbound_delivers_via_real_adapter_context_token(tmp
 
     # No inbound in this gateway lifetime → in-memory map empty. The
     # wildcard still resolves: the channel's single authorized recipient.
-    channel, target = _resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, gw)
+    channel, target = resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, gw)
     assert channel == "wechat"
     assert target == "operator@im.wechat"
 

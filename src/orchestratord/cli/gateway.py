@@ -48,7 +48,8 @@ logger = logging.getLogger(__name__)
 # platform fields in ChannelConfig.extra. Feishu has its own dedicated
 # wizard branch (scan login + connection-mode split), so it carries no
 # generic fields here — the empty entry only keeps it in the "available
-# types" listing.
+# types" listing. WeChat's ``allowed_users`` is the fail-closed sender
+# allowlist: only listed users may drive the bot; empty rejects ALL inbound.
 _FIELD_MAP: dict[str, list[tuple[str, str, Any]]] = {
     "feishu": [],
     "slack": [("webhook_url", "webhook URL", ""), ("enabled", "enabled (true/false)", True)],
@@ -56,6 +57,11 @@ _FIELD_MAP: dict[str, list[tuple[str, str, Any]]] = {
     "wechat": [
         ("base_url", "iLink base URL", "https://ilinkai.weixin.qq.com"),
         ("account_id", "account id", "default"),
+        (
+            "allowed_users",
+            "授权用户 (逗号分隔的 WeChat user_id)",
+            "",
+        ),
         ("enabled", "enabled (true/false)", True),
     ],
 }
@@ -450,6 +456,11 @@ def _coerce(value: str, default: Any) -> Any:
     return value
 
 
+def _split_allowed_users(raw: str) -> list[str]:
+    """Split a comma/whitespace-separated user list into clean strings."""
+    return [part for part in (raw or "").replace(",", " ").split() if part]
+
+
 def build_channel_from_inputs(ctype: str, name: str, inputs: dict[str, str]) -> ChannelConfig:
     """Build a ChannelConfig from wizard inputs for the given type."""
     if ctype == "feishu":
@@ -465,6 +476,12 @@ def build_channel_from_inputs(ctype: str, name: str, inputs: dict[str, str]) -> 
             webhook_url = str(value) if value else "https://placeholder.invalid/"
         elif field_name == "enabled":
             enabled = bool(value)
+        elif field_name == "allowed_users":
+            # Wizard input is comma-separated; the adapter expects a list
+            # (YAML round-trip keeps lists as lists).
+            users = _split_allowed_users(str(value or ""))
+            if users:
+                extra["allowed_users"] = users
         else:
             extra[field_name] = value
     return ChannelConfig(
@@ -552,9 +569,36 @@ def build_default_channel(ctype: str) -> ChannelConfig:
             extra={
                 "base_url": "https://ilinkai.weixin.qq.com",
                 "account_id": "default",
+                # Explicit empty allowlist = fail closed: the wizard
+                # prompts the operator to fill it right after login.
+                "allowed_users": [],
             },
         )
     return build_channel_from_inputs(ctype, name, {})
+
+
+def _warn_if_no_authorized_users(channel: ChannelConfig) -> None:
+    """Post-config validation: an enabled inbound channel with an empty
+    sender allowlist silently rejects every command (fail closed)."""
+    if not channel.enabled:
+        return
+    extra = channel.extra or {}
+    if channel.type is ChannelType.WECHAT and not (extra.get("allowed_users") or []):
+        print(
+            "警告: WeChat 渠道未配置 allowed_users —— 当前会拒绝所有入站消息（fail closed）。\n"
+            "  请在渠道菜单选择“配置授权用户”填入允许发送命令的 WeChat user_id。",
+            file=sys.stderr,
+        )
+    elif (
+        channel.type is ChannelType.FEISHU
+        and str(extra.get("connection_mode") or "websocket").lower() != "webhook"
+        and not str(extra.get("allowed_user_open_id") or "").strip()
+    ):
+        print(
+            "警告: Feishu 渠道未配置 allowed_user_open_id —— 当前会拒绝所有入站消息"
+            "（fail closed）。\n  请在渠道菜单重新登录或手动填写授权用户 open_id。",
+            file=sys.stderr,
+        )
 
 
 # -- status / restart ---------------------------------------------------
@@ -964,12 +1008,28 @@ def _feishu_scan_login(input_fn: InputFn) -> dict[str, str]:
     encrypt_key = input_fn("Feishu encrypt_key (可选): ").strip()
     verification_token = input_fn("Feishu verification_token (可选): ").strip()
     domain = input_fn("domain (feishu/lark) [feishu]: ").strip() or "feishu"
+    # Fail-closed sender allowlist: without an authorized open_id the
+    # channel rejects ALL inbound (review P1). Required on the manual
+    # path — re-prompt (bounded) rather than silently saving a channel
+    # that would drop every command.
+    allowed_user_open_id = ""
+    for _ in range(3):
+        allowed_user_open_id = input_fn(
+            "授权用户 open_id (必填; 接收命令与事件汇报的用户): "
+        ).strip()
+        if allowed_user_open_id:
+            break
+        print("该项必填：未配置授权用户时渠道会拒绝所有入站消息（fail closed）。")
+    if not allowed_user_open_id:
+        print("未配置授权用户：渠道将以 fail-closed 保存（拒绝所有入站消息）。")
     payload = {
         "connection_mode": "websocket",
         "app_id": app_id,
         "app_secret": app_secret,
         "domain": domain,
     }
+    if allowed_user_open_id:
+        payload["allowed_user_open_id"] = allowed_user_open_id
     if encrypt_key:
         payload["encrypt_key"] = encrypt_key
     if verification_token:
@@ -986,6 +1046,7 @@ def _feishu_manual_login(channel: ChannelConfig, ui: InteractiveInput) -> Channe
     current_app_id = str(extra.get("app_id") or "")
     current_domain = str(extra.get("domain") or "feishu")
     current_bot = str(extra.get("bot_open_id") or "")
+    current_allowed = str(extra.get("allowed_user_open_id") or "")
     secret_state = "已配置" if extra.get("app_secret") else "未配置"
     encrypt_key_state = "已配置" if extra.get("encrypt_key") else "未配置"
     verification_token_state = "已配置" if extra.get("verification_token") else "未配置"
@@ -1017,6 +1078,16 @@ def _feishu_manual_login(channel: ChannelConfig, ui: InteractiveInput) -> Channe
         return None
     if domain:
         extra["domain"] = domain.lower()
+    # Fail-closed sender allowlist (review P1): required — without it the
+    # channel rejects ALL inbound. Empty input keeps an existing value;
+    # a channel with none gets warned about after the save.
+    allowed = ui.prompt(
+        f"授权用户 open_id [{current_allowed or '未配置'}] (回车保留，ESC 中断): "
+    )
+    if allowed is None:
+        return None
+    if allowed:
+        extra["allowed_user_open_id"] = allowed.strip()
     bot_open_id = ui.prompt(f"新 bot_open_id [{current_bot}] (可选，ESC 中断): ")
     if bot_open_id is None:
         return None
@@ -1062,6 +1133,7 @@ def _wizard_add_feishu(cfg, path, ui: InteractiveInput) -> None:
     channel = build_channel_from_inputs("feishu", name, inputs)
     cfg.replace_channel(channel)
     save_config(cfg, path)
+    _warn_if_no_authorized_users(channel)
     print(f"已保存渠道 {name!r}。退出 setup 后 Gateway 将自动重启生效。")
 
 
@@ -1115,6 +1187,7 @@ def _wizard_edit_feishu(cfg, path, channel: ChannelConfig, ui: InteractiveInput)
                 )
                 cfg.replace_channel(channel)
                 save_config(cfg, path)
+                _warn_if_no_authorized_users(channel)
                 # A re-scan may switch the app or operator. Do not let a
                 # persisted chat_id from the previous login override the new
                 # scanner open_id in ``last_known_sender``.
@@ -1127,6 +1200,7 @@ def _wizard_edit_feishu(cfg, path, channel: ChannelConfig, ui: InteractiveInput)
                 channel = updated
                 cfg.replace_channel(channel)
                 save_config(cfg, path)
+                _warn_if_no_authorized_users(channel)
                 print("登录配置已保存。")
         elif idx == 1:
             channel = ChannelConfig(
@@ -1319,7 +1393,11 @@ def wechat_login(name: str, *, state_dir: str | None = None) -> int:
                 file=sys.stderr,
             )
             return start_rc
-        print("Gateway 守护进程已启动，微信消息轮询已就绪。\n  在微信里向 bot 发消息即可触发对话。")
+        print(
+            "Gateway 守护进程已启动，微信消息轮询已就绪。\n"
+            "  在微信里向 bot 发送白名单斜杠命令即可控制 orchestrator"
+            "（普通文本会被拒绝；请在渠道配置中设置 allowed_users 授权用户）。"
+        )
         return 0
     if data.get("status") == "timeout":
         print("\n微信登录超时，请重新执行扫码登录。", file=sys.stderr)
@@ -1403,6 +1481,27 @@ def _wizard_add_wechat(cfg, path, ui: InteractiveInput) -> None:
     print("接下来进行微信扫码登录；扫码完成后可继续配置授权/启停等选项。")
     wechat_login(channel.name, state_dir=_resolve_status_state_dir(path, None))
     refreshed = cfg.get_channel(channel.name) or channel
+    # Explicit fail-closed step (review P1): the channel is useless until
+    # an authorized sender is configured — every command would be
+    # rejected. Prompt right after login, before the edit menu.
+    authorized = ui.prompt(
+        "授权用户 allowed_users（逗号分隔的 WeChat user_id，仅这些用户可发送命令）: "
+    )
+    if authorized:
+        extra = dict(refreshed.extra or {})
+        extra["allowed_users"] = _split_allowed_users(authorized)
+        refreshed = ChannelConfig(
+            type=refreshed.type,
+            webhook_url=refreshed.webhook_url,
+            name=refreshed.name,
+            enabled=refreshed.enabled,
+            extra=extra or None,
+        )
+        cfg.replace_channel(refreshed)
+        save_config(cfg, path)
+        print(f"已配置授权用户：{', '.join(extra['allowed_users'])}")
+    else:
+        _warn_if_no_authorized_users(refreshed)
     _wizard_edit(cfg, path, refreshed, ui)
 
 
@@ -1454,9 +1553,11 @@ def _wizard_edit_wechat(cfg, path, channel: ChannelConfig, ui: InteractiveInput)
             if _wechat_is_logged_in(channel.name, state_dir=_resolve_status_state_dir(path, None))
             else "扫码登录"
         )
+        current_users = ", ".join((channel.extra or {}).get("allowed_users") or [])
         idx = ui.select(
             [
                 (login_label, ""),
+                (f"配置授权用户 allowed_users (当前: {current_users or '未配置'})", ""),
                 ("查看登录态 / conversation 连接", ""),
                 ("移除 REPL/orchestrator 连接", ""),
                 (f"启用/停用 (当前: {'enabled' if channel.enabled else 'disabled'})", ""),
@@ -1469,12 +1570,32 @@ def _wizard_edit_wechat(cfg, path, channel: ChannelConfig, ui: InteractiveInput)
         if idx == 0:
             wechat_login(channel.name, state_dir=_resolve_status_state_dir(path, None))
         elif idx == 1:
-            print(format_status(path, channel.name))
+            authorized = ui.prompt(
+                "授权用户 allowed_users（逗号分隔的 WeChat user_id，回车保留，ESC 中断）: "
+            )
+            if authorized is None:
+                continue
+            if authorized:
+                extra = dict(channel.extra or {})
+                extra["allowed_users"] = _split_allowed_users(authorized)
+                channel = ChannelConfig(
+                    type=channel.type,
+                    webhook_url=channel.webhook_url,
+                    name=channel.name,
+                    enabled=channel.enabled,
+                    extra=extra or None,
+                )
+                cfg.replace_channel(channel)
+                save_config(cfg, path)
+                print(f"已配置授权用户：{', '.join(extra['allowed_users'])}")
+            _warn_if_no_authorized_users(channel)
         elif idx == 2:
+            print(format_status(path, channel.name))
+        elif idx == 3:
             _disconnect_gateway_connection(
                 channel.name, state_dir=_resolve_status_state_dir(path, None)
             )
-        elif idx == 3:
+        elif idx == 4:
             channel = ChannelConfig(
                 type=channel.type,
                 webhook_url=channel.webhook_url,
@@ -1485,7 +1606,7 @@ def _wizard_edit_wechat(cfg, path, channel: ChannelConfig, ui: InteractiveInput)
             cfg.replace_channel(channel)
             save_config(cfg, path)
             print(f"{channel.name} → {'enabled' if channel.enabled else 'disabled'}")
-        elif idx == 4:
+        elif idx == 5:
             confirm = ui.confirm(f"确认移除 {channel.name}?")
             if confirm is None:
                 continue

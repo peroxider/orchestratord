@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from orchestratord.ipc.models import (
@@ -9,6 +10,8 @@ from orchestratord.ipc.models import (
     IM_DIRECT_ALL_ORIGIN,
     WECHAT_DIRECT_ALL_ORIGIN,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_origin(origin: str, gateway=None) -> tuple[str | None, str | None]:
@@ -65,6 +68,70 @@ def resolve_last_known_im_sender(gateway: Any) -> tuple[str | None, str | None]:
         if channel and target:
             return channel, target
     return None, None
+
+
+def resolve_report_targets(origin: str, gateway: Any) -> list[tuple[str, str | None]]:
+    """Resolve an OUTBOUND origin to one or more ``(channel, target)`` pairs.
+
+    Event-report fan-out (review P2): when ``origin`` is the wildcard
+    ``im:direct:*:*`` and the gateway config declares explicit
+    ``report_targets``, each configured target is resolved independently
+    (concrete origins, per-channel wildcards, or bare channel names for
+    target-less webhook push), and the results are returned as a list —
+    one send per target. Unresolvable entries are skipped with a log line;
+    an empty list means the caller NACKs.
+
+    Without configured ``report_targets`` (the default), the wildcard
+    keeps the single-authorized-recipient resolution
+    (:func:`resolve_last_known_im_sender`), and every other origin
+    resolves exactly like :func:`resolve_origin` — one entry at most.
+    """
+    if origin == IM_DIRECT_ALL_ORIGIN:
+        configured = _configured_report_targets(gateway)
+        if configured:
+            resolved: list[tuple[str, str | None]] = []
+            seen: set[tuple[str, str | None]] = set()
+            for target_origin in configured:
+                pair = _resolve_report_target(target_origin, gateway)
+                if pair is None:
+                    logger.warning(
+                        "report target %r is not resolvable; skipping", target_origin
+                    )
+                    continue
+                if pair in seen:
+                    continue
+                seen.add(pair)
+                resolved.append(pair)
+            return resolved
+    channel, target = resolve_origin(origin, gateway)
+    if channel is None:
+        return []
+    return [(channel, target)]
+
+
+def _configured_report_targets(gateway: Any) -> list[str]:
+    config = getattr(gateway, "config", None)
+    targets = getattr(config, "report_targets", None)
+    return [str(t) for t in (targets or []) if t]
+
+
+def _resolve_report_target(target_origin: str, gateway: Any) -> tuple[str, str | None] | None:
+    """Resolve one configured report target to ``(channel, target | None)``.
+
+    A bare channel name (no ``:``) addresses a webhook channel directly —
+    webhook push has no per-user target, so the target is ``None``. Anything
+    else goes through :func:`resolve_origin`.
+    """
+    if ":" not in target_origin:
+        registry = getattr(gateway, "registry", None)
+        get = getattr(registry, "get", None)
+        if callable(get) and get(target_origin) is not None:
+            return target_origin, None
+        return None
+    channel, target = resolve_origin(target_origin, gateway)
+    if channel is None:
+        return None
+    return channel, target
 
 
 def wildcard_recipient(gateway: Any, channel_type: str) -> tuple[str | None, str | None]:
@@ -174,6 +241,7 @@ __all__ = [
     "is_concrete_wechat_direct_origin",
     "resolve_last_known_im_sender",
     "resolve_origin",
+    "resolve_report_targets",
     "wechat_adapter",
     "wildcard_recipient",
 ]

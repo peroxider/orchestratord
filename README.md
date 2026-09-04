@@ -518,10 +518,13 @@ Slash commands recognized for the orchestrator host:
 Commands outside the allowlist are not pushed to the orchestrator; the sender
 gets a bounded notice instead.
 
-Outbound event reports go to the channel's single authorized recipient. A
-wildcard origin (`im:direct:*:*`) only resolves when the channel has exactly
-one authorized user; with zero or multiple authorized users the gateway NACKs
-rather than guessing a recipient.
+Outbound event reports use the configured `report_targets` when present, with
+one send per destination. Per-channel wildcard targets only resolve when that
+channel has exactly one authorized user; zero or multiple authorized users are
+rejected rather than guessed. With no `report_targets`, `im:direct:*:*` keeps
+the compatibility behavior of selecting the first uniquely authorized IM
+channel (WeChat before Feishu). Command replies do not use this wildcard: they
+return to the concrete channel and user that issued the command.
 
 ### Configuration reference
 
@@ -531,6 +534,12 @@ maintained by `gateway setup`). Key fields:
 ```yaml
 enabled: true
 state_dir: ~/.orchestratord/gateway
+# Optional explicit fan-out for orchestrator event reports. Bare channel names
+# address target-less webhook channels such as slack/discord/Feishu webhook.
+report_targets:
+  - wechat:direct:*:*
+  - feishu:dm:*:*
+  # - slack-main
 channels:
   - name: slack-main
     type: slack

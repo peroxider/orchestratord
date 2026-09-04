@@ -130,7 +130,10 @@ class MessageGateway:
                     return None
                 return FeishuAppChannelAdapter(cfg, sender_store=self.store)
         try:
-            return self.registry.create(cfg)
+            # Build without touching the live registry. Initial load and
+            # reload commit explicitly register only after construction (and,
+            # for reload, startup) succeeds.
+            return self.registry.build(cfg)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "gateway: failed to build adapter for channel %s (%s): %s",
@@ -315,8 +318,9 @@ class MessageGateway:
            invalid config, or one that no longer contains the channel,
            fails the reload with an audit record and leaves everything
            untouched.
-        2. Build the new adapter via ``_build_adapter``. A failed build
-           keeps the old adapter and the in-memory config as-is.
+        2. Build the new adapter via ``_build_adapter`` without mutating the
+           live registry. A failed build keeps the old adapter and the
+           in-memory config as-is.
         3. If the gateway is running, start the new adapter and wait for it
            to report a connected/healthy state (bounded by ``ready_timeout``;
            a timeout is treated as degraded-but-usable, mirroring the
@@ -358,7 +362,6 @@ class MessageGateway:
             self._restore_old_adapter(name, old)
             self.store.audit("channel_reload_failed", channel=name, reason="adapter_build_failed")
             return False
-
         try:
             if self._running and hasattr(new_adapter, "start"):
                 await new_adapter.start()
@@ -397,14 +400,7 @@ class MessageGateway:
         return True
 
     def _restore_old_adapter(self, name: str, old: ChannelAdapter | None) -> None:
-        """Undo a build-time registration so a failed reload keeps the old adapter.
-
-        ``_build_adapter`` builds non-gateway-owned channels through
-        ``registry.create()``, which registers the new adapter under the
-        channel name before it is started. If the reload aborts afterwards,
-        re-registering the old adapter (or removing the orphan replacement
-        when no old one existed) restores the pre-reload registry state.
-        """
+        """Ensure a failed reload leaves the pre-reload registry state."""
         if old is not None:
             self.registry.register(old)
         else:
@@ -724,26 +720,39 @@ def _host_label(host_type: str) -> str:
 
 
 def _collect_broadcast_targets(registry: ChannelAdapterRegistry) -> list[tuple[str, str]]:
-    """Collect (channel_id, target) pairs for every outbound channel with a known sender.
+    """Collect (channel_id, target) pairs for explicitly authorized recipients.
 
     Used as the fallback when an origin (e.g. ``wechat:direct:*:*``) cannot be
-    resolved to a concrete target. Each adapter that declares OUTBOUND_TEXT and
-    exposes a non-None ``last_known_sender()`` contributes one target, so the
-    connection notification reaches operators on every channel that has seen
-    inbound traffic this gateway lifetime.
+    resolved to a concrete target. Every adapter that declares OUTBOUND_TEXT
+    contributes the users in its ``authorized_recipients()`` allowlist — the
+    same rule the wildcard origin resolution applies — so connection
+    notifications only ever reach explicitly authorized operators. The legacy
+    ``last_known_sender()`` path remains only for adapters that have not
+    shipped an allowlist (test fakes); notably, the WeChat bot-user fallback
+    and stale persisted last-sender state can no longer produce a target
+    here, because authorized adapters bypass them entirely.
     """
     targets: list[tuple[str, str]] = []
     for adapter in registry.all_adapters():
         caps = getattr(adapter, "capabilities", None)
         if caps is None or not caps.has(ChannelCapability.OUTBOUND_TEXT):
             continue
+        channel_id = getattr(adapter, "channel_id", None)
+        if not channel_id:
+            continue
+        authorized = getattr(adapter, "authorized_recipients", None)
+        if callable(authorized):
+            try:
+                recipients = [r for r in (authorized() or []) if r]
+            except Exception:  # noqa: BLE001 — a broken adapter must not break notify
+                recipients = []
+            for recipient in recipients:
+                targets.append((channel_id, recipient))
+            continue
         last_known = getattr(adapter, "last_known_sender", None)
         if not callable(last_known):
             continue
         sender = last_known()
-        if not sender:
-            continue
-        channel_id = getattr(adapter, "channel_id", None)
-        if channel_id:
+        if sender:
             targets.append((channel_id, sender))
     return targets

@@ -668,6 +668,51 @@ async def test_gateway_reload_channel_picks_up_disk_changes(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_gateway_reload_channel_keeps_old_registered_during_start(tmp_path) -> None:
+    """Generic channel construction must not change the live registry.
+
+    The old adapter remains visible until the replacement has started and
+    the reload reaches its explicit commit step.
+    """
+    reg = ChannelAdapterRegistry()
+    registry_during_start: list[object] = []
+    builds = [0]
+
+    class _FailingStartAdapter(_FakeAdapter):
+        async def start(self) -> None:
+            registry_during_start.append(reg.get("slack-ops"))
+            raise RuntimeError("start failed")
+
+    def _factory(cfg: ChannelConfig) -> _FakeAdapter:
+        builds[0] += 1
+        if builds[0] > 1:  # the reload's build fails at start
+            return _FailingStartAdapter(cfg.name)
+        return _FakeAdapter(cfg.name)
+
+    reg.register_type(ChannelType.SLACK, _factory)
+    cfg = GatewayConfig(state_dir=str(tmp_path))
+    cfg.channels.append(
+        ChannelConfig(
+            type=ChannelType.SLACK,
+            webhook_url="https://hooks.example.com/x",
+            name="slack-ops",
+        )
+    )
+    config_path = save_config(cfg, tmp_path / "channels.yaml")
+    gw = MessageGateway(cfg, registry=reg, config_path=config_path)
+    old_adapter = gw.registry.get("slack-ops")
+    assert old_adapter is not None
+    gw._running = True  # force the reload through the start path
+
+    assert await gw.reload_channel("slack-ops") is False
+    # During the new adapter's failed start, the registry still served the
+    # old adapter because build() does not mutate live instances.
+    assert registry_during_start == [old_adapter]
+    # And after the failed reload the old adapter remains in service.
+    assert gw.registry.get("slack-ops") is old_adapter
+
+
+@pytest.mark.asyncio
 async def test_gateway_start_replays_pending_outbox(tmp_path) -> None:
     """P4 outbox recovery: records a crashed process left pending are re-sent
     at startup under the original idempotency key; legacy records without a
@@ -1376,7 +1421,17 @@ async def test_notify_broadcasts_to_feishu_when_no_wechat(tmp_path) -> None:
     assert "orchestratord-REPL已连接" in texts
 
 
-def test_collect_broadcast_targets_uses_persisted_feishu_sender_after_restart(tmp_path) -> None:
+def test_collect_broadcast_targets_ignores_persisted_sender_without_allowlist(
+    tmp_path,
+) -> None:
+    """A stale persisted last-sender must NOT become a broadcast target.
+
+    Review P2: connection notifications must only reach explicitly
+    authorized users. A gateway restarted with a leftover
+    feishu_last_senders.json entry but no configured allowlist resolves
+    no target (fail closed) instead of notifying whoever messaged before
+    a config change.
+    """
     from orchestratord.im_gateway.gateway import _collect_broadcast_targets
 
     store = ReliabilityStore(tmp_path)
@@ -1398,7 +1453,7 @@ def test_collect_broadcast_targets_uses_persisted_feishu_sender_after_restart(tm
 
     gw = MessageGateway(cfg, store=store)
 
-    assert _collect_broadcast_targets(gw.registry) == [("feishu", "oc_chat")]
+    assert _collect_broadcast_targets(gw.registry) == []
 
 
 def test_collect_broadcast_targets_uses_scanner_before_first_inbound(tmp_path) -> None:

@@ -1,21 +1,28 @@
 """OrchestratorGatewayClient — orchestrator opt-in IM dispatch (P5).
 
-Registered per issue/run session via the gateway UDS. Splits inbound
-semantics to existing orchestrator entry points — never invents new
-synonyms:
+Registered per issue/run session via the gateway UDS. The orchestratord
+gateway surface is commands + event reports only:
 
-  * ``followUp`` → ``queue_pending_message`` (the existing pending queue)
-  * ``pause/resume/stop`` → control socket verbs
-  * ``inject`` / ``contextOnly`` → ``issue inject`` / ``.operator_hints.md``
-    (NOT the control-socket no-op)
-  * ``command`` (``/agent retry|follow-up|unblock``) → existing
-    ``parse_agent_command`` path
+  * whitelisted slash commands (``/server status``, ``/issue ...``) → the
+    existing orchestrator CLI / control-verb entry points; replies go back
+    to the SAME channel/user that issued the command (the delivery's
+    concrete origin — never the wildcard, so a Feishu command is answered
+    on Feishu even when a WeChat channel is also connected).
+  * event reports (lifecycle / issue status / run results) → OUTBOUND to
+    the wildcard origin (``im:direct:*:*`` by default), which the gateway
+    resolves to the authorized recipient(s).
+
+The follow-up / context-only / interrupt / agent-intent branches below
+are protocol-compatibility shims kept for the wire contract only — the
+gateway's dispatcher rejects plain text before it ever reaches this
+client, so they do not make semantic chat a supported capability.
 
 The client is a pure dispatcher with injectable handlers so it is
 unit-testable without a live orchestrator. The daemon wiring binds the
-real handlers. ``orchestrator_cli`` commands run serialized in a worker
-thread with a timeout and ``sys.argv`` restored afterwards (P2-6), so a
-slow command never wedges the IPC read loop or leaks process-global argv.
+real handlers. Production ``orchestrator_cli`` commands run in a bounded
+child process, so a timeout can terminate the command without mutating the
+daemon's process-global ``sys.argv`` or stdio. The injectable synchronous
+runner remains available for deterministic unit tests.
 """
 
 from __future__ import annotations
@@ -23,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
-import io
 import logging
 import sys
 import time
@@ -40,6 +46,13 @@ from orchestratord.im_gateway.semantics import (
 from orchestratord.ipc.models import InboundMessage, MessageSemantics
 
 logger = logging.getLogger(__name__)
+
+_CLI_CHILD_CODE = (
+    "import sys; "
+    "from orchestratord.cli.main import app; "
+    "sys.argv = ['orchestratord', *sys.argv[1:]]; "
+    "app()"
+)
 
 
 @dataclass
@@ -75,14 +88,17 @@ class OrchestratorGatewayClient:
         self._ipc = ipc_client
         self._origin = origin
         self._cli_runner = cli_runner
-        # P2-6: commands serialize on one lock and run bounded — a slow
-        # status/list must not wedge the IPC read loop forever.
+        # Commands serialize on one lock. Production execution uses a
+        # terminable subprocess; the tracked task only protects the injected
+        # synchronous test runner, whose worker thread cannot be cancelled.
         self._cli_lock = asyncio.Lock()
-        self._cli_timeout_seconds = max(1.0, cli_timeout_seconds)
+        self._cli_timeout_seconds = max(0.01, cli_timeout_seconds)
+        self._cli_run_task: asyncio.Task[tuple[int, str, str]] | None = None
         self._pending_outbound: deque[str] = deque()
-        # Per-text outbound envelope (metadata / in_reply_to) so queued
-        # texts keep their event context across deferred flushes.
-        self._pending_outbound_extra: dict[str, dict[str, Any]] = {}
+        # A parallel envelope queue keeps metadata/routing aligned with each
+        # queued message. It intentionally permits identical text for
+        # different origins or deliveries, avoiding cross-channel reply loss.
+        self._pending_outbound_extras: deque[dict[str, Any]] = deque()
         self._pending_outbound_limit = max(1, pending_outbound_limit)
         self._flush_lock = asyncio.Lock()
         self._clock = clock
@@ -231,15 +247,19 @@ class OrchestratorGatewayClient:
         *,
         metadata: dict[str, Any] | None = None,
         in_reply_to: str | None = None,
+        origin: str | None = None,
     ) -> None:
         """Send a reply / event back to the IM origin via the OUTBOUND frame.
 
-        The origin is the opt-in origin (``im:direct:*:*`` by default for
-        orchestrator); the gateway resolves the wildcard to a concrete
-        sender at OUTBOUND time. ``metadata`` (event envelope: issue_id /
+        The origin defaults to the opt-in origin (``im:direct:*:*`` for
+        orchestrator event reports); the gateway resolves the wildcard to
+        the authorized recipient at OUTBOUND time. Command replies pass the
+        DELIVER's concrete ``origin`` instead, so the answer lands on the
+        channel that asked (no cross-channel misrouting with multiple
+        channels connected). ``metadata`` (event envelope: issue_id /
         event_type / level / markdown) and ``in_reply_to`` (the triggering
-        delivery id) are forwarded when the bound IPC client supports them;
-        replies sent while a DELIVER is being dispatched default
+        delivery id) are forwarded when the bound IPC client supports
+        them; replies sent while a DELIVER is being dispatched default
         ``in_reply_to`` to that delivery's id. The event is queued only
         when the send cannot start right now (the IPC socket is not open
         yet) or when the gateway explicitly NACKs the send. If the IPC ACK
@@ -248,22 +268,18 @@ class OrchestratorGatewayClient:
         do not auto-retry, because duplicate chat messages are worse than a
         best-effort dropped event.
         """
-        if self._ipc is None or not self._origin:
+        target_origin = origin or self._origin
+        if self._ipc is None or not target_origin:
             return
         if not in_reply_to and self._current_delivery_id:
             in_reply_to = self._current_delivery_id
-        if text in self._pending_outbound:
-            logger.debug("orchestrator IM outbound deduped before send: %r", text[:60])
-            self._remember_pending_extra(text, metadata, in_reply_to)
-            await self._flush_pending_outbound()
-            return
         if self._pending_outbound:
-            self._queue_pending_outbound(text, metadata, in_reply_to)
+            self._queue_pending_outbound(text, metadata, in_reply_to, target_origin)
             await self._flush_pending_outbound()
             return
-        sent = await self._send_to_origin(self._origin, text, metadata, in_reply_to)
+        sent = await self._send_to_origin(target_origin, text, metadata, in_reply_to)
         if not sent:
-            self._queue_pending_outbound(text, metadata, in_reply_to)
+            self._queue_pending_outbound(text, metadata, in_reply_to, target_origin)
 
     def _ipc_accepts(self, param: str) -> bool:
         """Whether the bound IPC client's ``send_outbound`` accepts ``param``.
@@ -335,40 +351,49 @@ class OrchestratorGatewayClient:
         text: str,
         metadata: dict[str, Any] | None = None,
         in_reply_to: str | None = None,
+        origin: str | None = None,
     ) -> None:
-        # Skip exact duplicates already waiting in the queue — e.g. the
+        # Skip an exact duplicate already waiting in the queue — e.g. the
         # orchestrator emits "orchestratord: IM notifications
         # enabled" on every reconnect, and if the gateway can't resolve
         # the wildcard origin (operator hasn't messaged recently), each
         # copy would queue and all would flush at once when the operator
-        # finally sends a message.
-        if text in self._pending_outbound:
-            logger.debug("orchestrator IM outbound deduped: %r already queued", text[:60])
-            self._remember_pending_extra(text, metadata, in_reply_to)
-            return
+        # finally sends a message. Origin and in_reply_to are part of the
+        # identity: equal reply text from two channels must remain two sends.
+        extra = self._pending_extra(metadata, in_reply_to, origin)
+        for index, (pending_text, pending_extra) in enumerate(
+            zip(self._pending_outbound, self._pending_outbound_extras, strict=True)
+        ):
+            if (
+                pending_text == text
+                and pending_extra.get("origin") == extra.get("origin")
+                and pending_extra.get("in_reply_to") == extra.get("in_reply_to")
+            ):
+                self._pending_outbound_extras[index] = extra
+                logger.debug("orchestrator IM outbound deduped: %r already queued", text[:60])
+                return
         if len(self._pending_outbound) >= self._pending_outbound_limit:
-            dropped = self._pending_outbound.popleft()
-            self._pending_outbound_extra.pop(dropped, None)
+            self._pending_outbound.popleft()
+            self._pending_outbound_extras.popleft()
             logger.warning("orchestrator IM outbound pending queue full; dropped oldest event")
         self._pending_outbound.append(text)
-        self._remember_pending_extra(text, metadata, in_reply_to)
+        self._pending_outbound_extras.append(extra)
         logger.info("orchestrator IM outbound queued (pending connection or send retry)")
 
-    def _remember_pending_extra(
-        self,
-        text: str,
+    @staticmethod
+    def _pending_extra(
         metadata: dict[str, Any] | None,
         in_reply_to: str | None,
-    ) -> None:
+        origin: str | None = None,
+    ) -> dict[str, Any]:
         extra: dict[str, Any] = {}
         if metadata:
             extra["metadata"] = metadata
         if in_reply_to:
             extra["in_reply_to"] = in_reply_to
-        if extra:
-            self._pending_outbound_extra[text] = extra
-        else:
-            self._pending_outbound_extra.pop(text, None)
+        if origin:
+            extra["origin"] = origin
+        return extra
 
     def _defer_pending_flush(self, reason: str) -> None:
         delay = self._pending_retry_delay
@@ -395,8 +420,11 @@ class OrchestratorGatewayClient:
         async with self._flush_lock:
             if not self._pending_outbound:
                 return
-            origin = self._origin
-            if not origin:
+            # Entries carry their own origin (command replies: the concrete
+            # channel that issued the command). A missing wildcard origin only
+            # blocks entries that did not capture one.
+            head_extra = self._pending_outbound_extras[0]
+            if not self._origin and not head_extra.get("origin"):
                 return
             if force:
                 self._reset_pending_flush_backoff()
@@ -406,11 +434,14 @@ class OrchestratorGatewayClient:
                     self._pending_next_flush_at - self._clock(),
                 )
                 return
-            # Wildcard origins are flushed too: the gateway resolves them at
-            # OUTBOUND time (recent sender, else persisted context tokens).
+            # Queued entries keep their own origin: command replies carry the
+            # concrete channel they must return to; event reports flush to the
+            # wildcard origin, which the gateway resolves to the authorized
+            # recipient at OUTBOUND time.
             while self._pending_outbound:
                 text = self._pending_outbound[0]
-                extra = self._pending_outbound_extra.get(text) or {}
+                extra = self._pending_outbound_extras[0]
+                origin = extra.get("origin") or self._origin
                 try:
                     sent = await self._send_to_origin(
                         origin,
@@ -428,12 +459,16 @@ class OrchestratorGatewayClient:
                     )
                     return
                 self._pending_outbound.popleft()
-                self._pending_outbound_extra.pop(text, None)
+                self._pending_outbound_extras.popleft()
 
     async def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
         """Route ``message`` to the right existing orchestrator entry.
 
         Returns a short status string describing the dispatch (for ack).
+        In the orchestratord gateway scope only ``command`` traffic reaches
+        this client (the gateway dispatcher rejects plain text upstream);
+        the follow-up / context-only / interrupt branches are
+        wire-protocol compatibility, not a supported chat surface.
         """
         issue_id = self._issue_id(message)
         if semantic is MessageSemantics.FOLLOW_UP:
@@ -453,7 +488,11 @@ class OrchestratorGatewayClient:
             if route is None:
                 return "command_unroutable"
             if route.kind == "orchestrator_cli":
-                return await self._dispatch_orchestrator_cli(route)
+                return await self._dispatch_orchestrator_cli(
+                    route,
+                    reply_origin=message.origin,
+                    in_reply_to=message.message_id,
+                )
             if route.kind == "agent_intent":
                 self._h.agent_intent(route.verb, route.issue_hint or issue_id)
                 return f"agent_{route.verb}"
@@ -474,17 +513,37 @@ class OrchestratorGatewayClient:
         # newPrompt / approval → leave to the host agent / approval binding
         return "not_dispatched"
 
-    async def _dispatch_orchestrator_cli(self, route) -> str:
+    async def _dispatch_orchestrator_cli(
+        self,
+        route,
+        *,
+        reply_origin: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> str:
         argv = list(route.argv)
         if len(argv) < 2:
-            self._queue_command_reply(route.payload, 2, "", "error: invalid orchestrator command")
+            self._queue_command_reply(
+                route.payload,
+                2,
+                "",
+                "error: invalid orchestrator command",
+                origin=reply_origin,
+                in_reply_to=in_reply_to,
+            )
             return "orchestrator_cli_invalid"
 
         noun, verb = argv[0], argv[1]
         if noun == "issue" and verb in {"stop", "pause", "resume"}:
             issue_id = route.issue_hint or self._arg_value(argv, "--id")
             if not issue_id:
-                self._queue_command_reply(route.payload, 2, "", "error: --id is required")
+                self._queue_command_reply(
+                    route.payload,
+                    2,
+                    "",
+                    "error: --id is required",
+                    origin=reply_origin,
+                    in_reply_to=in_reply_to,
+                )
                 return f"orchestrator_cli_issue_{verb}"
             self._h.control_verb(verb, issue_id)
             self._queue_command_reply(
@@ -492,78 +551,148 @@ class OrchestratorGatewayClient:
                 0,
                 f"Control command '{verb}' sent for issue {issue_id}",
                 "",
+                origin=reply_origin,
+                in_reply_to=in_reply_to,
             )
             return f"orchestrator_cli_issue_{verb}"
 
         if noun == "issue" and verb == "tail":
-            self._queue_command_reply(route.payload, 0, self._tail_notice(argv), "")
+            self._queue_command_reply(
+                route.payload,
+                0,
+                self._tail_notice(argv),
+                "",
+                origin=reply_origin,
+                in_reply_to=in_reply_to,
+            )
             return "orchestrator_cli_issue_tail"
 
         rc, stdout, stderr = await self._run_cli_isolated(argv)
-        self._queue_command_reply(route.payload, rc, stdout, stderr)
+        self._queue_command_reply(
+            route.payload,
+            rc,
+            stdout,
+            stderr,
+            origin=reply_origin,
+            in_reply_to=in_reply_to,
+        )
         return f"orchestrator_cli_{noun}_{verb}"
 
     async def _run_cli_isolated(self, argv: list[str]) -> tuple[int, str, str]:
-        """Run one orchestrator CLI command serialized, bounded, off-loop.
+        """Run one CLI command serially with a real execution timeout.
 
-        P2-6 transitional isolation: commands hold ``_cli_lock`` (one at a
-        time, FIFO), execute in a worker thread via :func:`asyncio.to_thread`
-        so the IPC read loop's event loop stays responsive to heartbeats and
-        interleaved traffic, and are bounded by ``cli_timeout_seconds``.
-        A timeout reports rc 124 back to the IM sender.
+        Production commands execute in a child Python process. Timeout or
+        cancellation terminates that process, so the daemon read loop stays
+        responsive and no command can retain process-global argv/stdio.
+        Injected synchronous runners use a worker thread solely as a test seam;
+        their unkillable task remains serialized until it actually finishes.
         """
         async with self._cli_lock:
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(self._run_orchestrator_cli, list(argv)),
-                    timeout=self._cli_timeout_seconds,
-                )
-            except TimeoutError:
-                logger.warning(
-                    "orchestrator IM command timed out after %.0fs: %s",
-                    self._cli_timeout_seconds,
-                    " ".join(argv)[:64],
-                )
-                return (
-                    124,
-                    "",
-                    f"error: command timed out after {self._cli_timeout_seconds:.0f}s",
-                )
+            if self._cli_runner is not None:
+                return await self._run_injected_cli(argv)
+            return await self._run_cli_subprocess(argv)
+
+    async def _run_injected_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        prior = self._cli_run_task
+        if prior is not None and not prior.done():
+            with contextlib.suppress(Exception):
+                await prior
+        task: asyncio.Task[tuple[int, str, str]] = asyncio.create_task(
+            asyncio.to_thread(self._run_orchestrator_cli, list(argv))
+        )
+        self._cli_run_task = task
+        task.add_done_callback(self._on_cli_run_done)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(task), timeout=self._cli_timeout_seconds
+            )
+        except TimeoutError:
+            return self._cli_timeout_result(argv)
+
+    async def _run_cli_subprocess(self, argv: list[str]) -> tuple[int, str, str]:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-c",
+                _CLI_CHILD_CODE,
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            return 1, "", f"error: unable to start orchestrator command: {exc}"
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=self._cli_timeout_seconds
+            )
+        except TimeoutError:
+            await self._terminate_cli_process(process)
+            return self._cli_timeout_result(argv)
+        except asyncio.CancelledError:
+            await self._terminate_cli_process(process)
+            raise
+        return (
+            int(process.returncode or 0),
+            stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
+
+    async def _terminate_cli_process(self, process) -> None:
+        if process.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2.0)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+
+    def _cli_timeout_result(self, argv: list[str]) -> tuple[int, str, str]:
+        timeout = f"{self._cli_timeout_seconds:g}"
+        logger.warning(
+            "orchestrator IM command timed out after %ss: %s",
+            timeout,
+            " ".join(argv)[:64],
+        )
+        return 124, "", f"error: command timed out after {timeout}s"
+
+    def _on_cli_run_done(self, task: asyncio.Task[tuple[int, str, str]]) -> None:
+        """Clear the tracked CLI task and absorb its (unused) outcome."""
+        if self._cli_run_task is task:
+            self._cli_run_task = None
+        if not task.cancelled() and task.exception() is not None:
+            logger.debug(
+                "orchestrator IM command worker failed after timeout",
+                exc_info=task.exception(),
+            )
 
     def _run_orchestrator_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        if self._cli_runner is not None:
-            return self._cli_runner(list(argv))
+        if self._cli_runner is None:
+            raise RuntimeError("the in-process CLI runner is disabled")
+        return self._cli_runner(list(argv))
 
-        # Transitional in-process runner (typed command service comes later):
-        # patch sys.argv only for the duration of the call and ALWAYS restore
-        # it — the process-wide argv belongs to the host orchestrator.
-        argv_backup = sys.argv
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                sys.argv = ["orchestratord"] + list(argv)
-                try:
-                    from orchestratord.cli.main import app
-
-                    app()
-                    rc = 0
-                except SystemExit as exc:
-                    code = exc.code
-                    rc = code if isinstance(code, int) else 1
-                except Exception as exc:  # noqa: BLE001
-                    print(f"error: {exc}", file=sys.stderr)
-                    rc = 1
-        finally:
-            sys.argv = argv_backup
-        return rc, stdout.getvalue(), stderr.getvalue()
-
-    def _queue_command_reply(self, command_text: str, rc: int, stdout: str, stderr: str) -> None:
+    def _queue_command_reply(
+        self,
+        command_text: str,
+        rc: int,
+        stdout: str,
+        stderr: str,
+        *,
+        origin: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> None:
         text = self._format_command_reply(command_text, rc, stdout, stderr)
-        # Thread the reply back to the IM message that triggered the
-        # command (in_reply_to), when the IPC client supports it.
+        # Route the reply to the channel that issued the command (the
+        # DELIVER's concrete origin) and thread it back to the triggering
+        # IM message (in_reply_to). Never the wildcard: with WeChat and
+        # Feishu both connected, the wildcard resolves wechat-first and a
+        # Feishu command's answer would land on WeChat.
         self._queue_pending_outbound(
-            text, in_reply_to=self._current_delivery_id or None
+            text,
+            in_reply_to=in_reply_to or self._current_delivery_id or None,
+            origin=origin,
         )
 
     @staticmethod

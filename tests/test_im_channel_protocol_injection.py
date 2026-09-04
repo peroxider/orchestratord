@@ -97,44 +97,60 @@ def test_cli_runner_replaces_subcommand_import() -> None:
     assert captured == [["issue", "list"]]
 
 
-def test_in_process_cli_runner_restores_sys_argv(monkeypatch) -> None:
-    """P2-6: the transitional in-process runner restores sys.argv on every
-    exit path (including SystemExit), so the host orchestrator's argv is
-    never permanently clobbered."""
-    calls: list[list[str]] = []
+@pytest.mark.asyncio
+async def test_default_cli_runner_uses_child_process_without_mutating_sys_argv(monkeypatch) -> None:
+    """Production commands execute in a child and preserve daemon globals."""
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
-    def fake_app() -> None:
-        calls.append(list(sys.argv))
-        raise SystemExit(3)
+    class _Process:
+        returncode = 3
 
-    monkeypatch.setattr("orchestratord.cli.main.app", fake_app)
+        async def communicate(self):
+            return b"stdout", b"stderr"
+
+    async def _create(*argv, **kwargs):
+        calls.append((argv, kwargs))
+        return _Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     sentinel = ["orchestratord", "server", "start"]
     sys.argv = list(sentinel)
     client = OrchestratorGatewayClient(_noop_handlers())
 
-    rc, _stdout, _stderr = client._run_orchestrator_cli(["issue", "list"])
+    rc, stdout, stderr = await client._run_cli_isolated(["issue", "list"])
 
     assert rc == 3
-    assert calls == [["orchestratord", "issue", "list"]]
+    assert stdout == "stdout"
+    assert stderr == "stderr"
+    assert calls[0][0][0] == sys.executable
+    assert calls[0][0][-2:] == ("issue", "list")
     assert sys.argv == sentinel
 
 
-def test_in_process_cli_runner_restores_sys_argv_on_error(monkeypatch) -> None:
-    """sys.argv is restored even when the CLI raises a plain exception."""
+@pytest.mark.asyncio
+async def test_default_cli_runner_reports_spawn_error(monkeypatch) -> None:
+    async def _create(*_argv, **_kwargs):
+        raise OSError("boom")
 
-    def fake_app() -> None:
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr("orchestratord.cli.main.app", fake_app)
-    sentinel = ["orchestratord", "daemon"]
-    sys.argv = list(sentinel)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
     client = OrchestratorGatewayClient(_noop_handlers())
 
-    rc, _stdout, stderr = client._run_orchestrator_cli(["issue", "list"])
+    rc, stdout, stderr = await client._run_cli_isolated(["issue", "list"])
 
     assert rc == 1
+    assert stdout == ""
     assert "boom" in stderr
-    assert sys.argv == sentinel
+
+
+@pytest.mark.asyncio
+async def test_default_cli_runner_executes_real_child_process() -> None:
+    client = OrchestratorGatewayClient(_noop_handlers(), cli_timeout_seconds=5.0)
+
+    rc, stdout, stderr = await client._run_cli_isolated(["--version"])
+
+    assert rc == 0
+    assert stdout.startswith("orchestratord ")
+    assert stderr == ""
 
 
 @pytest.mark.asyncio
@@ -169,7 +185,7 @@ async def test_cli_command_times_out_with_rc_124() -> None:
     """P2-6: a command exceeding cli_timeout_seconds reports rc 124."""
 
     def slow_runner(argv: list[str]) -> tuple[int, str, str]:
-        time.sleep(1.0)
+        time.sleep(0.15)
         return 0, "late", ""
 
     client = OrchestratorGatewayClient(
@@ -181,6 +197,65 @@ async def test_cli_command_times_out_with_rc_124() -> None:
     assert rc == 124
     assert stdout == ""
     assert "timed out" in stderr
+
+
+@pytest.mark.asyncio
+async def test_cli_command_after_injected_timeout_waits_for_prior_worker() -> None:
+    """The injectable thread runner may linger, but never overlaps its successor."""
+    active = 0
+    max_active = 0
+
+    def runner(argv: list[str]) -> tuple[int, str, str]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        if argv[-1] == "first":
+            time.sleep(0.12)
+        active -= 1
+        return 0, argv[-1], ""
+
+    client = OrchestratorGatewayClient(
+        _noop_handlers(), cli_runner=runner, cli_timeout_seconds=0.03
+    )
+
+    first = await client._run_cli_isolated(["issue", "list", "first"])
+    second = await client._run_cli_isolated(["issue", "list", "second"])
+
+    assert first[0] == 124
+    assert second == (0, "second", "")
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_cli_subprocess_timeout_terminates_process(monkeypatch) -> None:
+    class _Process:
+        returncode = None
+        terminated = False
+
+        async def communicate(self):
+            await asyncio.Event().wait()
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        async def wait(self):
+            return self.returncode
+
+    process = _Process()
+
+    async def _create(*_argv, **_kwargs):
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _create)
+    client = OrchestratorGatewayClient(_noop_handlers(), cli_timeout_seconds=0.03)
+
+    rc, stdout, stderr = await client._run_cli_isolated(["issue", "list"])
+
+    assert rc == 124
+    assert stdout == ""
+    assert "timed out" in stderr
+    assert process.terminated is True
 
 
 @pytest.mark.asyncio

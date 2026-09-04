@@ -21,7 +21,7 @@ from typing import Any
 from orchestratord.channels.capabilities import ProcessingOutcome
 from orchestratord.ipc.protocol import FrameType, GatewayFrame
 
-from .origin_utils import resolve_origin as _resolve_origin
+from .origin_utils import resolve_report_targets as _resolve_report_targets
 
 logger = logging.getLogger(__name__)
 
@@ -431,8 +431,12 @@ class GatewayIpcServer:
         """OUTBOUND (client→server): route a reply back to the IM channel.
 
         The origin encodes the channel + target (e.g.
-        ``wechat:direct:{account}:{user}``); resolve them and call
-        ``gateway.send`` so the OutboundDispatcher delivers to WeChat.
+        ``wechat:direct:{account}:{user}``) and resolves to one or more
+        ``(channel, target)`` pairs — a wildcard ``im:direct:*:*`` with
+        configured ``report_targets`` fans the message out to every
+        configured destination (review P2); anything else resolves to a
+        single pair. Each pair is sent through ``gateway.send`` so the
+        OutboundDispatcher delivers it.
         """
         origin = frame.origin or ""
         text = frame.text or ""
@@ -445,8 +449,8 @@ class GatewayIpcServer:
             return GatewayFrame.nack(
                 delivery_id=frame.message_id, reason="outbound requires origin+text"
             )
-        channel, target = _resolve_origin(origin, self.gateway)
-        if channel is None:
+        targets = _resolve_report_targets(origin, self.gateway)
+        if not targets:
             await self._finish_processing(
                 frame.in_reply_to,
                 ProcessingOutcome.FAILURE,
@@ -455,37 +459,45 @@ class GatewayIpcServer:
             return GatewayFrame.nack(
                 delivery_id=frame.message_id, reason=f"unresolvable origin {origin!r}"
             )
-        try:
-            from orchestratord.ipc.models import OutboundMessage
+        from orchestratord.ipc.models import OutboundMessage
 
-            send_started = time.monotonic()
-            result = await self.gateway.send(
-                OutboundMessage(
-                    text=text,
-                    channel=channel,
-                    target=target,
-                    context_token=frame.context_token,
-                    markdown=False,
-                    metadata=frame.metadata,
-                    semantic_tags=list(frame.semantic_tags or []),
+        send_started = time.monotonic()
+        results: list[tuple[str, Any, Exception | None]] = []
+        for channel, target in targets:
+            try:
+                result = await self.gateway.send(
+                    OutboundMessage(
+                        text=text,
+                        channel=channel,
+                        target=target,
+                        context_token=frame.context_token,
+                        markdown=False,
+                        metadata=frame.metadata,
+                        semantic_tags=list(frame.semantic_tags or []),
+                    )
                 )
-            )
-            send_elapsed = time.monotonic() - send_started
-        except Exception as exc:
-            logger.exception("gateway ipc: OUTBOUND send failed origin=%s", origin[:24])
-            await self._finish_processing(
-                frame.in_reply_to,
-                ProcessingOutcome.FAILURE,
-                peer_session,
-            )
-            return GatewayFrame.nack(delivery_id=frame.message_id, reason=f"send error: {exc}")
+            except Exception as exc:
+                # One broken destination must not prevent the remaining
+                # report targets from receiving the event.
+                logger.exception(
+                    "gateway ipc: OUTBOUND send raised origin=%s channel=%s",
+                    origin[:24],
+                    channel,
+                )
+                results.append((channel, None, exc))
+            else:
+                results.append((channel, result, None))
+        send_elapsed = time.monotonic() - send_started
         # A send slower than the client's ACK timeout means the client has
         # already logged "OUTBOUND timed out" and moved on — the ACK we are
         # about to return will be dropped. Surface this at WARNING so the
         # gateway log reconciles with the client-side timeout instead of
         # silently showing an INFO success line.
         client_timed_out = send_elapsed > IPC_CLIENT_ACK_TIMEOUT_SECONDS
-        if result is not None and getattr(result, "ok", True) is False:
+
+        def _log_failure(channel: str, result: Any, error: Exception | None) -> str:
+            if error is not None:
+                return f"send error: {error}"
             error_category = getattr(result, "error_category", "")
             category_value = getattr(error_category, "value", "") or str(error_category or "")
             message = getattr(result, "message", None) or category_value or "send failed"
@@ -499,6 +511,22 @@ class GatewayIpcServer:
                 send_elapsed,
                 message,
             )
+            return message
+
+        failures = [
+            (channel, result, error)
+            for channel, result, error in results
+            if error is not None or (result is not None and getattr(result, "ok", True) is False)
+        ]
+        successes = [
+            result
+            for _, result, error in results
+            if error is None and (result is None or getattr(result, "ok", True))
+        ]
+        if not successes:
+            # Every target rejected the send — report the first failure.
+            channel, result, error = failures[0]
+            message = _log_failure(channel, result, error)
             await self._finish_processing(
                 frame.in_reply_to,
                 ProcessingOutcome.FAILURE,
@@ -508,43 +536,47 @@ class GatewayIpcServer:
                 delivery_id=frame.message_id,
                 reason=f"send failed: {message}",
             )
-        status = getattr(result, "status", None)
-        status_value = getattr(status, "value", "") or str(status or "")
-        if status_value == "enqueued":
-            message = getattr(result, "message", None) or "enqueued"
-            logger.info(
-                "gateway ipc: OUTBOUND enqueued origin=%s channel=%s len=%d elapsed=%.1fs message=%s",
-                origin[:24],
-                channel,
-                len(text),
-                send_elapsed,
-                message,
-            )
-            await self._finish_processing(
-                frame.in_reply_to,
-                ProcessingOutcome.SUCCESS,
-                peer_session,
-            )
-            return GatewayFrame.ack(
-                delivery_id=frame.message_id,
-                layer="enqueued",
-                message=message,
-            )
+        # Fan-out partial success: log each failed target, then ACK on the
+        # overall outcome (at least one destination got the message).
+        for channel, result, error in failures:
+            _log_failure(channel, result, error)
+        for result in successes:
+            status = getattr(result, "status", None)
+            status_value = getattr(status, "value", "") or str(status or "")
+            if status_value == "enqueued":
+                message = getattr(result, "message", None) or "enqueued"
+                logger.info(
+                    "gateway ipc: OUTBOUND enqueued origin=%s len=%d elapsed=%.1fs message=%s",
+                    origin[:24],
+                    len(text),
+                    send_elapsed,
+                    message,
+                )
+                await self._finish_processing(
+                    frame.in_reply_to,
+                    ProcessingOutcome.SUCCESS,
+                    peer_session,
+                )
+                return GatewayFrame.ack(
+                    delivery_id=frame.message_id,
+                    layer="enqueued",
+                    message=message,
+                )
         if client_timed_out:
             logger.warning(
-                "gateway ipc: OUTBOUND send slow origin=%s channel=%s len=%d elapsed=%.1fs "
+                "gateway ipc: OUTBOUND send slow origin=%s targets=%d len=%d elapsed=%.1fs "
                 "(client ACK timeout %.0fs likely exceeded; client may have logged timed out)",
                 origin[:24],
-                channel,
+                len(targets),
                 len(text),
                 send_elapsed,
                 IPC_CLIENT_ACK_TIMEOUT_SECONDS,
             )
         else:
             logger.info(
-                "gateway ipc: OUTBOUND → send origin=%s channel=%s len=%d elapsed=%.1fs",
+                "gateway ipc: OUTBOUND → send origin=%s targets=%d len=%d elapsed=%.1fs",
                 origin[:24],
-                channel,
+                len(targets),
                 len(text),
                 send_elapsed,
             )

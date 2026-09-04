@@ -646,6 +646,7 @@ async def test_command_reply_threads_in_reply_to_delivery_id() -> None:
     )
 
     assert len(ipc.sent) == 1
+    assert ipc.sent[0]["origin"] == "im:direct:acct:user"
     assert ipc.sent[0]["in_reply_to"] == "d-cmd-1"
     assert "命令已执行" in ipc.sent[0]["text"]
     assert "ISSUE-1 done" in ipc.sent[0]["text"]
@@ -668,3 +669,24 @@ async def test_send_outbound_forwards_explicit_metadata_and_in_reply_to() -> Non
     assert len(ipc.sent) == 1
     assert ipc.sent[0]["metadata"]["issue_id"] == "I1"
     assert ipc.sent[0]["in_reply_to"] == "d-9"
+
+
+def test_pending_replies_with_same_text_keep_distinct_origins() -> None:
+    client = OrchestratorGatewayClient(_noop_handlers(), origin="im:direct:*:*")
+
+    client._queue_pending_outbound(
+        "same reply",
+        in_reply_to="d-feishu",
+        origin="feishu:dm:app:ou_operator",
+    )
+    client._queue_pending_outbound(
+        "same reply",
+        in_reply_to="d-wechat",
+        origin="wechat:direct:default:wx_operator",
+    )
+
+    assert list(client._pending_outbound) == ["same reply", "same reply"]
+    assert [extra["origin"] for extra in client._pending_outbound_extras] == [
+        "feishu:dm:app:ou_operator",
+        "wechat:direct:default:wx_operator",
+    ]

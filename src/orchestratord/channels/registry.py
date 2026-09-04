@@ -180,14 +180,18 @@ class ChannelAdapterRegistry:
 
     def create(self, config: ChannelConfig) -> ChannelAdapter:
         """Build an adapter from ``config`` and register it by name."""
+        adapter = self.build(config)
+        self.register(adapter)
+        return adapter
+
+    def build(self, config: ChannelConfig) -> ChannelAdapter:
+        """Build an adapter without changing the live instance registry."""
         key = config.type.value
         with self._lock:
             factory = self._types.get(key)
         if factory is None:
             raise KeyError(f"no factory registered for channel type {key!r}")
-        adapter = factory(config)
-        self.register(adapter)
-        return adapter
+        return factory(config)
 
     def register(self, adapter: ChannelAdapter) -> None:
         with self._lock:

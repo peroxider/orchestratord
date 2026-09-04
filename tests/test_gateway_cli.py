@@ -713,13 +713,17 @@ def test_build_channel_from_inputs_wechat(tmp_path) -> None:
         {
             "base_url": "https://ilinkai.weixin.qq.com",
             "account_id": "default",
+            "allowed_users": "operator1@im.wechat, operator2@im.wechat",
             "enabled": "true",
         },
     )
     assert channel.type is ChannelType.WECHAT
     assert channel.enabled is True
     assert channel.extra["base_url"] == "https://ilinkai.weixin.qq.com"
-    assert "allowed_users" not in channel.extra
+    assert channel.extra["allowed_users"] == [
+        "operator1@im.wechat",
+        "operator2@im.wechat",
+    ]
     # round-trip via save/load
     gw.add_channel(str(p), channel)
     loaded = gw.list_channels(str(p))
@@ -1384,10 +1388,11 @@ def test_wizard_add_then_edit_then_remove(tmp_path, monkeypatch) -> None:
     p = tmp_path / "channels.yaml"
     monkeypatch.setattr(gw, "wechat_login", lambda name, state_dir=None: 0)
     monkeypatch.setattr(gw, "wechat_login_status", lambda name, state_dir=None: "logged_in")
-    # 新流程：wechat 是第 2 项；未登录 → _wizard_add_wechat（扫码 + 编辑菜单）
+    # 新流程：wechat 是第 2 项；未登录 → _wizard_add_wechat（扫码 + 授权用户 + 编辑菜单）
     inputs = iter(
         [
             "2",  # select wechat (not logged in → add flow: scan + edit menu)
+            "",  # ESC allowed_users prompt (fail-closed warning printed)
             "",  # ESC wechat edit menu → back to channel select
             "",  # ESC exit wizard
         ]
@@ -1397,14 +1402,14 @@ def test_wizard_add_then_edit_then_remove(tmp_path, monkeypatch) -> None:
     listed = gw.list_channels(str(p))
     assert listed == [{"name": "wechat", "type": "wechat", "enabled": True}]
 
-    # edit: disable then remove（wechat 已登录 → 编辑菜单；选项 4=启停，5=移除）
+    # edit: disable then remove（wechat 已登录 → 编辑菜单；选项 5=启停，6=移除）
     inputs2 = iter(
         [
             "2",  # select wechat (logged in → edit menu)
-            "4",  # toggle enable/disable
+            "5",  # toggle enable/disable
             "",  # ESC wechat edit → back to channel select
             "2",  # select wechat again
-            "5",  # remove channel
+            "6",  # remove channel
             "y",  # confirm
             "",  # ESC exit wizard
         ]
@@ -1428,6 +1433,7 @@ def test_wechat_wizard_creates_default_config_and_runs_scan_before_options(
     inputs = iter(
         [
             "2",  # select wechat (not logged in → add flow: scan + edit menu)
+            "operator@im.wechat",  # configure the required sender allowlist
             "",  # ESC post-scan edit menu → back to channel select
             "",  # ESC exit wizard
         ]
@@ -1442,9 +1448,12 @@ def test_wechat_wizard_creates_default_config_and_runs_scan_before_options(
 
     assert login_calls == ["wechat"]
     assert gw.list_channels(str(p)) == [{"name": "wechat", "type": "wechat", "enabled": True}]
+    configured = gw.load_config(str(p)).get_channel("wechat")
+    assert configured is not None
+    assert configured.extra["allowed_users"] == ["operator@im.wechat"]
     text = (capsys.readouterr().out + "\n".join(prompts)).lower()
     assert "account id" not in text
-    assert "allowed users" not in text
+    assert "allowed_users" in text
     assert "base url" not in text
     assert "编辑字段" not in text
 
@@ -1459,7 +1468,7 @@ def test_wizard_remove_wechat_channel_deletes_owned_state(tmp_path, monkeypatch)
     inputs = iter(
         [
             "2",  # select wechat (logged in → edit menu)
-            "5",  # remove channel
+            "6",  # remove channel
             "y",  # confirm
             "",  # ESC exit wizard
         ]
@@ -1481,7 +1490,7 @@ def test_existing_wechat_wizard_options_do_not_prompt_for_internal_fields(
     inputs = iter(
         [
             "2",  # select existing wechat (logged in → edit menu)
-            "2",  # status
+            "3",  # status
             "",  # ESC wechat edit → back to channel select
             "",  # ESC exit wizard
         ]
@@ -1497,7 +1506,7 @@ def test_existing_wechat_wizard_options_do_not_prompt_for_internal_fields(
     text = capsys.readouterr().out + "\n".join(prompts)
     assert "编辑字段" not in text
     assert "account id" not in text.lower()
-    assert "allowed users" not in text.lower()
+    assert "allowed_users" in text.lower()
     assert "base url" not in text.lower()
     assert "logged_in" in text
 
@@ -1678,7 +1687,7 @@ def test_feishu_scan_login_uses_real_qr_registration_without_manual_prompts(
 
 def test_feishu_scan_login_falls_back_to_manual_when_scan_fails(monkeypatch, capsys) -> None:
     monkeypatch.setattr(gw, "_feishu_qr_register", lambda: None)
-    inputs = iter(["cli_app", "secret", "", "", "lark"])
+    inputs = iter(["cli_app", "secret", "", "", "lark", "ou_operator"])
 
     result = gw._feishu_scan_login(lambda _p: next(inputs))
 
@@ -1690,6 +1699,7 @@ def test_feishu_scan_login_falls_back_to_manual_when_scan_fails(monkeypatch, cap
         "app_id": "cli_app",
         "app_secret": "secret",
         "domain": "lark",
+        "allowed_user_open_id": "ou_operator",
     }
 
 
@@ -1710,6 +1720,7 @@ def test_wizard_edit_feishu_login_manual_masks_secret_and_keeps_values(
             "enc_key",  # encrypt_key
             "ver_tok",  # verification_token
             "feishu",  # domain: re-enter existing to "keep"
+            "ou_operator",  # authorized command sender
             "ou_bot",  # bot_open_id: re-enter existing to "keep"
             "",  # ESC feishu edit → back to channel select
             "",  # ESC exit wizard
@@ -1731,6 +1742,7 @@ def test_wizard_edit_feishu_login_manual_masks_secret_and_keeps_values(
     assert channel.extra["domain"] == "feishu"
     assert channel.extra["encrypt_key"] == "enc_key"
     assert channel.extra["verification_token"] == "ver_tok"
+    assert channel.extra["allowed_user_open_id"] == "ou_operator"
 
     text = capsys.readouterr().out + "\n".join(prompts)
     assert "已配置" in text
@@ -1835,6 +1847,7 @@ def test_run_wizard_wechat_not_logged_in_runs_add_flow(tmp_path, monkeypatch) ->
     inputs = iter(
         [
             "2",  # select wechat (not configured -> add flow)
+            "operator@im.wechat",  # required sender allowlist
             "",  # ESC to exit edit menu after scan
             "",  # ESC to exit setup
         ]

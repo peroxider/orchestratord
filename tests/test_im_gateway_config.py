@@ -88,6 +88,31 @@ def test_config_roundtrip_preserves_explicit_command_allowlists(tmp_path) -> Non
     )
 
 
+def test_config_roundtrip_preserves_normalized_report_targets(tmp_path) -> None:
+    p = tmp_path / "channels.yaml"
+    cfg = _cfg()
+    cfg.report_targets = [
+        " feishu:dm:*:* ",
+        "wechat:direct:*:*",
+        "feishu:dm:*:*",
+        "slack-ops",
+    ]
+
+    save_config(cfg, p)
+    loaded = load_config(p)
+
+    assert loaded.report_targets == [
+        "feishu:dm:*:*",
+        "wechat:direct:*:*",
+        "slack-ops",
+    ]
+
+
+def test_config_rejects_non_list_report_targets() -> None:
+    with pytest.raises(ValueError, match="report_targets"):
+        GatewayConfig.from_dict({"report_targets": "feishu:dm:*:*"})
+
+
 def test_config_explicit_empty_command_allowlists_block_all_slash_commands(tmp_path) -> None:
     p = tmp_path / "channels.yaml"
     p.write_text(

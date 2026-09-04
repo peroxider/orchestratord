@@ -325,12 +325,19 @@ class GatewayConfig:
     default_targets: list[str] = field(default_factory=list)
     state_dir: str = DEFAULT_STATE_DIR
     storage_backend: str = "files"
+    # Explicit event-report destinations (review P2): origins to fan event
+    # reports out to when an opt-in host sends with the wildcard
+    # ``im:direct:*:*``. Entries are concrete origins
+    # (``wechat:direct:default:user``), per-channel wildcards, or a bare
+    # webhook channel name (``slack-main``) for target-less push channels.
+    # Empty = the legacy single-authorized-recipient wildcard resolution.
+    report_targets: list[str] = field(default_factory=list)
     command_allowlists: CommandAllowlistConfig = field(default_factory=CommandAllowlistConfig)
     reliability: ReliabilityConfig = field(default_factory=ReliabilityConfig)
     channels: list[ChannelConfig] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "enabled": self.enabled,
             "default_targets": _normalize_default_targets(self.default_targets),
             "state_dir": self.state_dir,
@@ -339,6 +346,9 @@ class GatewayConfig:
             "reliability": self.reliability.to_dict(),
             "channels": [c.to_dict() for c in _unique_channels_by_type(self.channels)],
         }
+        if self.report_targets:
+            payload["report_targets"] = _normalize_report_targets(self.report_targets)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> GatewayConfig:
@@ -349,6 +359,7 @@ class GatewayConfig:
             default_targets=list(data.get("default_targets") or []),
             state_dir=str(data.get("state_dir", DEFAULT_STATE_DIR)),
             storage_backend=str(data.get("storage_backend", "files")),
+            report_targets=_normalize_report_targets(data.get("report_targets") or []),
             command_allowlists=CommandAllowlistConfig.from_dict(data.get("command_allowlists")),
             reliability=ReliabilityConfig.from_dict(data.get("reliability")),
         )
@@ -422,6 +433,25 @@ def _normalize_channel(channel: ChannelConfig) -> ChannelConfig:
 
 def _normalize_default_targets(default_targets: list[str]) -> list[str]:
     return ["wechat" if target == "wechat-main" else target for target in default_targets]
+
+
+def _normalize_report_targets(report_targets: list[str]) -> list[str]:
+    """Strip/dedupe report-target origins, preserving order.
+
+    Accepts concrete origins (``wechat:direct:acct:user``), per-channel
+    wildcards (``feishu:dm:*:*``), and bare channel names for target-less
+    webhook push (``slack-main``). Empty strings and duplicates are dropped.
+    """
+    if not isinstance(report_targets, (list, tuple)):
+        raise ValueError("report_targets: expected a YAML list of origin strings")  # noqa: TRY004
+    normalized: list[str] = []
+    for item in report_targets:
+        if not isinstance(item, str):
+            raise ValueError("report_targets: every entry must be a string")  # noqa: TRY004
+        target = item.strip()
+        if target and target not in normalized:
+            normalized.append(target)
+    return normalized
 
 
 _LOCK = threading.Lock()
