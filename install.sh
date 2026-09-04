@@ -76,7 +76,27 @@ BACKEND_RUNTIME_TYPE[opencode]="binary"
 BACKEND_CHECK_CMD[opencode]='_check_binary opencode'
 BACKEND_INSTALL_HINT[opencode]="Install OpenCode: npm install -g opencode"
 
-ALL_BACKENDS="clawcodex claude codex dsh hermes opencode"
+BACKEND_DISPLAY_NAME[cursor]="Cursor (Cli)"
+BACKEND_RUNTIME_TYPE[cursor]="binary"
+BACKEND_CHECK_CMD[cursor]='_check_binary cursor-agent'
+BACKEND_INSTALL_HINT[cursor]="Install Cursor CLI (cursor-agent): see https://cursor.com/cli — event stream shape is not yet exercised in-tree, output is buffered as a single TEXT event"
+
+BACKEND_DISPLAY_NAME[copilot]="GitHub Copilot (Cli)"
+BACKEND_RUNTIME_TYPE[copilot]="binary"
+BACKEND_CHECK_CMD[copilot]='_check_binary copilot'
+BACKEND_INSTALL_HINT[copilot]="Install GitHub Copilot CLI: gh extension install github/gh-copilot — event stream needs experimentation (FEATURE_GAP §8.1)"
+
+BACKEND_DISPLAY_NAME[kimi]="Kimi (Cli)"
+BACKEND_RUNTIME_TYPE[kimi]="binary"
+BACKEND_CHECK_CMD[kimi]='_check_binary kimi'
+BACKEND_INSTALL_HINT[kimi]="Install Kimi CLI (Moonshot AI): see https://platform.moonshot.cn — Chinese-language prompts are first-class"
+
+BACKEND_DISPLAY_NAME[qwen]="Qwen / DashScope (Cli/stream-json)"
+BACKEND_RUNTIME_TYPE[qwen]="binary"
+BACKEND_CHECK_CMD[qwen]='_check_binary qwen'
+BACKEND_INSTALL_HINT[qwen]="Install Qwen CLI (DashScope) with --output-format stream-json support: see https://help.aliyun.com/zh/dashscope — only P1 backend that genuinely claims streaming_deltas=True"
+
+ALL_BACKENDS="clawcodex claude codex dsh hermes opencode cursor copilot kimi qwen"
 
 # ── Help ─────────────────────────────────────────────────────────────────────
 show_help() {

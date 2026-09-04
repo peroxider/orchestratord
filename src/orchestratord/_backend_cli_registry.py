@@ -65,6 +65,26 @@ KNOWN_BACKEND_CLIS: tuple[BackendCLI, ...] = (
         "orchestratord-dsh",
         "deepseek-harness-sdk 子进程",
     ),
+    BackendCLI(
+        "cursor-agent",
+        "orchestratord-cursor",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    BackendCLI(
+        "copilot",
+        "orchestratord-copilot",
+        "spawn-per-turn Cli; 事件流需实验",
+    ),
+    BackendCLI(
+        "kimi",
+        "orchestratord-kimi",
+        "spawn-per-turn Cli; 中文 prompt 友好",
+    ),
+    BackendCLI(
+        "qwen",
+        "orchestratord-qwen",
+        "spawn-per-turn Cli; qwen -p --output-format stream-json 真正流式",
+    ),
 )
 
 
