@@ -4,8 +4,9 @@
 deduplicates, parses text/post content into ``content_text`` and drops
 self-echo (``InboundConfig.drop_self_sent``). This module is the thin
 bridge from the SDK's :class:`~lark_oapi.channel.types.InboundMessage` to the
-gateway's :class:`InboundMessage`, applying the V1 p2p-only / optional
-allowlist admission on the way.
+gateway's :class:`InboundMessage`, applying the V1 p2p-only /
+fail-closed allowlist admission on the way: an empty
+``allowed_user_open_id`` rejects ALL inbound messages.
 """
 
 from __future__ import annotations
@@ -16,6 +17,21 @@ from typing import Any
 from .feishu_settings import FeishuAppSettings
 
 logger = logging.getLogger(__name__)
+
+_empty_allowlist_warned = False
+
+
+def _warn_empty_allowlist_once() -> None:
+    """Warn (once per process) that an empty allowlist fails closed."""
+    global _empty_allowlist_warned
+    if _empty_allowlist_warned:
+        return
+    _empty_allowlist_warned = True
+    logger.warning(
+        "feishu inbound rejected: allowed_user_open_id is not configured; "
+        "all inbound messages will be dropped (fail closed). Configure the "
+        "authorized operator open_id in extra.allowed_user_open_id in channels.yaml."
+    )
 
 
 def translate_inbound(inbound: Any, settings: FeishuAppSettings) -> Any | None:
@@ -37,7 +53,13 @@ def translate_inbound(inbound: Any, settings: FeishuAppSettings) -> Any | None:
     # check in case bot_open_id was resolved late / overridden in config.
     if settings.bot_open_id and open_id == settings.bot_open_id:
         return None
-    if settings.allowed_user_open_id and open_id != settings.allowed_user_open_id:
+    # Sender authorization fails closed: an empty allowlist rejects every
+    # p2p sender instead of admitting all private-chat users.
+    if not settings.allowed_user_open_id:
+        _warn_empty_allowlist_once()
+        logger.debug("feishu event dropped: no allowed_user_open_id configured (fail closed)")
+        return None
+    if open_id != settings.allowed_user_open_id:
         logger.debug("feishu event dropped: sender not in allowlist: %s", open_id[:16])
         return None
     text = str(_get(inbound, "content_text") or "").strip()

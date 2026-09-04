@@ -13,7 +13,9 @@ synonyms:
 
 The client is a pure dispatcher with injectable handlers so it is
 unit-testable without a live orchestrator. The daemon wiring binds the
-real handlers.
+real handlers. ``orchestrator_cli`` commands run serialized in a worker
+thread with a timeout and ``sys.argv`` restored afterwards (P2-6), so a
+slow command never wedges the IPC read loop or leaks process-global argv.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ class OrchestratorGatewayClient:
         pending_retry_max_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
         cli_runner: Callable[[list[str]], tuple[int, str, str]] | None = None,
+        cli_timeout_seconds: float = 60.0,
     ) -> None:
         self._h = handlers
         self._commands = command_router or CommandRouter()
@@ -72,6 +75,10 @@ class OrchestratorGatewayClient:
         self._ipc = ipc_client
         self._origin = origin
         self._cli_runner = cli_runner
+        # P2-6: commands serialize on one lock and run bounded — a slow
+        # status/list must not wedge the IPC read loop forever.
+        self._cli_lock = asyncio.Lock()
+        self._cli_timeout_seconds = max(1.0, cli_timeout_seconds)
         self._pending_outbound: deque[str] = deque()
         # Per-text outbound envelope (metadata / in_reply_to) so queued
         # texts keep their event context across deferred flushes.
@@ -128,7 +135,7 @@ class OrchestratorGatewayClient:
         # thread in_reply_to back to the triggering IM message.
         self._current_delivery_id = message.message_id
         try:
-            status = self.dispatch(message, semantic)
+            status = await self.dispatch(message, semantic)
             # Flush DELIVER-triggered outbound replies OFF the read-loop
             # chain: the IPC read loop awaits on_deliver sequentially, and
             # awaiting the flush here would wait for an OUTBOUND ACK that
@@ -423,7 +430,7 @@ class OrchestratorGatewayClient:
                 self._pending_outbound.popleft()
                 self._pending_outbound_extra.pop(text, None)
 
-    def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
+    async def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
         """Route ``message`` to the right existing orchestrator entry.
 
         Returns a short status string describing the dispatch (for ack).
@@ -446,7 +453,7 @@ class OrchestratorGatewayClient:
             if route is None:
                 return "command_unroutable"
             if route.kind == "orchestrator_cli":
-                return self._dispatch_orchestrator_cli(route)
+                return await self._dispatch_orchestrator_cli(route)
             if route.kind == "agent_intent":
                 self._h.agent_intent(route.verb, route.issue_hint or issue_id)
                 return f"agent_{route.verb}"
@@ -467,7 +474,7 @@ class OrchestratorGatewayClient:
         # newPrompt / approval → leave to the host agent / approval binding
         return "not_dispatched"
 
-    def _dispatch_orchestrator_cli(self, route) -> str:
+    async def _dispatch_orchestrator_cli(self, route) -> str:
         argv = list(route.argv)
         if len(argv) < 2:
             self._queue_command_reply(route.payload, 2, "", "error: invalid orchestrator command")
@@ -492,31 +499,63 @@ class OrchestratorGatewayClient:
             self._queue_command_reply(route.payload, 0, self._tail_notice(argv), "")
             return "orchestrator_cli_issue_tail"
 
-        rc, stdout, stderr = self._run_orchestrator_cli(argv)
+        rc, stdout, stderr = await self._run_cli_isolated(argv)
         self._queue_command_reply(route.payload, rc, stdout, stderr)
         return f"orchestrator_cli_{noun}_{verb}"
+
+    async def _run_cli_isolated(self, argv: list[str]) -> tuple[int, str, str]:
+        """Run one orchestrator CLI command serialized, bounded, off-loop.
+
+        P2-6 transitional isolation: commands hold ``_cli_lock`` (one at a
+        time, FIFO), execute in a worker thread via :func:`asyncio.to_thread`
+        so the IPC read loop's event loop stays responsive to heartbeats and
+        interleaved traffic, and are bounded by ``cli_timeout_seconds``.
+        A timeout reports rc 124 back to the IM sender.
+        """
+        async with self._cli_lock:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._run_orchestrator_cli, list(argv)),
+                    timeout=self._cli_timeout_seconds,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "orchestrator IM command timed out after %.0fs: %s",
+                    self._cli_timeout_seconds,
+                    " ".join(argv)[:64],
+                )
+                return (
+                    124,
+                    "",
+                    f"error: command timed out after {self._cli_timeout_seconds:.0f}s",
+                )
 
     def _run_orchestrator_cli(self, argv: list[str]) -> tuple[int, str, str]:
         if self._cli_runner is not None:
             return self._cli_runner(list(argv))
 
+        # Transitional in-process runner (typed command service comes later):
+        # patch sys.argv only for the duration of the call and ALWAYS restore
+        # it — the process-wide argv belongs to the host orchestrator.
+        argv_backup = sys.argv
         stdout = io.StringIO()
         stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                import sys as _sys
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                sys.argv = ["orchestratord"] + list(argv)
+                try:
+                    from orchestratord.cli.main import app
 
-                from orchestratord.cli.main import app
-
-                _sys.argv = ["orchestratord"] + list(argv)
-                app()
-                rc = 0
-            except SystemExit as exc:
-                code = exc.code
-                rc = code if isinstance(code, int) else 1
-            except Exception as exc:  # noqa: BLE001
-                print(f"error: {exc}", file=sys.stderr)
-                rc = 1
+                    app()
+                    rc = 0
+                except SystemExit as exc:
+                    code = exc.code
+                    rc = code if isinstance(code, int) else 1
+                except Exception as exc:  # noqa: BLE001
+                    print(f"error: {exc}", file=sys.stderr)
+                    rc = 1
+        finally:
+            sys.argv = argv_backup
         return rc, stdout.getvalue(), stderr.getvalue()
 
     def _queue_command_reply(self, command_text: str, rc: int, stdout: str, stderr: str) -> None:

@@ -34,7 +34,11 @@ from orchestratord.ipc.models import (
 )
 
 from .config import CommandAllowlistConfig
-from .repl_command_gate import check_orchestrator_command, check_repl_command
+from .repl_command_gate import (
+    PLAIN_TEXT_NOTICE,
+    check_orchestrator_command,
+    check_repl_command,
+)
 from .router import SessionRouter
 from .store import ReliabilityStore
 
@@ -124,6 +128,29 @@ class InboundDispatcher:
             target.session_id[:32],
             target.host_type,
         )
+        # 3.1 plain-text isolation (P1-2): the gateway is command-only.
+        # Ordinary text — from ANY host target (REPL peer, orchestrator
+        # peer, or the default agent handler) — is rejected with a bounded
+        # notice and never dispatched onward. Only slash commands reach a
+        # host; the per-host allowlist gates below then decide which ones.
+        if not (message.text or "").strip().startswith("/"):
+            self._store.audit(
+                "plain_text_rejected",
+                delivery_id=delivery_id,
+                origin=message.origin,
+                message_id=message.message_id,
+            )
+            logger.info(
+                "im_gateway: plain text rejected origin=%s len=%d",
+                message.origin[:32],
+                len(message.text or ""),
+            )
+            return AckReceipt(
+                delivery_id,
+                AckLayer.ACCEPTED,
+                message=PLAIN_TEXT_NOTICE,
+                notify_user=True,
+            )
         # 3.5 opt-in runtime 白名单门禁：只放行白名单内的斜杠命令，
         # 其余斜杠命令在网关层直接拒绝（不 push、不入队）。
         if target.host_type == "repl":

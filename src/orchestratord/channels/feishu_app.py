@@ -200,6 +200,16 @@ class FeishuAppChannelAdapter(ChannelAdapter):
         # before this gateway lifetime has observed any inbound traffic.
         return self._settings.allowed_user_open_id or None
 
+    def authorized_recipients(self) -> list[str]:
+        """Authorized inbound senders for this channel (empty = fail closed).
+
+        Public contract for wildcard OUTBOUND target resolution: returns the
+        configured ``allowed_user_open_id`` as a single-element list, or
+        ``[]`` when unset (inbound is rejected entirely).
+        """
+        open_id = self._settings.allowed_user_open_id
+        return [open_id] if open_id else []
+
     # -- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:

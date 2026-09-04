@@ -486,6 +486,67 @@ def test_gateway_status_not_running_via_cli(capsys, tmp_path) -> None:
     assert "no channels configured" in out
 
 
+def test_gateway_status_state_dir_reads_custom_channels_yaml(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`gateway status --state-dir X` shows X/channels.yaml channels, not defaults.
+
+    Regression (review P2-7): the state dir used to reach only the runtime
+    status while the channel overview was read from the default
+    ~/.orchestratord/gateway/channels.yaml, mixing a custom daemon's state
+    with the default channel config.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    monkeypatch.delenv("ORCHESTRATORD_GATEWAY_SOCK", raising=False)
+    monkeypatch.delenv("ORCHESTRATORD_IM_GATEWAY_SOCK", raising=False)
+    state = tmp_path / "state"
+    gw.add_channel(str(state / "channels.yaml"), _slack("custom-ch", enabled=True))
+
+    rc = _gateway_cli(["status", "--state-dir", str(state)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "custom-ch" in out
+    assert "NOT RUNNING" in out
+
+
+def test_gateway_status_channel_with_state_dir_reads_custom_config(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """`gateway status <name> --state-dir X` resolves <name> in X/channels.yaml."""
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    state = tmp_path / "state"
+    gw.add_channel(str(state / "channels.yaml"), _slack("custom-ch", enabled=True))
+
+    rc = _gateway_cli(["status", "--state-dir", str(state), "custom-ch"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "custom-ch" in out
+    assert "[slack]" in out
+
+
+def test_gateway_status_without_state_dir_keeps_default_channels_yaml(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Bare `gateway status` (no --state-dir) keeps the default config path."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("ORCHESTRATORD_GATEWAY_SOCK", raising=False)
+    monkeypatch.delenv("ORCHESTRATORD_IM_GATEWAY_SOCK", raising=False)
+    default_dir = home / ".orchestratord" / "gateway"
+    gw.add_channel(str(default_dir / "channels.yaml"), _slack("default-ch", enabled=True))
+    other = tmp_path / "other-state"
+    gw.add_channel(str(other / "channels.yaml"), _slack("custom-ch", enabled=True))
+
+    rc = _gateway_cli(["status"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "default-ch" in out
+    assert "custom-ch" not in out
+
+
 def test_gateway_disconnect_channel(monkeypatch) -> None:
     """`gateway disconnect <name>` calls _disconnect_gateway_connection."""
     calls: list[tuple] = []
@@ -733,6 +794,38 @@ def test_format_status(tmp_path) -> None:
     out = gw.format_status(str(p))
     assert "s1" in out and "enabled" in out
     assert "no channels" in gw.format_status(str(p), "nope")
+
+
+def test_format_status_state_dir_reads_state_dir_channels_yaml(tmp_path, monkeypatch) -> None:
+    """format_status(path=None, state_dir=X) must load X/channels.yaml.
+
+    Previously the config was always read from the default
+    ~/.orchestratord/gateway/channels.yaml, mixing a custom daemon's runtime
+    status with the default channel config (review P2-7).
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "isolated-home"))
+    state = tmp_path / "state"
+    gw.add_channel(str(state / "channels.yaml"), _slack("custom-ch", enabled=True))
+
+    out = gw.format_status(None, state_dir=str(state))
+
+    assert "custom-ch" in out
+
+
+def test_format_status_without_state_dir_keeps_default_channels_yaml(
+    tmp_path, monkeypatch
+) -> None:
+    """format_status(path=None, state_dir=None) keeps the default config path."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    default_dir = tmp_path / "home" / ".orchestratord" / "gateway"
+    gw.add_channel(str(default_dir / "channels.yaml"), _slack("default-ch", enabled=True))
+    other = tmp_path / "other-state"
+    gw.add_channel(str(other / "channels.yaml"), _slack("custom-ch", enabled=True))
+
+    out = gw.format_status(None, state_dir=None)
+
+    assert "default-ch" in out
+    assert "custom-ch" not in out
 
 
 def test_format_status_shows_connected_clients(tmp_path, monkeypatch) -> None:

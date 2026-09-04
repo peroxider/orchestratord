@@ -17,16 +17,19 @@ def resolve_origin(origin: str, gateway=None) -> tuple[str | None, str | None]:
     ``wechat:direct:{account}:{user}`` → the registered WeChat channel name
     + the user id. The channel name is resolved from the gateway config's
     unique WeChat entry first, then from adapter config if available, then
-    from the v1 default name.
+    from the v1 default name. Concrete origins always resolve to their
+    explicit user — wildcard authorization rules never override them.
 
-    The wildcard ``wechat:direct:*:*`` is resolved here to a concrete
-    sender so opt-in hosts (orchestrator/REPL) can emit OUTBOUND without
-    knowing the operator's WeChat user id. The WeChat adapter is the single
-    source: its ``last_known_sender`` returns the most recent real inbound
-    sender (in-memory, current lifetime), falling back to its persisted
-    context-token users (survives a gateway restart with no new inbound).
-    If none is known, returns ``(None, None)`` and the caller NACKs — an
-    operator who has never messaged genuinely cannot be addressed.
+    Wildcard origins (``wechat:direct:*:*``, ``feishu:dm:*:*``,
+    ``im:direct:*:*``) let opt-in hosts (orchestrator/REPL) emit OUTBOUND
+    without knowing the operator's user id. They resolve through
+    :func:`wildcard_recipient`: when the channel's adapter exposes
+    ``authorized_recipients()``, the wildcard resolves ONLY when exactly one
+    recipient is authorized — 0 or 2+ authorized users return ``(None, None)``
+    and the caller NACKs, so one operator's reports can never leak to
+    another operator in multi-user setups. Adapters without the method keep
+    the legacy ``last_known_sender`` fallback (see :func:`wildcard_recipient`
+    for the transitional-compatibility rationale).
     """
     parts = origin.split(":")
     if origin == IM_DIRECT_ALL_ORIGIN:
@@ -41,25 +44,63 @@ def resolve_origin(origin: str, gateway=None) -> tuple[str | None, str | None]:
             return adapter.channel_id, target
         return "wechat", target
     if parts[:2] == ["wechat", "direct"] and origin == WECHAT_DIRECT_ALL_ORIGIN:
-        channel, user = _last_known_sender_for_type(gateway, "wechat")
-        if channel is not None and user is not None:
-            return channel, user
-        return None, None
+        return wildcard_recipient(gateway, "wechat")
     if len(parts) >= 4 and parts[0] == "feishu" and parts[1] == "dm":
         if origin == FEISHU_DM_ALL_ORIGIN or parts[3] == "*":
-            return _last_known_sender_for_type(gateway, "feishu")
+            return wildcard_recipient(gateway, "feishu")
         channel = configured_channel_by_type(gateway, "feishu") or "feishu"
         return channel, parts[3]
     return None, None
 
 
 def resolve_last_known_im_sender(gateway: Any) -> tuple[str | None, str | None]:
-    """Return the first known sender from any supported IM adapter."""
+    """Resolve ``im:direct:*:*`` to the single authorized IM recipient.
+
+    Tries WeChat then Feishu; each channel resolves only through the
+    wildcard rules in :func:`wildcard_recipient` (unique-authorized-recipient
+    first, legacy last-known-sender fallback second).
+    """
     for channel_type in ("wechat", "feishu"):
-        channel, target = _last_known_sender_for_type(gateway, channel_type)
+        channel, target = wildcard_recipient(gateway, channel_type)
         if channel and target:
             return channel, target
     return None, None
+
+
+def wildcard_recipient(gateway: Any, channel_type: str) -> tuple[str | None, str | None]:
+    """Resolve a wildcard origin for ``channel_type`` to a concrete target.
+
+    New rule: when the channel's adapter exposes ``authorized_recipients()``
+    (returning ``list[str]``; empty = nobody authorized), the wildcard
+    resolves ONLY when exactly one recipient is authorized. With 0 or 2+
+    authorized users there is no single safe target, so this returns
+    ``(None, None)`` and the caller NACKs — a global "last sender" would
+    otherwise route one operator's event reports to whoever messaged most
+    recently.
+
+    Transitional compatibility: adapters that do NOT expose the method
+    (webhook adapters, test fakes, and real adapters that have not shipped
+    ``authorized_recipients`` yet) keep the legacy ``last_known_sender``
+    fallback so their behavior is unchanged until every real inbound adapter
+    ships the method.
+    """
+    adapter = adapter_by_channel_type(gateway, channel_type)
+    if adapter is None:
+        return None, None
+    authorized = getattr(adapter, "authorized_recipients", None)
+    if callable(authorized):
+        try:
+            recipients = [r for r in (authorized() or []) if r]
+        except Exception:  # noqa: BLE001 — a broken adapter must not crash resolution
+            recipients = []
+        if len(recipients) == 1:
+            channel = (
+                configured_channel_by_type(gateway, channel_type)
+                or getattr(adapter, "channel_id", None)
+            )
+            return channel, recipients[0]
+        return None, None
+    return _last_known_sender_for_type(gateway, channel_type)
 
 
 def _last_known_sender_for_type(gateway: Any, channel_type: str) -> tuple[str | None, str | None]:
@@ -134,4 +175,5 @@ __all__ = [
     "resolve_last_known_im_sender",
     "resolve_origin",
     "wechat_adapter",
+    "wildcard_recipient",
 ]

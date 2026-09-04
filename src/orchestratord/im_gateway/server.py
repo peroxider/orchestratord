@@ -319,7 +319,9 @@ async def serve(paths: DaemonPaths, *, log_level: int = logging.WARNING) -> int:
         # Force the gateway's reliability store to live under the daemon's
         # state_dir (the YAML default points at ~/.orchestratord/gateway).
         config.state_dir = str(paths.state_dir)
-        gateway = MessageGateway(config)
+        # config_path lets ``reload_channel`` re-read this same file from
+        # disk instead of the boot-time in-memory copy.
+        gateway = MessageGateway(config, config_path=paths.state_dir / "channels.yaml")
         await gateway.start()
         # Adapter.start() performs the blocking initial connection attempt.
         # Once MessageGateway.start() returns, collect a single status snapshot:

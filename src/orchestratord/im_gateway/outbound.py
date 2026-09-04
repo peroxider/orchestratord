@@ -115,12 +115,26 @@ class OutboundDispatcher:
         last_result: ChannelSendResult | None = None
         for idx, chunk in enumerate(chunks):
             chunk_idem = idem if len(chunks) == 1 else f"{idem}#{idx}"
+            # The pending record carries the full delivery parameters so the
+            # startup replay worker can rebuild this exact send after a crash
+            # (outbox recovery). Status transitions are append-only NDJSON:
+            # a later delivered/failed/dead record for the same
+            # idempotency_key supersedes this one on read.
             self._store.append_outbox(
                 {
                     "idempotency_key": chunk_idem,
                     "channel": channel,
                     "target": message.target,
+                    "text": chunk,
+                    "context_token": message.context_token,
+                    "title": message.title,
+                    "markdown": message.markdown,
+                    "metadata": message.metadata,
+                    "semantic_tags": list(message.semantic_tags or []),
+                    "level": message.level,
                     "payload_size": len(chunk),
+                    "chunk_index": idx,
+                    "chunks_total": len(chunks),
                     "status": "pending",
                     "at": time.time(),
                 }
@@ -287,10 +301,20 @@ class OutboundDispatcher:
         return DEFAULT_RETRY_POLICY
 
     def deferred_outbound_count(self) -> int:
-        return 0
+        """Count outbox records without a terminal status (pending/retry_pending).
+
+        These are the recoverable sends: replayed at gateway startup and
+        reported through ``health()``. Records for sends currently in flight
+        also count until their outcome record lands.
+        """
+        return len(self._store.outbox_pending())
 
     def clear_deferred(self) -> None:
-        return None
+        """No-op: pending outbox records are durable and must survive restarts.
+
+        The replay worker at gateway startup re-sends them; clearing them on
+        stop would defeat the outbox recovery semantics.
+        """
 
     async def broadcast(
         self, message: OutboundMessage, *, channels: list[str] | None = None

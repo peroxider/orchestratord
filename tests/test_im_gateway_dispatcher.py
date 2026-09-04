@@ -19,6 +19,7 @@ from orchestratord.im_gateway.dispatcher import InboundDispatcher
 from orchestratord.im_gateway.processing_status import ProcessingStatusManager
 from orchestratord.im_gateway.repl_command_gate import (
     ORCHESTRATOR_ALLOWED_COMMANDS,
+    PLAIN_TEXT_NOTICE,
     REPL_ALLOWED_COMMANDS,
     check_orchestrator_command,
     check_repl_command,
@@ -144,19 +145,77 @@ async def test_repl_stop_command_pushed(tmp_path) -> None:
     assert receipt.layer == AckLayer.ENQUEUED
 
 
-# -- REPL 目标：普通文本放行 -------------------------------------------------
+# -- REPL 目标：普通文本被隔离（P1-2） ---------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_repl_plain_text_pushed(tmp_path) -> None:
-    """REPL 绑定的 origin 发送普通文本 → push_handler 被调用（白名单不影响非斜杠输入）。"""
+async def test_repl_plain_text_rejected_not_pushed(tmp_path) -> None:
+    """REPL 绑定的 origin 发送普通文本 → 拒绝 + bounded notice，不 push。"""
     dispatcher, _router, pushed = _make_dispatcher(tmp_path)
     msg = _make_message("wechat:acct:user1", "你好，请帮我写个函数")
 
     receipt = await dispatcher.process(msg)
 
-    assert len(pushed) == 1
-    assert receipt.layer == AckLayer.ENQUEUED
+    assert pushed == [], "plain text must never be pushed to the REPL peer"
+    assert receipt.layer == AckLayer.ACCEPTED
+    assert receipt.notify_user is True
+    assert "斜杠命令" in (receipt.message or "")
+
+
+@pytest.mark.asyncio
+async def test_plain_text_rejected_records_audit(tmp_path) -> None:
+    """普通文本被拒时记录 plain_text_rejected 审计事件。"""
+    dispatcher, _router, _pushed = _make_dispatcher(tmp_path)
+    await dispatcher.process(_make_message("wechat:acct:user1", "普通文本", message_id="pt-1"))
+
+    blocked = [
+        e for e in dispatcher._store.audit_entries() if e.get("event_type") == "plain_text_rejected"
+    ]
+    assert len(blocked) == 1
+    assert blocked[0].get("message_id") == "pt-1"
+
+
+@pytest.mark.asyncio
+async def test_plain_text_never_reaches_default_handler(tmp_path) -> None:
+    """未绑定 origin 的普通文本同样被拒：不得进入默认 agent handler。"""
+    store = ReliabilityStore(tmp_path)
+    router = SessionRouter(BindingPolicy(), store)
+    dispatcher = InboundDispatcher(store, router)
+    handled: list[InboundMessage] = []
+
+    async def _handler(message: InboundMessage) -> AckReceipt:
+        handled.append(message)
+        return AckReceipt(message.message_id, AckLayer.PROCESSED, "stub")
+
+    dispatcher.set_handler(_handler)
+    receipt = await dispatcher.process(
+        _make_message("wechat:acct:stranger", "hi there", message_id="pt-default-1")
+    )
+
+    assert handled == []
+    assert receipt.notify_user is True
+    assert "斜杠命令" in (receipt.message or "")
+
+
+@pytest.mark.asyncio
+async def test_slash_command_reaches_default_handler(tmp_path) -> None:
+    """斜杠命令不受普通文本隔离影响：default host 收到后照常进入 handler。"""
+    store = ReliabilityStore(tmp_path)
+    router = SessionRouter(BindingPolicy(), store)
+    dispatcher = InboundDispatcher(store, router)
+    handled: list[InboundMessage] = []
+
+    async def _handler(message: InboundMessage) -> AckReceipt:
+        handled.append(message)
+        return AckReceipt(message.message_id, AckLayer.PROCESSED, "stub")
+
+    dispatcher.set_handler(_handler)
+    receipt = await dispatcher.process(
+        _make_message("wechat:acct:op", "/issue list", message_id="cmd-default-1")
+    )
+
+    assert len(handled) == 1
+    assert receipt.layer is AckLayer.PROCESSED
 
 
 @pytest.mark.asyncio
@@ -411,12 +470,13 @@ def test_blocked_command_with_args_rejected() -> None:
 @pytest.mark.parametrize(
     "text",
     ["hello", "普通文本消息", "  /  ", "/", "", "   ", "not a command"],
-    ids=lambda t: f"passthrough:{t!r}",
+    ids=lambda t: f"plain-text:{t!r}",
 )
-def test_non_slash_input_passes(text: str) -> None:
+def test_non_slash_input_rejected(text: str) -> None:
+    """P1-2：普通文本（含空白与单独的 ``/``）不再放行。"""
     allowed, reason = check_repl_command(text)
-    assert allowed is True
-    assert reason == ""
+    assert allowed is False
+    assert reason == PLAIN_TEXT_NOTICE
 
 
 @pytest.mark.parametrize(
@@ -493,10 +553,11 @@ def test_orchestrator_blocked_commands_rejected(cmd: str, reason: str) -> None:
     assert actual == reason
 
 
-def test_orchestrator_plain_text_passes() -> None:
+def test_orchestrator_plain_text_rejected() -> None:
+    """P1-2：普通文本对 orchestrator 目标同样拒绝。"""
     allowed, reason = check_orchestrator_command("普通文本 follow-up")
-    assert allowed is True
-    assert reason == ""
+    assert allowed is False
+    assert reason == PLAIN_TEXT_NOTICE
 
 
 def test_orchestrator_command_uses_configured_allowlist() -> None:
@@ -611,7 +672,7 @@ async def test_dispatcher_completes_local_handler_and_keeps_opt_in_pending(tmp_p
         return AckReceipt(message.message_id, AckLayer.PROCESSED, "done")
 
     dispatcher.set_handler(local_handler)
-    await dispatcher.process(_message("om_local"))
+    await dispatcher.process(_message("om_local", text="/help"))
     assert adapter.starts == ["om_local"]
     assert adapter.completions == [("om_local", ProcessingOutcome.SUCCESS)]
 
@@ -622,7 +683,7 @@ async def test_dispatcher_completes_local_handler_and_keeps_opt_in_pending(tmp_p
         return True
 
     dispatcher.set_push_handler(push_handler)
-    receipt = await dispatcher.process(_message("om_optin", origin))
+    receipt = await dispatcher.process(_message("om_optin", origin, text="/clear"))
     assert receipt.layer is AckLayer.ENQUEUED
     assert manager.has_pending("om_optin") is True
 
@@ -648,7 +709,7 @@ async def test_dispatcher_dedupe_and_blocked_command_do_not_start_status(tmp_pat
         return True
 
     dispatcher.set_push_handler(push_handler)
-    accepted = _message("om_duplicate", origin=origin)
+    accepted = _message("om_duplicate", origin=origin, text="/clear")
     await dispatcher.process(accepted)
     await dispatcher.process(accepted)
     assert adapter.starts == ["om_duplicate"]
@@ -671,7 +732,7 @@ async def test_processing_hook_exceptions_do_not_block_local_handler(tmp_path) -
         return AckReceipt(message.message_id, AckLayer.PROCESSED, "text reply sent")
 
     dispatcher.set_handler(local_handler)
-    receipt = await dispatcher.process(_message("om_reaction_error"))
+    receipt = await dispatcher.process(_message("om_reaction_error", text="/help"))
 
     assert receipt.layer is AckLayer.PROCESSED
     assert manager.has_pending("om_reaction_error") is True

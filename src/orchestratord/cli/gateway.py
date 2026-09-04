@@ -34,7 +34,12 @@ from typing import Any
 
 from orchestratord.channels.models import ChannelConfig, ChannelType
 from orchestratord.cli._interactive import InteractiveInput
-from orchestratord.im_gateway.config import load_config, save_config
+from orchestratord.im_gateway.config import (
+    config_path_for_state_dir,
+    ensure_private_dir,
+    load_config,
+    save_config,
+)
 
 InputFn = Callable[[str], str]
 logger = logging.getLogger(__name__)
@@ -558,7 +563,11 @@ def build_default_channel(ctype: str) -> ChannelConfig:
 def format_status(
     path: str | None = None, name: str | None = None, *, state_dir: str | None = None
 ) -> str:
-    cfg = load_config(path)
+    # ``path`` (an explicit channels.yaml) wins; otherwise a ``state_dir``
+    # resolves to ``<state-dir>/channels.yaml`` so a custom daemon's status
+    # shows its own channel config, not the default ~/.orchestratord/gateway
+    # one. ``None``/``None`` keeps load_config()'s default-path behavior.
+    cfg = load_config(path if path is not None else config_path_for_state_dir(state_dir))
     lines: list[str] = []
     channels = [c for c in cfg.channels if name is None or c.name == name]
     if not channels:
@@ -1147,8 +1156,7 @@ def _wechat_paths(name: str, *, state_dir: str | None = None):
     from orchestratord.im_gateway.server import DaemonPaths
 
     base = DaemonPaths.for_state_dir(state_dir).state_dir
-    wechat_dir = Path(base) / "wechat"
-    wechat_dir.mkdir(parents=True, exist_ok=True)
+    wechat_dir = ensure_private_dir(Path(base) / "wechat")
     auth_path = wechat_dir / f"{name}_auth.json"
     if name == "wechat" and not auth_path.exists():
         legacy_auth = wechat_dir / "wechat-main_auth.json"

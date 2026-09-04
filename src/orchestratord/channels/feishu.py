@@ -30,18 +30,22 @@ FEISHU_SUCCESS_CODE = 0
 def sign_feishu(secret: str, timestamp: str) -> str:
     """Return the Feishu ``sign`` for a given secret and timestamp.
 
-    The signing algorithm is documented at
+    The official algorithm is documented at
     https://open.feishu.cn/document/ukTMukTMukTM/ucTM5YjL3ETO24yNxkjN
-    and must remain byte-exact.
+    and must remain byte-exact: the string ``f"{timestamp}\\n{secret}"`` is
+    used as the HMAC **key**, HMAC-SHA256 is computed over an **empty**
+    message, and the digest is base64-encoded::
+
+        string_to_sign = f"{timestamp}\\n{secret}"
+        hmac_code = hmac.new(
+            string_to_sign.encode("utf-8"), digestmod=hashlib.sha256
+        ).digest()
+        sign = base64.b64encode(hmac_code).decode("utf-8")
     """
     if not isinstance(secret, str) or not secret:
         raise WebhookSecretMissingError("feishu secret must be a non-empty string")
     string_to_sign = f"{timestamp}\n{secret}"
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        string_to_sign.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
+    digest = hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
     return base64.b64encode(digest).decode("utf-8")
 
 

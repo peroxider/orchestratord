@@ -7,6 +7,7 @@ Migrated from ClawCodex ``test_core.py`` + ``test_gateway.py`` +
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -32,6 +33,7 @@ from orchestratord.im_gateway.config import (
     CommandAllowlistConfig,
     GatewayConfig,
     ReliabilityConfig,
+    save_config,
 )
 from orchestratord.im_gateway.gateway import MessageGateway
 from orchestratord.im_gateway.outbound import OutboundDispatcher
@@ -413,11 +415,11 @@ async def test_gateway_inbound_pushes_to_opt_in_bound_origin(tmp_path) -> None:
     gw.set_handler(lambda m: handler_calls.append(m) or _ack())
 
     msg = InboundMessage(
-        origin="wechat:direct:default:u", text="hi", message_id="m1", channel="wechat-main"
+        origin="wechat:direct:default:u", text="/clear", message_id="m1", channel="wechat-main"
     )
     await gw.receive(msg)
     assert len(pushed) == 1  # pushed to the opt-in peer
-    assert pushed[0].text == "hi"
+    assert pushed[0].text == "/clear"
     assert handler_calls == []  # default handler NOT called (opt-in overrides)
 
 
@@ -439,7 +441,7 @@ async def test_gateway_inbound_pushes_feishu_to_generic_opt_in_binding(tmp_path)
 
     msg = InboundMessage(
         origin="feishu:dm:cli_app:ou_user",
-        text="hi",
+        text="/clear",
         message_id="m-feishu",
         channel="feishu",
         context_token="oc_chat",
@@ -544,7 +546,7 @@ async def test_gateway_inbound_default_origin_still_uses_handler(tmp_path) -> No
     gw.set_handler(lambda m: handler_calls.append(m) or _ack())
 
     msg = InboundMessage(
-        origin="wechat:direct:default:u", text="hi", message_id="m1", channel="wechat-main"
+        origin="wechat:direct:default:u", text="/help", message_id="m1", channel="wechat-main"
     )
     await gw.receive(msg)
     assert pushed == []  # no opt-in binding → no push
@@ -576,10 +578,154 @@ async def test_gateway_reload_channel_rebuilds(tmp_path) -> None:
             name="slack-ops",
         )
     )
-    gw = MessageGateway(cfg, registry=reg)
-    assert gw.reload_channel("slack-ops") is True
+    config_path = save_config(cfg, tmp_path / "channels.yaml")
+    gw = MessageGateway(cfg, registry=reg, config_path=config_path)
+    assert await gw.reload_channel("slack-ops") is True
     assert gw.registry.get("slack-ops") is not None
-    assert gw.reload_channel("nope") is False
+    assert await gw.reload_channel("nope") is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_reload_channel_is_transactional_on_bad_disk_config(tmp_path) -> None:
+    """P1-4: an invalid on-disk config fails the reload and keeps the old
+    adapter serving; the in-memory config is untouched."""
+    reg = ChannelAdapterRegistry()
+    built: list[str] = []
+
+    def _factory(cfg: ChannelConfig) -> _FakeAdapter:
+        built.append(cfg.name)
+        return _FakeAdapter(cfg.name)
+
+    reg.register_type(ChannelType.SLACK, _factory)
+    cfg = GatewayConfig(state_dir=str(tmp_path))
+    cfg.channels.append(
+        ChannelConfig(
+            type=ChannelType.SLACK,
+            webhook_url="https://hooks.example.com/x",
+            name="slack-ops",
+        )
+    )
+    config_path = tmp_path / "channels.yaml"
+    save_config(cfg, config_path)
+    gw = MessageGateway(cfg, registry=reg, config_path=config_path)
+    old_adapter = gw.registry.get("slack-ops")
+    assert old_adapter is not None
+    initial_builds = len(built)  # the constructor loaded the channel once
+
+    # Corrupt the on-disk config: reload must fail and keep the old adapter.
+    config_path.write_text("channels: [ {not valid yaml", encoding="utf-8")
+    assert await gw.reload_channel("slack-ops") is False
+    assert gw.registry.get("slack-ops") is old_adapter
+    assert [c.name for c in gw.config.channels] == ["slack-ops"]
+    assert len(built) == initial_builds  # no new adapter was constructed
+
+    # A valid config without the channel also fails, old adapter intact.
+    other = GatewayConfig(state_dir=str(tmp_path))
+    other.channels = []
+    save_config(other, config_path)
+    assert await gw.reload_channel("slack-ops") is False
+    assert gw.registry.get("slack-ops") is old_adapter
+    assert len(built) == initial_builds
+
+
+@pytest.mark.asyncio
+async def test_gateway_reload_channel_picks_up_disk_changes(tmp_path) -> None:
+    """A successful reload adopts the on-disk config (e.g. a new webhook)."""
+    reg = ChannelAdapterRegistry()
+    built: list[ChannelConfig] = []
+
+    def _factory(cfg: ChannelConfig) -> _FakeAdapter:
+        built.append(cfg)
+        return _FakeAdapter(cfg.name)
+
+    reg.register_type(ChannelType.SLACK, _factory)
+    cfg = GatewayConfig(state_dir=str(tmp_path))
+    cfg.channels.append(
+        ChannelConfig(
+            type=ChannelType.SLACK,
+            webhook_url="https://hooks.example.com/old",
+            name="slack-ops",
+        )
+    )
+    config_path = save_config(cfg, tmp_path / "channels.yaml")
+    gw = MessageGateway(cfg, registry=reg, config_path=config_path)
+
+    disk_cfg = GatewayConfig(state_dir=str(tmp_path))
+    disk_cfg.channels.append(
+        ChannelConfig(
+            type=ChannelType.SLACK,
+            webhook_url="https://hooks.example.com/new",
+            name="slack-ops",
+        )
+    )
+    save_config(disk_cfg, config_path)
+
+    assert await gw.reload_channel("slack-ops") is True
+    # One build at construction + one for the reload itself.
+    assert len(built) == 2
+    assert built[-1].webhook_url == "https://hooks.example.com/new"
+    assert [c.webhook_url for c in gw.config.channels] == ["https://hooks.example.com/new"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_start_replays_pending_outbox(tmp_path) -> None:
+    """P4 outbox recovery: records a crashed process left pending are re-sent
+    at startup under the original idempotency key; legacy records without a
+    payload are marked dead instead of blocking the backlog."""
+    import time as _time
+
+    adapter = _FakeAdapter("slack-ops")
+    reg = _registry_with(adapter)
+    cfg = GatewayConfig(state_dir=str(tmp_path))
+    # Simulate a predecessor that wrote pending records and died: a
+    # payload-bearing pending record and a legacy pending record.
+    with (tmp_path / "outbox.ndjson").open("w", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "idempotency_key": "out-1",
+                    "channel": "slack-ops",
+                    "target": "C123",
+                    "text": "issue AGENTSDK-1 finished",
+                    "markdown": True,
+                    "status": "pending",
+                    "at": _time.time(),
+                }
+            )
+            + "\n"
+        )
+        fh.write(
+            json.dumps(
+                {
+                    "idempotency_key": "out-legacy",
+                    "channel": "slack-ops",
+                    "payload_size": 42,
+                    "status": "pending",
+                    "at": _time.time(),
+                }
+            )
+            + "\n"
+        )
+
+    gw = MessageGateway(cfg, registry=reg)
+    await gw.start()
+    try:
+        # The recoverable record was re-sent exactly once with its payload.
+        assert len(adapter.send_calls) == 1
+        call = adapter.send_calls[0]
+        assert call["target"] == "C123"
+        assert call["message"].text == "issue AGENTSDK-1 finished"
+        # The replay outcome is recorded: delivered for the replayed send,
+        # dead for the legacy no-payload record.
+        entries = gw.store.outbox_entries()
+        statuses = {
+            (e["idempotency_key"], e["status"]) for e in entries if e.get("status")
+        }
+        assert ("out-1", "delivered") in statuses
+        assert ("out-legacy", "dead") in statuses
+        assert gw.store.outbox_pending() == []
+    finally:
+        await gw.stop()
 
 
 def test_gateway_normalizes_duplicate_channel_types_before_runtime_load(tmp_path) -> None:

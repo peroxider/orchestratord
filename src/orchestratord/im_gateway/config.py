@@ -17,10 +17,11 @@ import contextlib
 import logging
 import os
 import shutil
+import sys
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
 
@@ -34,6 +35,57 @@ DEFAULT_CHANNELS_YAML = "~/.orchestratord/gateway/channels.yaml"
 # Pre-rename state dir kept so :func:`migrate_legacy_state_dir` can move an
 # existing install forward the first time the new path is used.
 LEGACY_STATE_DIR = "~/.orchestratord/im-gateway"
+
+
+def config_path_for_state_dir(state_dir: str | Path | None) -> Path | None:
+    """Resolve ``<state-dir>/channels.yaml`` for a gateway state directory.
+
+    Returns ``None`` when ``state_dir`` is ``None`` so callers keep
+    :func:`load_config`'s default-path behavior (``DEFAULT_CHANNELS_YAML``
+    plus legacy-state-dir migration).
+    """
+    if state_dir is None:
+        return None
+    return Path(state_dir).expanduser() / "channels.yaml"
+
+
+def _chmod_private(path: Path, mode: int) -> None:
+    """Best-effort ``chmod``; skipped on Windows and unsupported filesystems."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(OSError):
+        os.chmod(path, mode)
+
+
+def ensure_private_dir(path: str | Path) -> Path:
+    """Create ``path`` as a private (0700) directory, tightening existing ones.
+
+    ``Path.mkdir(mode=...)`` applies the mode only to the leaf directory and
+    is ignored on Windows, so the mode is re-asserted with ``chmod`` to also
+    tighten pre-existing directories (gateway state may hold credentials).
+    """
+    p = Path(path)
+    p.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _chmod_private(p, 0o700)
+    return p
+
+
+def open_private_writer(path: str | Path, *, append: bool = False) -> TextIO:
+    """Open a UTF-8 text file for writing, created with owner-only 0600.
+
+    ``os.open`` applies the mode at creation (a plain ``open()`` would honor
+    the process umask, typically 0644 under ``umask 022``); the follow-up
+    ``chmod`` also tightens a pre-existing file because ``O_CREAT`` never
+    changes the mode of an existing inode. Mode changes are no-ops on
+    Windows.
+    """
+    p = Path(path)
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+    fd = os.open(str(p), flags, 0o600)
+    fh = os.fdopen(fd, "a" if append else "w", encoding="utf-8")
+    _chmod_private(p, 0o600)
+    return fh
+
 
 DEFAULT_REPL_COMMAND_ALLOWLIST: tuple[str, ...] = (
     "/stop",
@@ -175,6 +227,8 @@ def migrate_legacy_state_dir(target: str | Path | None = None) -> Path:
         # Cross-device link or permission quirk — fall back to a copy.
         shutil.copytree(legacy, new)
         shutil.rmtree(legacy, ignore_errors=True)
+    # The moved directory keeps the legacy install's mode; tighten it.
+    _chmod_private(new, 0o700)
     logger.info("migrated gateway state dir %s -> %s", legacy, new)
     return new
 
@@ -376,7 +430,7 @@ _LOCK = threading.Lock()
 @contextlib.contextmanager
 def _file_lock(lock_path: Path):
     """Single-writer advisory lock (POSIX fcntl)."""
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(lock_path.parent)
     lock_path.touch(exist_ok=True)
     fd = os.open(str(lock_path), os.O_RDWR)
     try:
@@ -415,11 +469,14 @@ def save_config(config: GatewayConfig, path: str | Path | None = None) -> Path:
     if path is None:
         migrate_legacy_state_dir()
     p = Path(path or DEFAULT_CHANNELS_YAML).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(p.parent)
     payload = yaml.safe_dump(config.to_dict(), allow_unicode=True, sort_keys=False)
     with _file_lock(_lock_path(p)):
         tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(payload, encoding="utf-8")
+        # The tmp file is created 0600; os.replace keeps that mode on the
+        # final channels.yaml, which persists webhook URLs and app secrets.
+        with open_private_writer(tmp) as fh:
+            fh.write(payload)
         os.replace(tmp, p)
     logger.info("gateway config saved: %s", p)
     return p
@@ -438,7 +495,10 @@ __all__ = [
     "CommandAllowlistConfig",
     "GatewayConfig",
     "ReliabilityConfig",
+    "config_path_for_state_dir",
+    "ensure_private_dir",
     "load_config",
     "migrate_legacy_state_dir",
+    "open_private_writer",
     "save_config",
 ]

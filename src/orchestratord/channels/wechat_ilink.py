@@ -181,7 +181,16 @@ class WeChatIlinkAuthStore:
         with self._lock:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_suffix(self._path.suffix + ".tmp")
-            tmp.write_bytes(encode_json_body(payload))
+            # Create the temp file with 0o600 from the start (os.open mode)
+            # so the credential blob is never briefly world-readable between
+            # creation and the post-rename chmod. POSIX-only; Windows ignores
+            # the mode bits.
+            blob = encode_json_body(payload)
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, blob)
+            finally:
+                os.close(fd)
             os.replace(tmp, self._path)
             os.chmod(self._path, 0o600)
 
@@ -704,9 +713,9 @@ class WeChatIlinkChannelAdapter(ChannelAdapter):
         self._retry_policy = retry_policy
         self._long_poll_timeout_ms = long_poll_timeout_ms
         self._max_consecutive_failures = max_consecutive_failures
-        # Kept as a constructor-compatible field for existing configs, but
-        # direct/private WeChat text is open by default: any sender can drive
-        # the bot once the channel is logged in and the gateway is bound.
+        # Authorized inbound senders (fail closed): only users listed in
+        # ``extra.allowed_users`` (channels.yaml) may drive the bot; an
+        # empty/missing allowlist rejects ALL inbound messages.
         self._allowed_users = set(allowed_users or [])
         self._account_id = account_id
         self._base_url = base_url
@@ -953,6 +962,15 @@ class WeChatIlinkChannelAdapter(ChannelAdapter):
             return self._bot_user_id
         return None
 
+    def authorized_recipients(self) -> list[str]:
+        """Authorized inbound senders for this channel (empty = fail closed).
+
+        Public contract for wildcard OUTBOUND target resolution: returns the
+        currently effective ``extra.allowed_users`` list, or ``[]`` when no
+        allowlist is configured (inbound is rejected entirely).
+        """
+        return sorted(self._allowed_users)
+
     async def start(self) -> None:
         if self._poll_task is not None:
             return
@@ -961,6 +979,13 @@ class WeChatIlinkChannelAdapter(ChannelAdapter):
         if self._client is None:
             logger.warning("wechat adapter %s has no credentials; not polling", self.channel_id)
             return
+        if not self._allowed_users:
+            logger.warning(
+                "wechat adapter %s has no allowed_users configured; all inbound "
+                "messages will be rejected (fail closed). Configure authorized "
+                "users in extra.allowed_users in channels.yaml.",
+                self.channel_id,
+            )
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -1253,6 +1278,28 @@ class WeChatIlinkChannelAdapter(ChannelAdapter):
                 channel=self.channel_id,
                 account_id=self._account_id,
                 message_id=msg.message_id,
+            )
+            return
+        # Sender authorization (fail closed): only users in
+        # ``extra.allowed_users`` may drive the bot. An empty/missing
+        # allowlist rejects ALL inbound — a command-capable channel must be
+        # explicitly configured. The check runs BEFORE any sender-derived
+        # side effect (last_known_sender tracking, context-token
+        # persistence, unsupported-media handling) so an unauthorized
+        # sender leaves no trace.
+        if not self._allowed_users:
+            logger.debug(
+                "wechat inbound dropped: no allowed_users configured (fail closed): "
+                "msg_id=%s from=%s",
+                msg.message_id,
+                _safe_id(msg.from_user_id),
+            )
+            return
+        if msg.from_user_id not in self._allowed_users:
+            logger.debug(
+                "wechat inbound dropped: sender not authorized: from=%s msg_id=%s",
+                _safe_id(msg.from_user_id),
+                msg.message_id,
             )
             return
         # Track the most recent real sender for wildcard OUTBOUND resolution.

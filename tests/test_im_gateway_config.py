@@ -5,6 +5,12 @@ Migrated from ClawCodex ``test_config.py``.
 
 from __future__ import annotations
 
+import json
+import os
+import stat
+import sys
+import time
+
 import pytest
 
 from orchestratord.channels.models import ChannelConfig, ChannelType
@@ -12,9 +18,11 @@ from orchestratord.im_gateway.config import (
     CommandAllowlistConfig,
     GatewayConfig,
     ReliabilityConfig,
+    config_path_for_state_dir,
     load_config,
     save_config,
 )
+from orchestratord.im_gateway.store import ReliabilityStore
 
 
 def _cfg() -> GatewayConfig:
@@ -298,3 +306,128 @@ def test_migrate_legacy_state_dir_no_legacy_returns_target_uncreated(tmp_path, m
     result = cfg_mod.migrate_legacy_state_dir(str(target))
     assert result == target
     assert not target.exists()  # caller owns mkdir
+
+
+# ---------------------------------------------------------------------------
+# state-dir → channels.yaml path resolution (review P2-7)
+# ---------------------------------------------------------------------------
+
+
+def test_config_path_for_state_dir_expands_state_dir() -> None:
+    assert config_path_for_state_dir("/tmp/gw") is not None
+    assert str(config_path_for_state_dir("/tmp/gw")) == "/tmp/gw/channels.yaml"
+    assert config_path_for_state_dir(None) is None  # None → default-path behavior
+
+
+def test_config_path_for_state_dir_expands_user() -> None:
+    p = config_path_for_state_dir("~/custom-gateway")
+    assert p is not None
+    assert "~" not in str(p)  # expanded against HOME, not kept literal
+    assert p.name == "channels.yaml"
+
+
+# ---------------------------------------------------------------------------
+# file permission hardening (review P2-9) — POSIX only
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_save_config_creates_state_dir_owner_only(tmp_path) -> None:
+    state = tmp_path / "gw"
+    save_config(_cfg(), state / "channels.yaml")
+    assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_save_config_tightens_pre_existing_state_dir(tmp_path) -> None:
+    state = tmp_path / "gw"
+    state.mkdir()
+    os.chmod(state, 0o755)
+    save_config(_cfg(), state / "channels.yaml")
+    assert stat.S_IMODE(os.stat(state).st_mode) == 0o700
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_save_config_writes_channels_yaml_owner_only(tmp_path) -> None:
+    p = tmp_path / "channels.yaml"
+    save_config(_cfg(), p)
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_save_config_replaces_loose_file_with_owner_only_mode(tmp_path) -> None:
+    p = tmp_path / "channels.yaml"
+    p.write_text("enabled: true\n", encoding="utf-8")
+    os.chmod(p, 0o644)
+
+    save_config(_cfg(), p)
+
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    assert load_config(p).enabled is True
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_store_creates_state_dir_and_files_owner_only(tmp_path) -> None:
+    store = ReliabilityStore(tmp_path / "gw")
+    store.record_processed("k1")
+    store.append_outbox({"idempotency_key": "i1"})
+    store.append_dead_letter({"idempotency_key": "i2", "error_category": "boom"})
+    store.audit("send", channel="wechat")
+    store.set_context_token("acct", "u1", "ctx_tok")
+
+    assert stat.S_IMODE(os.stat(store.state_dir).st_mode) == 0o700
+    for name in (
+        "processed_inbound.ndjson",
+        "outbox.ndjson",
+        "dead_letter.ndjson",
+        "audit.ndjson",
+        "wechat_context_tokens.json",
+    ):
+        assert stat.S_IMODE(os.stat(store.state_dir / name).st_mode) == 0o600, name
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_store_append_tightens_pre_existing_loose_ndjson(tmp_path) -> None:
+    store = ReliabilityStore(tmp_path / "gw")
+    path = store.state_dir / "outbox.ndjson"
+    path.write_text("", encoding="utf-8")
+    os.chmod(path, 0o644)
+
+    store.append_outbox({"idempotency_key": "i1"})
+
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    assert len(store.outbox_entries()) == 1
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX file modes only; acceptance is WSL"
+)
+def test_store_rewrite_keeps_owner_only_mode(tmp_path) -> None:
+    store = ReliabilityStore(tmp_path / "gw")
+    path = store.state_dir / "processed_inbound.ndjson"
+    now = time.time()
+    path.write_text(
+        json.dumps({"key": "old", "seen_at": now - 86400}) + "\n"
+        + json.dumps({"key": "new", "seen_at": now - 100}) + "\n",
+        encoding="utf-8",
+    )
+
+    removed = store.purge_processed_inbound(ttl_seconds=3600, max_entries=10000)
+
+    assert removed == 1
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert json.loads(lines[0])["key"] == "new"

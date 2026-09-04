@@ -7,6 +7,9 @@ Focus on the existing injectable seams:
 """
 from __future__ import annotations
 
+import asyncio
+import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -94,6 +97,92 @@ def test_cli_runner_replaces_subcommand_import() -> None:
     assert captured == [["issue", "list"]]
 
 
+def test_in_process_cli_runner_restores_sys_argv(monkeypatch) -> None:
+    """P2-6: the transitional in-process runner restores sys.argv on every
+    exit path (including SystemExit), so the host orchestrator's argv is
+    never permanently clobbered."""
+    calls: list[list[str]] = []
+
+    def fake_app() -> None:
+        calls.append(list(sys.argv))
+        raise SystemExit(3)
+
+    monkeypatch.setattr("orchestratord.cli.main.app", fake_app)
+    sentinel = ["orchestratord", "server", "start"]
+    sys.argv = list(sentinel)
+    client = OrchestratorGatewayClient(_noop_handlers())
+
+    rc, _stdout, _stderr = client._run_orchestrator_cli(["issue", "list"])
+
+    assert rc == 3
+    assert calls == [["orchestratord", "issue", "list"]]
+    assert sys.argv == sentinel
+
+
+def test_in_process_cli_runner_restores_sys_argv_on_error(monkeypatch) -> None:
+    """sys.argv is restored even when the CLI raises a plain exception."""
+
+    def fake_app() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("orchestratord.cli.main.app", fake_app)
+    sentinel = ["orchestratord", "daemon"]
+    sys.argv = list(sentinel)
+    client = OrchestratorGatewayClient(_noop_handlers())
+
+    rc, _stdout, stderr = client._run_orchestrator_cli(["issue", "list"])
+
+    assert rc == 1
+    assert "boom" in stderr
+    assert sys.argv == sentinel
+
+
+@pytest.mark.asyncio
+async def test_cli_commands_serialize_on_one_lock() -> None:
+    """P2-6: concurrent commands execute strictly one-at-a-time (FIFO)."""
+    active = 0
+    max_active = 0
+    order: list[str] = []
+
+    def cli_runner(argv: list[str]) -> tuple[int, str, str]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        time.sleep(0.05)  # force overlap if serialization is missing
+        order.append(argv[-1])
+        active -= 1
+        return 0, "", ""
+
+    client = OrchestratorGatewayClient(_noop_handlers(), cli_runner=cli_runner)
+
+    await asyncio.gather(
+        client._run_cli_isolated(["issue", "list", "--tag", "a"]),
+        client._run_cli_isolated(["issue", "list", "--tag", "b"]),
+    )
+
+    assert max_active == 1, "commands must be serialized"
+    assert order == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_cli_command_times_out_with_rc_124() -> None:
+    """P2-6: a command exceeding cli_timeout_seconds reports rc 124."""
+
+    def slow_runner(argv: list[str]) -> tuple[int, str, str]:
+        time.sleep(1.0)
+        return 0, "late", ""
+
+    client = OrchestratorGatewayClient(
+        _noop_handlers(), cli_runner=slow_runner, cli_timeout_seconds=0.05
+    )
+
+    rc, stdout, stderr = await client._run_cli_isolated(["issue", "list"])
+
+    assert rc == 124
+    assert stdout == ""
+    assert "timed out" in stderr
+
+
 @pytest.mark.asyncio
 async def test_ipc_deliver_routes_to_dispatch() -> None:
     """Server-pushed DELIVER frames are converted and dispatched without
@@ -102,7 +191,7 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
         _noop_handlers(),
         origin="im:direct:test:*",
     )
-    client.dispatch = MagicMock(return_value="followup_queued")  # type: ignore[method-assign]
+    client.dispatch = AsyncMock(return_value="followup_queued")  # type: ignore[method-assign]
 
     ipc = AsyncMock()
     ipc_client = MagicMock()

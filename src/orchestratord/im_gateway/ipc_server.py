@@ -601,7 +601,10 @@ class GatewayIpcServer:
         if etype == "control.reload":
             name = (frame.payload or {}).get("channel", "")
             try:
-                ok = self.gateway.reload_channel(name)
+                # reload_channel is an async transaction (disk reload, build,
+                # start, atomic swap); the existing ok→ACK / False→NACK
+                # mapping reports failed reloads back to the CLI.
+                ok = await self.gateway.reload_channel(name)
             except Exception as exc:
                 logger.exception("gateway ipc: reload channel %r failed", name)
                 return GatewayFrame(

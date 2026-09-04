@@ -548,6 +548,54 @@ async def test_feishu_adapter_inbound_drops_non_p2p() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feishu_adapter_inbound_drops_disallowed_sender_without_side_effects() -> None:
+    """Sender auth group 2 (adapter level): an unauthorized sender is dropped
+    before any last_known_sender / sender-store side effect."""
+    store = _FakeFeishuSenderStore()
+    channel = _FakeChannel()
+    adapter = FeishuAppChannelAdapter(
+        _config(), channel_factory=lambda s: channel, sender_store=store
+    )
+    delivered = []
+    adapter.set_inbound_handler(delivered.append)
+    await adapter.start()
+
+    await channel.fire_message(_sdk_inbound(open_id="ou_other"))
+
+    assert delivered == []
+    assert adapter._last_sender is None
+    assert store.last_senders == {}
+
+
+@pytest.mark.asyncio
+async def test_feishu_adapter_inbound_empty_allowlist_drops_all() -> None:
+    """Sender auth group 3 (adapter level): an empty allowlist rejects all."""
+    channel = _FakeChannel()
+    adapter = FeishuAppChannelAdapter(
+        _config({"allowed_user_open_id": ""}), channel_factory=lambda s: channel
+    )
+    delivered = []
+    adapter.set_inbound_handler(delivered.append)
+    await adapter.start()
+
+    await channel.fire_message(_sdk_inbound(open_id="ou_allowed"))
+    await channel.fire_message(_sdk_inbound(open_id="ou_anyone"))
+
+    assert delivered == []
+    assert adapter._last_sender is None
+
+
+def test_feishu_adapter_authorized_recipients() -> None:
+    adapter = FeishuAppChannelAdapter(_config(), channel_factory=lambda s: _FakeChannel())
+    assert adapter.authorized_recipients() == ["ou_allowed"]
+
+    empty = FeishuAppChannelAdapter(
+        _config({"allowed_user_open_id": ""}), channel_factory=lambda s: _FakeChannel()
+    )
+    assert empty.authorized_recipients() == []
+
+
+@pytest.mark.asyncio
 async def test_feishu_adapter_tracks_last_known_sender_from_inbound_chat() -> None:
     channel = _FakeChannel()
     adapter = FeishuAppChannelAdapter(_config(), channel_factory=lambda s: channel)
@@ -999,7 +1047,8 @@ def test_feishu_translate_inbound_drops_non_p2p() -> None:
     assert translate_inbound(_sdk_inbound(chat_type="group"), _events_settings()) is None
 
 
-def test_feishu_translate_inbound_applies_optional_allowlist() -> None:
+def test_feishu_translate_inbound_drops_disallowed_sender() -> None:
+    """Sender auth group 2: a sender outside the allowlist is dropped."""
     assert translate_inbound(_sdk_inbound(open_id="ou_other"), _events_settings()) is None
 
 
@@ -1011,7 +1060,8 @@ def test_feishu_translate_inbound_drops_empty_text() -> None:
     assert translate_inbound(_sdk_inbound(text="   "), _events_settings()) is None
 
 
-def test_feishu_translate_inbound_allowlist_empty_admits_all() -> None:
+def test_feishu_translate_inbound_empty_allowlist_fails_closed() -> None:
+    """Sender auth group 3: an empty allowlist rejects every p2p sender."""
     settings = FeishuAppSettings(
         channel_id="feishu",
         connection_mode="websocket",
@@ -1020,7 +1070,35 @@ def test_feishu_translate_inbound_allowlist_empty_admits_all() -> None:
         allowed_user_open_id="",
         bot_open_id="ou_bot",
     )
-    assert translate_inbound(_sdk_inbound(open_id="ou_anyone"), settings) is not None
+    assert translate_inbound(_sdk_inbound(open_id="ou_anyone"), settings) is None
+    assert translate_inbound(_sdk_inbound(open_id="ou_allowed"), settings) is None
+
+
+def test_feishu_translate_inbound_empty_allowlist_warns_once(caplog) -> None:
+    import logging
+
+    from orchestratord.channels import feishu_events
+
+    settings = FeishuAppSettings(
+        channel_id="feishu",
+        connection_mode="websocket",
+        app_id="cli_app",
+        app_secret="secret",
+        allowed_user_open_id="",
+        bot_open_id="ou_bot",
+    )
+    feishu_events._empty_allowlist_warned = False
+    caplog.set_level(logging.WARNING, logger="orchestratord.channels.feishu_events")
+    try:
+        translate_inbound(_sdk_inbound(open_id="ou_anyone"), settings)
+        translate_inbound(_sdk_inbound(open_id="ou_other"), settings)
+        warnings = [
+            record for record in caplog.records if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "allowed_user_open_id" in warnings[0].getMessage()
+    finally:
+        feishu_events._empty_allowlist_warned = False
 
 
 # ---------------------------------------------------------------------------

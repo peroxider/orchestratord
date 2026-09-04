@@ -502,7 +502,7 @@ async def test_adapter_send_throttles_consecutive_sendmessage_calls(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_adapter_reply_after_inbound_uses_monotonic_delay(tmp_path, monkeypatch) -> None:
-    adapter, _, transport = _make_adapter(tmp_path)
+    adapter, _, transport = _make_adapter(tmp_path, allowed_users=["u1"])
     sleeps: list[float] = []
     clock = {"monotonic": 100.0, "wall": 1_800_000_000.0}
 
@@ -826,6 +826,127 @@ async def test_inbound_text_delivered_with_context_token(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inbound_authorized_sender_message_passes(tmp_path) -> None:
+    """Sender auth group 1: a sender listed in allowed_users is admitted."""
+    adapter, store, transport = _make_adapter(tmp_path, allowed_users=["u1", "u2"])
+    transport.inbound_queue = [
+        {
+            "msg_id": "m1",
+            "from_user_id": "u2",
+            "to_user_id": "bot",
+            "msg_type": "TEXT",
+            "text": "hi",
+            "context_token": "ctx_u2",
+        }
+    ]
+    received: list = []
+    adapter.set_inbound_handler(lambda m: received.append(m) or _noop())
+    await adapter._poll_once()
+    assert len(received) == 1
+    assert received[0].from_user_id == "u2"
+    assert received[0].text == "hi"
+    # Authorized senders DO produce the sender-derived side effects.
+    assert adapter.last_known_sender() == "u2"
+    assert store.get_context_token("default", "u2") == "ctx_u2"
+
+
+@pytest.mark.asyncio
+async def test_inbound_unauthorized_sender_dropped_without_side_effects(tmp_path) -> None:
+    """Sender auth group 2: a sender outside allowed_users is dropped before
+    any sender-derived state update (no last_known_sender, no context token)."""
+    adapter, store, transport = _make_adapter(tmp_path, allowed_users=["u1"])
+    transport.inbound_queue = [
+        {
+            "msg_id": "m1",
+            "from_user_id": "stranger",
+            "to_user_id": "bot",
+            "msg_type": "TEXT",
+            "text": "hi",
+            "context_token": "ctx_stranger",
+        }
+    ]
+    received: list = []
+    adapter.set_inbound_handler(lambda m: received.append(m) or _noop())
+    await adapter._poll_once()
+    assert received == []
+    # No last_known_sender side effect (falls back to loaded login user).
+    assert adapter._last_from_user_id is None
+    assert adapter.last_known_sender() == "bot_user_1"
+    # No persisted context-token user record for the unauthorized sender.
+    assert store.get_context_token("default", "stranger") is None
+    assert store.wechat_context_users("default") == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_unauthorized_media_gets_no_reply_or_record(tmp_path) -> None:
+    """Auth runs before unsupported-media handling: an unauthorized sender
+    cannot trigger the auto-reply or an unsupported_inbound record."""
+    adapter, store, transport = _make_adapter(tmp_path, allowed_users=["u1"])
+    transport.inbound_queue = [
+        {
+            "msg_id": "m1",
+            "from_user_id": "stranger",
+            "to_user_id": "bot",
+            "msg_type": "IMAGE",
+            "text": None,
+        }
+    ]
+    received: list = []
+    adapter.set_inbound_handler(lambda m: received.append(m) or _noop())
+    await adapter._poll_once()
+    for task in [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]:
+        await task
+    assert received == []
+    assert transport.sent == []
+    assert _unsupported_entries(store) == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_empty_allowed_users_drops_all_fail_closed(tmp_path) -> None:
+    """Sender auth group 3: an empty allowlist rejects every inbound sender."""
+    adapter, store, transport = _make_adapter(tmp_path, allowed_users=[])
+    transport.inbound_queue = [
+        {
+            "msg_id": "m1",
+            "from_user_id": "u1",
+            "to_user_id": "bot",
+            "msg_type": "TEXT",
+            "text": "hi",
+            "context_token": "ctx_u1",
+        }
+    ]
+    received: list = []
+    adapter.set_inbound_handler(lambda m: received.append(m) or _noop())
+    await adapter._poll_once()
+    assert received == []
+    assert adapter._last_from_user_id is None
+    assert store.get_context_token("default", "u1") is None
+    assert store.wechat_context_users("default") == []
+
+
+def test_authorized_recipients_returns_effective_allowlist(tmp_path) -> None:
+    adapter, _, _ = _make_adapter(tmp_path, allowed_users=["u2", "u1"])
+    assert adapter.authorized_recipients() == ["u1", "u2"]
+
+    empty, _, _ = _make_adapter(tmp_path, allowed_users=[])
+    assert empty.authorized_recipients() == []
+
+
+@pytest.mark.asyncio
+async def test_start_warns_when_allowed_users_empty(tmp_path, caplog) -> None:
+    adapter, _, _ = _make_adapter(tmp_path, allowed_users=[])
+    with caplog.at_level(logging.WARNING, logger="orchestratord.channels.wechat_ilink"):
+        await adapter.start()
+    try:
+        assert any(
+            "allowed_users" in record.getMessage() and "fail closed" in record.getMessage()
+            for record in caplog.records
+        )
+    finally:
+        await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_inbound_cursor_persisted_across_polls(tmp_path) -> None:
     adapter, _, transport = _make_adapter(tmp_path, allowed_users=["u1"])
     transport.inbound_queue = [
@@ -877,7 +998,9 @@ async def test_inbound_cursor_restored_across_adapter_restarts(tmp_path) -> None
 
 @pytest.mark.asyncio
 async def test_inbound_text_from_unpaired_user_delivered_without_pairing(tmp_path) -> None:
-    adapter, _, transport = _make_adapter(tmp_path, allowed_users=[])
+    # Pairing is not a delivery gate: a user listed in allowed_users but not
+    # in the pairing store is still delivered.
+    adapter, _, transport = _make_adapter(tmp_path, allowed_users=["stranger"])
     transport.inbound_queue = [
         {
             "msg_id": "m1",
@@ -900,7 +1023,7 @@ async def test_inbound_text_from_unpaired_user_delivered_without_pairing(tmp_pat
 async def test_inbound_pairing_code_text_is_delivered_like_normal_message(tmp_path) -> None:
     pairing = WeChatPairingStore(tmp_path / "pairing.json")
     code = pairing.generate()
-    adapter, _, transport = _make_adapter(tmp_path, allowed_users=[], pairing=pairing)
+    adapter, _, transport = _make_adapter(tmp_path, allowed_users=["new_user"], pairing=pairing)
     transport.inbound_queue = [
         {
             "msg_id": "m1",

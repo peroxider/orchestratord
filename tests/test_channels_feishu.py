@@ -79,19 +79,23 @@ def _config(name: str = "feishu-1", secret: str | None = None) -> ChannelConfig:
 
 
 def test_sign_feishu_matches_reference_vector() -> None:
-    # Reference vector from the Feishu docs:
+    # Independent constant vector, precomputed once with the official Feishu
+    # algorithm (HMAC-SHA256 keyed by "timestamp\nsecret" over an EMPTY
+    # message, base64-encoded) — not derived by calling the code under test:
     # https://open.feishu.cn/document/ukTMukTMukTM/ucTM5YjL3ETO24yNxkjN
-    secret = "secret_value"
-    timestamp = "1620000000"
-    string_to_sign = f"{timestamp}\n{secret}"
-    expected = base64.b64encode(
+    expected_official = "rlzEhH5a1UCr+DKqfz3pAd86vVZPkGGeI3S3UPkuPaM="
+    assert sign_feishu("test-vector-secret", "1618941524") == expected_official
+    # Guard against regression to the legacy wrong implementation, which
+    # keyed the MAC with the secret and signed "timestamp\nsecret" instead.
+    legacy = base64.b64encode(
         hmac.new(
-            secret.encode("utf-8"),
-            string_to_sign.encode("utf-8"),
+            b"test-vector-secret",
+            b"1618941524\ntest-vector-secret",
             hashlib.sha256,
         ).digest()
     ).decode("utf-8")
-    assert sign_feishu(secret, timestamp) == expected
+    assert legacy == "9GzbuECtw83tHfc7AC3A8yh/VAmnsb7fpR+94aK+7CQ="
+    assert legacy != expected_official
 
 
 def test_sign_feishu_rejects_empty_secret() -> None:

@@ -22,15 +22,18 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import ReliabilityConfig
+from .config import ReliabilityConfig, ensure_private_dir, open_private_writer
 
 logger = logging.getLogger(__name__)
 
 
 def _atomic_write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # The tmp file is created 0600; os.replace keeps that mode on the final
+    # JSON state file (context tokens / cursors may hold IM identifiers).
+    with open_private_writer(tmp) as fh:
+        fh.write(json.dumps(data, ensure_ascii=False))
     os.replace(tmp, path)
 
 
@@ -44,8 +47,11 @@ def _read_json(path: Path, default: Any) -> Any:
 
 
 def _append_ndjson(path: Path, entry: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as fh:
+    ensure_private_dir(path.parent)
+    # open_private_writer creates the file 0600 (a plain open() would honor
+    # the process umask, typically 0644) and re-tightens a pre-existing
+    # loose file because O_CREAT never changes an existing inode's mode.
+    with open_private_writer(path, append=True) as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -65,9 +71,9 @@ def _read_ndjson(path: Path) -> list[dict[str, Any]]:
 
 def _rewrite_ndjson(path: Path, entries: list[dict[str, Any]]) -> None:
     """原子重写 NDJSON:写 tmp + os.replace。调用方需持锁。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_dir(path.parent)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as fh:
+    with open_private_writer(tmp) as fh:
         for e in entries:
             fh.write(json.dumps(e, ensure_ascii=False) + "\n")
     os.replace(tmp, path)
@@ -101,7 +107,7 @@ class ReliabilityStore:
         reliability: ReliabilityConfig | None = None,
     ) -> None:
         self._dir = Path(state_dir).expanduser()
-        self._dir.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(self._dir)
         self._reliability = reliability or ReliabilityConfig()
         self._lock = threading.RLock()
         # in-memory dedupe index: key -> first_seen_ts
@@ -173,6 +179,42 @@ class ReliabilityStore:
                 latest[key] = e
             terminal = {"delivered", "dead", "failed"}
             return [e for e in latest.values() if e.get("status") not in terminal]
+
+    def outbox_replayable(self) -> list[dict[str, Any]]:
+        """Non-terminal outbox records merged with their persisted payload.
+
+        The ``pending`` record written at send time carries the full delivery
+        parameters (chunk text, target, context_token, markdown, metadata,
+        ...); later status records (``retry_pending``) do not. For every
+        idempotency_key whose LATEST status is non-terminal, return the
+        latest status record merged over its most recent payload-bearing
+        record, so a caller can rebuild the exact send. Keys with no
+        payload-bearing record (legacy schema: payload_size only) are
+        returned without a ``text`` field for the caller to handle.
+        """
+        with self._lock:
+            latest: dict[str, dict[str, Any]] = {}
+            payloads: dict[str, dict[str, Any]] = {}
+            for e in _read_ndjson(self._p("outbox.ndjson")):
+                key = e.get("idempotency_key")
+                if not key:
+                    continue
+                latest[key] = e
+                if e.get("text") is not None:
+                    payloads[key] = e
+            terminal = {"delivered", "dead", "failed"}
+            merged: list[dict[str, Any]] = []
+            for key, status_entry in latest.items():
+                if status_entry.get("status") in terminal:
+                    continue
+                payload = payloads.get(key)
+                if payload is None:
+                    merged.append(dict(status_entry))
+                    continue
+                record = dict(payload)
+                record.update({k: v for k, v in status_entry.items() if k != "text"})
+                merged.append(record)
+            return merged
 
     # -- dead letter -----------------------------------------------------
     def append_dead_letter(self, entry: dict[str, Any]) -> None:

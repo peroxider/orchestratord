@@ -47,7 +47,7 @@ class _FakeGateway:
         self.received.append(message)
         return AckReceipt(message.message_id or "d1", AckLayer.ENQUEUED, "enqueued")
 
-    def reload_channel(self, name):
+    async def reload_channel(self, name):
         self.reloaded.append(name)
         return name != "missing"
 
@@ -543,7 +543,11 @@ async def test_ipc_wildcard_outbound_delivers_via_real_adapter_context_token(tmp
         webhook_url="https://ilinkai.weixin.qq.com/dummy",
         name="wechat",
         enabled=True,
-        extra={"base_url": "https://ilinkai.weixin.qq.com", "account_id": "default"},
+        extra={
+            "base_url": "https://ilinkai.weixin.qq.com",
+            "account_id": "default",
+            "allowed_users": ["operator@im.wechat"],
+        },
     )
     transport = _FakeTransport()
     adapter = WeChatIlinkChannelAdapter(
@@ -551,6 +555,7 @@ async def test_ipc_wildcard_outbound_delivers_via_real_adapter_context_token(tmp
         auth_store=WeChatIlinkAuthStore(state_dir / "auth.json"),
         store=store,
         transport=transport,
+        allowed_users=["operator@im.wechat"],
         max_consecutive_failures=10,
     )
     adapter._auth_store.save(
@@ -567,7 +572,7 @@ async def test_ipc_wildcard_outbound_delivers_via_real_adapter_context_token(tmp
     gw.registry.register(adapter)
 
     # No inbound in this gateway lifetime → in-memory map empty. The
-    # wildcard must still resolve via the persisted context token.
+    # wildcard still resolves: the channel's single authorized recipient.
     channel, target = _resolve_origin(WECHAT_DIRECT_ALL_ORIGIN, gw)
     assert channel == "wechat"
     assert target == "operator@im.wechat"
@@ -695,7 +700,7 @@ async def test_ipc_status_includes_peer_pid_from_session_id(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_ipc_control_reload_exception_returns_nack_with_peers(tmp_path) -> None:
     class _ReloadFailGateway(_FakeGateway):
-        def reload_channel(self, name):
+        async def reload_channel(self, name):
             raise RuntimeError("adapter busy")
 
     gw = _ReloadFailGateway()
@@ -1072,14 +1077,16 @@ async def test_reconnect_redeliver_hits_server_dedup(tmp_path) -> None:
         try:
             registered = await peer.register("repl_main", origin="o1")
             assert registered.ack_layer == "accepted"
+            # A whitelisted slash command — plain text is now rejected by the
+            # dispatcher (P1-2), which would bypass the handler entirely.
             r1 = await peer.deliver(
-                delivery_id="d1", session_id="repl_main", origin="o1", text="hello"
+                delivery_id="d1", session_id="repl_main", origin="o1", text="/help"
             )
             assert r1 is not None and r1.ack_layer == "enqueued"
             # simulate a naive reconnect that lost client-side dedup state: the
             # same delivery_id becomes eligible to be sent again.
             r2 = await peer.deliver(
-                delivery_id="d1", session_id="repl_main", origin="o1", text="hello"
+                delivery_id="d1", session_id="repl_main", origin="o1", text="/help"
             )
             # server-side dedup rejects the duplicate (accepted "duplicate; skipped")
             assert r2 is not None

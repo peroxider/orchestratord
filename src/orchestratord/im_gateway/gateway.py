@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import replace
+from pathlib import Path
 
 from orchestratord.channels.capabilities import ChannelAdapter, ChannelCapability
 from orchestratord.channels.registry import (
@@ -45,8 +47,12 @@ class MessageGateway:
         *,
         registry: ChannelAdapterRegistry | None = None,
         store: ReliabilityStore | None = None,
+        config_path: str | Path | None = None,
     ) -> None:
         self.config = _normalize_config_channels(config or GatewayConfig())
+        # On-disk config source for transactional channel reloads. ``None``
+        # keeps load_config()'s default channels.yaml path.
+        self._config_path = Path(config_path).expanduser() if config_path is not None else None
         self.registry = registry or build_default_registry()
         self.store = store or ReliabilityStore(self.config.state_dir, self.config.reliability)
         self.binding = BindingPolicy(auditor=self._audit_binding)
@@ -209,6 +215,13 @@ class MessageGateway:
         # Start only adapters that declare inbound_polling (P2 wires WeChat).
         for adapter in self._inbound_adapters:
             await adapter.start()
+        # Recover the durable outbox: re-send records a previous process
+        # left without a terminal status (P4 outbox recovery). Best-effort —
+        # a replay failure must never block startup.
+        try:
+            await self._replay_pending_outbox()
+        except Exception:
+            logger.exception("gateway outbox replay failed during startup")
         logger.info("gateway started")
 
     async def stop(self) -> None:
@@ -292,33 +305,220 @@ class MessageGateway:
         return await self.outbound.broadcast(message, channels=channels)
 
     # -- channel management ---------------------------------------------
-    def reload_channel(self, name: str) -> bool:
-        """Rebuild a single adapter from config and hot-swap it (P4 live reload).
+    async def reload_channel(self, name: str, *, ready_timeout: float = 15.0) -> bool:
+        """Rebuild one channel from the on-disk config as an async transaction.
 
-        Stops the old adapter's inbound loop, rebuilds via ``_build_adapter``,
-        re-registers, and re-attaches the inbound handler. In-flight message
-        safety is best-effort in v1 (the outbox preserves pending sends).
+        Steps (P4 live reload, transactional):
+
+        1. Reload ``channels.yaml`` from disk (the ``config_path`` captured
+           at construction — the same file ``serve()`` booted from). An
+           invalid config, or one that no longer contains the channel,
+           fails the reload with an audit record and leaves everything
+           untouched.
+        2. Build the new adapter via ``_build_adapter``. A failed build
+           keeps the old adapter and the in-memory config as-is.
+        3. If the gateway is running, start the new adapter and wait for it
+           to report a connected/healthy state (bounded by ``ready_timeout``;
+           a timeout is treated as degraded-but-usable, mirroring the
+           daemon's startup health semantics — the adapter keeps retrying in
+           the background). An exception from ``start()`` aborts the reload:
+           the half-started replacement is stopped, the old adapter stays.
+        4. Only after a successful build+start, atomically swap in the new
+           adapter (registry entry, inbound list, and the gateway's config
+           object) and stop the old adapter asynchronously — a slow stop
+           never blocks the reload return.
+
+        In-flight message safety: both adapters may briefly poll inbound
+        concurrently between the new adapter's start and the old adapter's
+        stop; the store's inbound dedupe absorbs any double delivery. The
+        outbox preserves pending outbound sends across the swap.
         """
-        channel_cfg = self.config.get_channel(name)
-        if channel_cfg is None:
-            logger.warning("gateway reload: channel %r not found in config", name)
-            return False
+        from .config import load_config
+
         old = self.registry.get(name)
-        if old is not None:
-            _schedule_adapter_stop(old)
-            self.registry.remove(name)
-            if old in self._inbound_adapters:
-                self._inbound_adapters.remove(old)
-        adapter = self._build_adapter(channel_cfg)
-        if adapter is None:
+        try:
+            disk_config = load_config(self._config_path)
+        except Exception as exc:  # noqa: BLE001 — invalid YAML must fail the reload
+            logger.warning("gateway reload: config reload failed for %r: %s", name, exc)
+            self.store.audit("channel_reload_failed", channel=name, reason=f"config_load_error: {exc}")
             return False
-        self.registry.register(adapter)
-        self._attach_inbound(adapter)
-        if self._running and hasattr(adapter, "start"):
-            _schedule_adapter_start(adapter)
+        # serve() overrides state_dir after load_config (the YAML default
+        # points at ~/.orchestratord/gateway). The runtime state dir hosts
+        # the reliability store — a reload must never move it.
+        disk_config.state_dir = self.config.state_dir
+        disk_config = _normalize_config_channels(disk_config)
+        channel_cfg = disk_config.get_channel(name)
+        if channel_cfg is None:
+            logger.warning("gateway reload: channel %r not found in on-disk config", name)
+            self.store.audit("channel_reload_failed", channel=name, reason="channel_not_in_config")
+            return False
+
+        new_adapter = self._build_adapter(channel_cfg)
+        if new_adapter is None:
+            self._restore_old_adapter(name, old)
+            self.store.audit("channel_reload_failed", channel=name, reason="adapter_build_failed")
+            return False
+
+        try:
+            if self._running and hasattr(new_adapter, "start"):
+                await new_adapter.start()
+                ready = await self._wait_adapter_ready(new_adapter, ready_timeout)
+                if not ready:
+                    logger.warning(
+                        "gateway reload: channel %s not ready after %.1fs — "
+                        "degraded but usable (keeps retrying in background)",
+                        name,
+                        ready_timeout,
+                    )
+        except Exception as exc:  # noqa: BLE001 — start failure aborts the swap
+            logger.warning("gateway reload: new adapter start failed for %r: %s", name, exc)
+            stop = getattr(new_adapter, "stop", None)
+            if callable(stop):
+                try:
+                    await stop()
+                except Exception:
+                    logger.debug("gateway reload: cleanup stop failed for %r", name, exc_info=True)
+            self._restore_old_adapter(name, old)
+            self.store.audit(
+                "channel_reload_failed", channel=name, reason=f"adapter_start_error: {exc}"
+            )
+            return False
+
+        # -- commit: atomic replacement ----------------------------------
+        self.registry.register(new_adapter)  # same channel_id → overwrite
+        if old is not None and old in self._inbound_adapters:
+            self._inbound_adapters.remove(old)
+        self._attach_inbound(new_adapter)
+        self.config = disk_config
+        if old is not None:
+            _schedule_adapter_stop(old)  # non-blocking; swap already committed
         self.store.audit("channel_reload", channel=name)
         logger.info("gateway channel reloaded: %s", name)
         return True
+
+    def _restore_old_adapter(self, name: str, old: ChannelAdapter | None) -> None:
+        """Undo a build-time registration so a failed reload keeps the old adapter.
+
+        ``_build_adapter`` builds non-gateway-owned channels through
+        ``registry.create()``, which registers the new adapter under the
+        channel name before it is started. If the reload aborts afterwards,
+        re-registering the old adapter (or removing the orphan replacement
+        when no old one existed) restores the pre-reload registry state.
+        """
+        if old is not None:
+            self.registry.register(old)
+        else:
+            self.registry.remove(name)
+
+    async def _wait_adapter_ready(self, adapter, timeout: float) -> bool:
+        """Wait until ``adapter`` reports a connected/healthy state.
+
+        Mirrors :meth:`wait_channels_ready`: account statuses containing
+        ``connected``/``logged_in`` are ready. A healthy adapter without an
+        account status (simple outbound/webhook adapters and test fakes)
+        counts as ready immediately. Anything else is polled until
+        ``timeout`` elapses; the caller then treats the channel as degraded
+        but usable, matching the daemon's startup health semantics.
+        """
+        if timeout <= 0:
+            return False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while True:
+            try:
+                health = await adapter.health_check()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(
+                    "gateway reload: health check error for %s: %s",
+                    getattr(adapter, "channel_id", "?"),
+                    exc,
+                )
+                health = None
+            status = str(getattr(health, "account_status", "") or "")
+            if getattr(health, "healthy", False) and not status:
+                return True
+            if any(marker in status for marker in ("connected", "logged_in")):
+                return True
+            if loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.2)
+
+    async def _replay_pending_outbox(self) -> None:
+        """Re-send outbox records left pending by a previous process.
+
+        Scans the durable outbox for entries without a terminal status,
+        rebuilds the original :class:`OutboundMessage` from the parameters
+        persisted alongside the chunk text, and re-sends it through the
+        normal outbound path under the original idempotency key. A record
+        that ends non-terminal again (e.g. another crash mid-replay) stays
+        pending and is retried on the next startup. Single-record failures
+        are marked dead and never block the rest of the backlog.
+
+        This is at-least-once delivery: a send that succeeded right before
+        a crash is re-sent, so the IM side may see a duplicate message —
+        the standard outbox trade-off for recoverability.
+        """
+        pending = self.store.outbox_replayable()
+        if not pending:
+            return
+        logger.info(
+            "gateway outbox replay: %d pending record(s) from previous process",
+            len(pending),
+        )
+        for entry in pending:
+            key = str(entry.get("idempotency_key") or "")
+            channel = str(entry.get("channel") or "")
+            text = entry.get("text")
+            if not key or not channel or text is None:
+                # Legacy pending records (pre-recovery schema) carry only
+                # payload_size — they cannot be rebuilt. Mark them dead so
+                # they stop counting as recoverable.
+                self.store.append_outbox(
+                    {
+                        "idempotency_key": key or "unknown",
+                        "channel": channel,
+                        "status": "dead",
+                        "error": "replay_payload_missing",
+                        "at": time.time(),
+                    }
+                )
+                logger.warning(
+                    "gateway outbox replay: record %s has no payload — marked dead",
+                    key[:16],
+                )
+                continue
+            try:
+                message = OutboundMessage(
+                    text=str(text),
+                    channel=channel,
+                    target=entry.get("target"),
+                    context_token=entry.get("context_token"),
+                    title=entry.get("title"),
+                    markdown=bool(entry.get("markdown", True)),
+                    metadata=entry.get("metadata"),
+                    semantic_tags=list(entry.get("semantic_tags") or []),
+                    idempotency_key=key,
+                )
+                result = await self.outbound.send(message)
+            except Exception as exc:
+                logger.exception("gateway outbox replay: send failed for %s", key[:16])
+                self.store.append_outbox(
+                    {
+                        "idempotency_key": key,
+                        "channel": channel,
+                        "status": "dead",
+                        "error": f"replay_error: {exc}",
+                        "at": time.time(),
+                    }
+                )
+                continue
+            ok = getattr(result, "ok", False)
+            logger.info(
+                "gateway outbox replay: %s channel=%s idem=%s",
+                "delivered" if ok else "failed",
+                channel,
+                key[:16],
+            )
 
     # -- audit -----------------------------------------------------------
     def _audit_binding(
@@ -487,20 +687,6 @@ def _schedule_adapter_stop(adapter) -> None:
         return
     if loop.is_running():
         loop.create_task(adapter.stop())
-
-
-def _schedule_adapter_start(adapter) -> None:
-    """Start an adapter's inbound loop on the running loop (best-effort)."""
-    import asyncio
-
-    if not hasattr(adapter, "start"):
-        return
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        return
-    if loop.is_running():
-        loop.create_task(adapter.start())
 
 
 def _normalize_config_channels(config: GatewayConfig) -> GatewayConfig:

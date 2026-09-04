@@ -491,28 +491,37 @@ orchestratord gateway stop                # stop the daemon
 
 ### IM command surface
 
-Inbound messages are routed by semantics:
+Orchestratord's gateway is **command-only**. It accepts two kinds of traffic:
 
-| Semantics     | Meaning                                                             |
-| ------------- | ------------------------------------------------------------------- |
-| `newPrompt`   | plain text while idle → a new prompt                                 |
-| `command`     | whitelisted slash command                                            |
-| `followUp`    | plain text while a session is busy → queued follow-up                |
-| `approval`    | structured approval reply (bound wait-point; a bare "yes" is not)     |
-| `interrupt`   | structured interrupt — never guessed from natural language            |
-| `contextOnly` | context recorded for the operator without triggering a run           |
+1. **Event reports** — orchestrator lifecycle, issue status, and run results
+   pushed to the authorized IM recipient.
+2. **Whitelisted slash commands** — `/server status` and `/issue ...` queries
+   or controls issued by an authorized sender, with bounded replies.
+
+Plain (non-slash) text is **never** forwarded to the orchestrator or any agent
+handler; the sender gets a bounded "commands only" notice instead. There is no
+semantic chat surface (`newPrompt` / `followUp` / `approval` / `interrupt` /
+`contextOnly` are not part of the orchestratord gateway scope).
+
+Sender authorization fails closed: each command-capable channel must be
+configured with an explicit sender allowlist (`extra.allowed_users` for WeChat,
+`extra.allowed_user_open_id` for Feishu). An empty or missing allowlist rejects
+ALL inbound messages, and unauthorized senders leave no trace.
 
 Slash commands recognized for the orchestrator host:
 
 ```
 /server status
 /issue list|show|tail|stop|pause|resume|clarify|inject|feedback|review|retry|workspace|rebase
-/agent retry|follow-up|unblock
-/pause  /resume  /stop  /takeover  /inject  /detach  /clarify  /review  /feedback
 ```
 
 Commands outside the allowlist are not pushed to the orchestrator; the sender
 gets a bounded notice instead.
+
+Outbound event reports go to the channel's single authorized recipient. A
+wildcard origin (`im:direct:*:*`) only resolves when the channel has exactly
+one authorized user; with zero or multiple authorized users the gateway NACKs
+rather than guessing a recipient.
 
 ### Configuration reference
 
@@ -527,9 +536,26 @@ channels:
     type: slack
     webhook_url: https://hooks.slack.com/services/...
     enabled: true
+  - name: wechat
+    type: wechat
+    enabled: true
+    extra:
+      account_id: default
+      # REQUIRED for inbound: only these senders may drive the bot.
+      # An empty/missing allowlist rejects ALL inbound (fail closed).
+      allowed_users:
+        - "operator@im.wechat"
+  - name: feishu
+    type: feishu
+    enabled: true
+    extra:
+      connection_mode: websocket
+      # REQUIRED for inbound: the single authorized operator open_id.
+      allowed_user_open_id: "ou_xxxxxxxx"
 ```
 
-State-dir layout (`~/.orchestratord/gateway`):
+State-dir layout (`~/.orchestratord/gateway`, created owner-only `0700`; files
+hold credentials and are written `0600`):
 
 | File                        | Purpose                                     |
 | --------------------------- | ------------------------------------------- |
@@ -538,7 +564,9 @@ State-dir layout (`~/.orchestratord/gateway`):
 | `gateway.sock`              | UDS JSONL IPC socket                        |
 | `health.json`               | daemon health snapshot                      |
 | `gateway.log`               | rotating daemon log                         |
-| `processed_inbound.ndjson`, `outbox.ndjson`, `dead_letter.ndjson` | dedupe / deferred outbound / exhausted retries |
+| `processed_inbound.ndjson`  | inbound dedupe ledger                       |
+| `outbox.ndjson`             | durable outbound ledger — records left pending by a crash are replayed at daemon startup (at-least-once) |
+| `dead_letter.ndjson`        | exhausted retries / unreplayable records   |
 | `audit.ndjson`              | redacted audit trail (secrets never logged)  |
 
 Environment variables:
