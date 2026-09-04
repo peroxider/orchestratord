@@ -1377,7 +1377,20 @@ class Orchestrator:
                         source=(intent_source or ("command" if command is not None else "label")),
                         command=(f"/agent {command.value}" if command is not None else None),
                     )
-                    # The follow-up path performs the actual follow-up.
+                    # /agent follow-up = 检视意见处理的重试：拉取 PR 上未处理的
+                    # 检视（pending）并让 agent 处理——而不是退回"完整 issue
+                    # 任务重跑"（agent_followup 的 fresh issue-style run）。
+                    followup_handled = await self._launch_followup_with_pending_reviews(
+                        issue
+                    )
+                    if followup_handled:
+                        continue
+                    # 无待处理检视（或无法采集）——不启动完整任务重跑。
+                    logger.info(
+                        "Issue %s follow-up: no pending review feedback to process — skip",
+                        issue.id,
+                    )
+                    continue
 
                 if intent is Intent.REBASE:
                     # REBASE intent — the orchestrator itself
@@ -2676,6 +2689,76 @@ class Orchestrator:
             self._state.claimed.add(issue_id)
             await self._launch_review_followup(followup)
 
+    async def _launch_followup_with_pending_reviews(self, issue: Issue) -> bool:
+        """Fetch the PR's unprocessed review feedback and launch a review
+        follow-up if any exists. Returns True when a follow-up was launched
+        (or the issue has no PR to inspect), False when there is nothing to
+        process — so the caller does NOT fall back to a full issue re-run.
+        """
+        record = self._registry.get(issue.id or "")
+        if record is None or not record.pr_number:
+            return False
+        pull_request = PullRequestRef(
+            number=record.pr_number,
+            url=record.pr_url,
+        )
+        try:
+            feedback = await self.tracker.fetch_pull_request_feedback(
+                pull_request=pull_request,
+                issue_id=record.issue_id,
+                include_ci_failures=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort collection
+            logger.warning(
+                "Issue %s follow-up: failed to collect PR review feedback: %s",
+                issue.id or "",
+                exc,
+            )
+            return False
+        processed = set(record.processed_feedback_ids)
+        pending = [
+            fb
+            for fb in feedback
+            if fb.id not in processed
+            and not self._registry.feedback_abandoned(record.issue_id, fb.id)
+        ]
+        # 达失败阈值的检视（已放弃重试）：回复放弃原因并标记为已处理
+        # （放弃=处理完——不再反复触发——符合"每条检视都有最终回复"）。
+        abandoned = [
+            fb
+            for fb in feedback
+            if self._registry.feedback_abandoned(record.issue_id, fb.id)
+        ]
+        if abandoned:
+            for fb in abandoned:
+                try:
+                    await self.tracker.reply_to_pull_request_feedback(
+                        feedback=fb,
+                        body="（编排器）该检视经多次处理仍未解决——已放弃自动重试。"
+                        "请人工确认或重新提出。",
+                    )
+                except Exception:  # noqa: BLE001 — best-effort reply
+                    pass
+            self._registry.mark_feedback_processed(
+                record.issue_id,
+                [fb.id for fb in abandoned],
+            )
+        if not pending:
+            return False
+        followup = ReviewFollowup(
+            issue=Issue(
+                id=record.issue_id,
+                identifier=record.issue_identifier,
+                title=record.issue_identifier,
+                branch_name=record.branch_name,
+            ),
+            record=record,
+            pull_request=pull_request,
+            feedback=pending,
+        )
+        await self._launch_review_followup(followup)
+        return True
+
     async def _launch_review_followup(self, followup: ReviewFollowup) -> None:
         issue = followup.issue
         issue.branch_name = followup.record.branch_name
@@ -3001,6 +3084,21 @@ class Orchestrator:
                     "phase": f"mode:{mode_decision.mode}",
                 }
             )
+        # 统一：intent FOLLOWUP（命令/重试）一律走检视意见处理（review_followup
+        # ——fetch pending 检视——带检视）——不再启动 agent_followup 重跑任务
+        # （重跑 issue 仅由 /agent retry 承担）。
+        followup_record = self._registry.get(issue.id or "")
+        if (
+            followup_record is not None
+            and followup_record.intent == Intent.FOLLOWUP
+        ):
+            followup_handled = await self._launch_followup_with_pending_reviews(issue)
+            if not followup_handled:
+                logger.info(
+                    "Issue %s follow-up: no pending review feedback to process — skip",
+                    issue.id or "",
+                )
+            return
         # If the registry intent is FOLLOWUP, wire the
         # session so the agent + git_sync know to reuse the existing
         # branch / PR rather than create a new run.
@@ -3804,6 +3902,13 @@ class Orchestrator:
                 session.status = "verification_failed"
                 session.verification_status = "failed"
                 session.verification_output = exc.output
+                if session.run_kind == "review_followup":
+                    # 检视处理失败：逐检视失败计数 +1（达到阈值后放弃——
+                    # 不再反复触发防烧 token；最终回复说明放弃原因）。
+                    self._registry.increment_feedback_failure(
+                        session.issue.id or "",
+                        list(getattr(session, "feedback_ids", [])),
+                    )
                 self._emit_im_event(
                     session.issue.id or "",
                     "verification.failed",

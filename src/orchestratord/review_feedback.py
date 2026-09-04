@@ -90,12 +90,10 @@ class ReviewFeedbackService:
                     cleared,
                     record.issue_id,
                 )
-            if not self.registry.can_follow_up(
-                record.issue_id,
-                getattr(self.config, "max_followup_attempts_per_pr", 5),
-            ):
-                continue
-
+            # 新检视（pending——未处理）始终允许触发：followup 总次数上限只用于
+            # 防"同一批反复重试烧 token"——不应挡"新检视的首轮处理"（这正是
+            # 处理检视意见的目的——每条检视意见都应得到处理，而不是被总次数挡住）。
+            # 同一检视反复失败的收敛交由逐检视的失败/放弃机制负责。
             pull_request = PullRequestRef(
                 number=record.pr_number,
                 url=record.pr_url,

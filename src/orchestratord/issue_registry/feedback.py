@@ -104,6 +104,30 @@ class FeedbackMixin:
         self._save()
         return record
 
+    def increment_feedback_failure(
+        self, issue_id: str, feedback_ids: list[str]
+    ) -> IssueRecord | None:
+        """Increment per-review failure counts (run failed, review unprocessed)."""
+        record = self._records.get(issue_id)
+        if record is None:
+            return None
+        for fid in feedback_ids:
+            record.feedback_failure_counts[fid] = (
+                record.feedback_failure_counts.get(fid, 0) + 1
+            )
+        record.touch()
+        self._save()
+        return record
+
+    def feedback_abandoned(
+        self, issue_id: str, feedback_id: str, max_failures: int = 2
+    ) -> bool:
+        """Whether a review's failure count reached the abandonment threshold."""
+        record = self._records.get(issue_id)
+        if record is None:
+            return False
+        return record.feedback_failure_counts.get(feedback_id, 0) >= max_failures
+
     def clear_stale_pending(self, issue_id: str, timeout_seconds: int = 600) -> int:
         """Drop pending feedback older than ``timeout_seconds``.
 

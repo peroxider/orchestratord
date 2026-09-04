@@ -107,6 +107,10 @@ class IssueRecord:
     pending_feedback_since: float | None = None
     feedback_cursor: str | None = None
     followup_attempt_count: int = 0
+    # 逐检视失败计数：feedback_id → 处理失败次数（处理该检视的 run 失败且未
+    # 标记 processed 时递增）。达到阈值后该检视被放弃（不再反复触发——防无限
+    # 重试烧 token），并在最终回复中说明放弃原因。
+    feedback_failure_counts: dict[str, int] = field(default_factory=dict)
     last_followup_commit_sha: str | None = None
     last_feedback_checked_at: float | None = None
     # Operator intent + retry bookkeeping.
