@@ -1,0 +1,9 @@
+clawcodex-dev
+codex
+hermes
+opencode
+dsh
+cursor-agent
+copilot
+kimi
+qwen

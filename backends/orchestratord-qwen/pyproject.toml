@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-qwen"
+version = "0.1.0"
+description = "Qwen (DashScope) CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+qwen = "orchestratord_qwen:QwenBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+qwen = "orchestratord_qwen.descriptor:QWEN_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

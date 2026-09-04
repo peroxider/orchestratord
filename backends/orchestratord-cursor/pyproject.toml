@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-cursor"
+version = "0.1.0"
+description = "Cursor CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+cursor = "orchestratord_cursor:CursorBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+cursor = "orchestratord_cursor.descriptor:CURSOR_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

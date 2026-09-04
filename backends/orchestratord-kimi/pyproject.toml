@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-kimi"
+version = "0.1.0"
+description = "Kimi CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+kimi = "orchestratord_kimi:KimiBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+kimi = "orchestratord_kimi.descriptor:KIMI_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
