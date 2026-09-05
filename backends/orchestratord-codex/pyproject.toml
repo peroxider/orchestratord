@@ -5,6 +5,7 @@ description = "Codex CLI backend for orchestratord"
 requires-python = ">=3.11"
 dependencies = [
     "orchestratord",
+    "psutil>=5.9",
 ]
 
 [project.entry-points."orchestratord.backends"]

@@ -12,6 +12,7 @@ from typing import Any
 
 
 class EventKind(Enum):
+    SESSION_STARTED = "session_started"
     TEXT = "text"
     TEXT_DELTA = "text_delta"
     TOOL_CALL = "tool_call"

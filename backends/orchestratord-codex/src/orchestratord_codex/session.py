@@ -14,6 +14,7 @@ from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.session import ResumeStatus
+from orchestratord_codex.process_control import ProcessTree
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -58,6 +59,7 @@ class CodexSession:
             tool_filtering=False,
             takeover=False,
             resume_detection=False,
+            pausable=os.name == "posix",
         )
         self._queue: asyncio.Queue[EventEnvelope | object] = asyncio.Queue()
         self._seq = 0
@@ -68,6 +70,12 @@ class CodexSession:
         self._started_tools: set[str] = set()
         self._usage: dict[str, Any] = {}
         self._turn_complete_emitted = False
+        self._process_ready = asyncio.Event()
+        self._process_tree: ProcessTree | None = None
+        self._control_lock = asyncio.Lock()
+        self._paused = False
+        self._timeout_scope: asyncio.Timeout | None = None
+        self._timeout_remaining: float | None = None
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -157,8 +165,11 @@ class CodexSession:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=child_env,
+                start_new_session=os.name == "posix",
             )
             process = self._process
+            self._process_tree = ProcessTree(process.pid)
+            self._process_ready.set()
             assert process.stdin is not None
             if stdin_payload is not None:
                 process.stdin.write(stdin_payload)
@@ -169,7 +180,11 @@ class CodexSession:
             stderr_task = asyncio.create_task(process.stderr.read())
             timeout = self._spec.total_timeout_s or _DEFAULT_TOTAL_TIMEOUT_S
             try:
-                async with asyncio.timeout(timeout):
+                async with asyncio.timeout(timeout) as timeout_scope:
+                    self._timeout_scope = timeout_scope
+                    if self._paused:
+                        self._timeout_remaining = timeout
+                        timeout_scope.reschedule(None)
                     assert process.stdout is not None
                     while line := await process.stdout.readline():
                         arrived_at = self._now()
@@ -197,7 +212,7 @@ class CodexSession:
                     return_code = await process.wait()
             except TimeoutError:
                 reason = "timeout"
-                process.kill()
+                self._process_tree.kill()
                 await process.wait()
                 self._emit(
                     EventKind.ERROR,
@@ -245,6 +260,12 @@ class CodexSession:
                 },
             )
         finally:
+            self._process_ready.set()
+            self._timeout_scope = None
+            if self._process_tree is not None:
+                self._process_tree.kill()
+            if self._process is not None:
+                await self._process.wait()
             if stderr_task is not None:
                 stderr_task.cancel()
                 await asyncio.gather(stderr_task, return_exceptions=True)
@@ -278,7 +299,11 @@ class CodexSession:
             thread_id = native.get("thread_id")
             if thread_id:
                 self.session_id = str(thread_id)
-            return []
+            return [self._envelope(
+                EventKind.SESSION_STARTED,
+                {"session_id": self.session_id, "native_type": event_type},
+                timestamp=arrived_at,
+            )]
         if event_type == "turn.started":
             self._turn += 1
             self._turn_complete_emitted = False
@@ -461,6 +486,35 @@ class CodexSession:
         # orchestrator shutdown or stop handling.
         return None
 
+    async def pause(self) -> None:
+        """Suspend the local agent and its tools, not remote inference."""
+        async with self._control_lock:
+            await self._process_ready.wait()
+            if self._closed or self._process_tree is None:
+                raise RuntimeError("Codex session is not active")
+            if self._paused:
+                return
+            self._process_tree.pause()
+            self._paused = True
+            timeout = self._timeout_scope
+            if timeout is not None and not timeout.expired():
+                deadline = timeout.when()
+                if deadline is not None:
+                    self._timeout_remaining = max(0, deadline - asyncio.get_running_loop().time())
+                    timeout.reschedule(None)
+
+    async def resume(self) -> None:
+        async with self._control_lock:
+            if not self._paused:
+                return
+            assert self._process_tree is not None
+            self._process_tree.resume()
+            self._paused = False
+            timeout = self._timeout_scope
+            if timeout is not None and self._timeout_remaining is not None:
+                timeout.reschedule(asyncio.get_running_loop().time() + self._timeout_remaining)
+                self._timeout_remaining = None
+
     async def approve(self, request_id: str, decision: ApprovalDecision) -> None:
         return None
 
@@ -471,9 +525,9 @@ class CodexSession:
 
     async def close(self) -> None:
         self._closed = True
-        process = self._process
-        if process is not None and process.returncode is None:
-            process.terminate()
+        async with self._control_lock:
+            if self._process_tree is not None:
+                self._process_tree.kill()
         task = self._run_task
         if task is not None and not task.done():
             try:

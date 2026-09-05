@@ -283,6 +283,9 @@ class StateMachineMixin:
         duration_ms: float | None = None,
         backend: str | None = None,
         model: str | None = None,
+        session_end_reason: str | None = None,
+        session_end_summary: str | None = None,
+        pause_reason: str | None = None,
     ) -> IssueRecord | None:
         """Update high-frequency run diagnostics fields (throttled save).
 
@@ -325,6 +328,14 @@ class StateMachineMixin:
             record.run_backend = backend
         if model is not None:
             record.run_model = model
+        if session_end_reason is not None:
+            record.session_end_reason = session_end_reason
+        if session_end_summary is not None:
+            record.session_end_summary = session_end_summary
+        if pause_reason is not None:
+            record.pause_reason = pause_reason
+            if pause_reason:
+                record.run_timeout_deadline_at = None
         record.touch()
         # When the run_id transitions from None to a concrete value we
         # must persist immediately — the dashboard discovers active runs

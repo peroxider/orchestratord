@@ -38,7 +38,12 @@ from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, Workspace
 from .control_socket import ControlSocket
 from .conversation_store import ensure_conversation_id
 from .prompt_builder import PromptBuilder
-from .runner_utils import _broadcast_to_socket, _drain_control_commands, _write_transcript_frame
+from .runner_utils import (
+    _broadcast_to_socket,
+    _drain_control_commands,
+    _publish_transcript_frame,
+    _write_transcript_frame,
+)
 from .session_state import AgentSession, RunSession, RunSubject
 
 logger = logging.getLogger(__name__)
@@ -388,6 +393,12 @@ class BackendRunner:
         if session.run_id is None:
             session.run_id = self._build_run_id(session)
 
+        # Backend identity and model provider are distinct. Publish both
+        # before the first diagnostics callback, including preflight failures.
+        session._snapshot_backend = self.backend.name
+        session._snapshot_provider = self.agent_config.provider or ""
+        session._snapshot_model = self.agent_config.model or ""
+
         # Publish the run_id to the registry immediately so the dashboard
         # (and ChatGateway) can discover the active run before the session
         # completes.  Without this the run_id only lands in the registry
@@ -398,41 +409,35 @@ class BackendRunner:
             except Exception:
                 logger.debug("early diagnostics_callback failed", exc_info=True)
 
-        # Stash provider/model for snapshot consumers.
-        session._snapshot_provider = self.agent_config.provider or ""
-        session._snapshot_model = self.agent_config.model or ""
-
         # Per-session NDJSON tool-event log.
         self._init_tool_event_log(session, workspace)
 
-        # Build the prompt (returns (system_prompt_append, user_prompt)).
-        prompt_parts = self._build_prompt(session, workflow, issue, workspace)
-        system_prompt_append, user_prompt = prompt_parts
-        system_prompt_append = self._append_skill_index(system_prompt_append)
-
-        session._runtime_tasks = self.get_task_registry()
-
-        # Build a SessionSpec from agent config + session context.
-        spec = self._build_session_spec(
-            session,
-            workflow,
-            system_prompt_append,
-            resume_session_id=resume_session_id,
-        )
-        session._user_prompt = user_prompt
-
-        logger.info(
-            "BackendRunner starting: backend=%s issue_id=%s run_id=%s",
-            self.backend.name,
-            issue.id,
-            session.run_id,
-        )
-
+        run_started = time.monotonic()
         try:
+            # Resolve the prompt and spec inside the lifecycle guard so even
+            # configuration failures leave an inspectable terminal record.
+            system_prompt_append, user_prompt = self._build_prompt(
+                session, workflow, issue, workspace,
+            )
+            system_prompt_append = self._append_skill_index(system_prompt_append)
+            session._runtime_tasks = self.get_task_registry()
+            spec = self._build_session_spec(
+                session, workflow, system_prompt_append,
+                resume_session_id=resume_session_id,
+            )
+            session._user_prompt = user_prompt
+            logger.info(
+                "BackendRunner starting: backend=%s issue_id=%s run_id=%s",
+                self.backend.name, issue.id, session.run_id,
+            )
             await self._run_with_backend(session, spec, workflow, tracker,
                                          status_dashboard, progress_reporter,
                                          diagnostics_callback=diagnostics_callback)
-        except Exception:
+        except asyncio.CancelledError:
+            session.status = "failed"
+            session.session_end_reason = session.session_end_reason or "cancelled"
+            raise
+        except Exception as exc:
             logger.exception(
                 "BackendRunner failed: backend=%s issue_id=%s run_id=%s",
                 self.backend.name,
@@ -440,7 +445,20 @@ class BackendRunner:
                 session.run_id,
             )
             session.status = "failed"
+            session.session_end_reason = session.session_end_reason or "backend_error"
+            session.session_end_summary = session.session_end_summary or f"{type(exc).__name__}: {exc}"
         finally:
+            # The runner owns this terminal record even if the backend never
+            # emits SESSION_COMPLETE (cancellation, stop, timeout, spawn error).
+            _write_transcript_frame(session.run_id, {
+                "type": "RunEnded",
+                "data": {
+                    "status": session.status,
+                    "reason": session.session_end_reason or session.status,
+                    "summary": session.session_end_summary or "",
+                    "duration_ms": (time.monotonic() - run_started) * 1000,
+                },
+            })
             # Always flush telemetry after the run.
             self._telemetry_flush()
 
@@ -698,10 +716,6 @@ class BackendRunner:
             ]},
         )
 
-        # The control socket is an optional observability/control surface.
-        # Its failure must never prevent the backend from running.
-        owns_control_socket = await self._start_control_socket(session)
-
         # Fail fast on a spec the backend cannot serve (e.g. a
         # provider with no matching runtime adapter) instead of dying
         # mid-stage with an opaque runtime error.
@@ -781,18 +795,25 @@ class BackendRunner:
             timeouts["idle_watchdog"],
         )
 
+        # Only publish a live endpoint after preflight and resume validation.
+        # Every exit after this point goes through the cleanup below.
+        owns_control_socket = await self._start_control_socket(
+            session, pausable=bool(getattr(getattr(spi_session, "capabilities", None), "pausable", False))
+        )
         try:
             # Send the prompt and start processing events.
-            _write_transcript_frame(
-                session.run_id,
-                {
-                    "type": "UserMessage",
-                    "data": {"content": getattr(session, "_user_prompt", "") or "", "origin": "prompt"},
-                    "ts": time.time(),
+            prompt = getattr(session, "_user_prompt", "") or ""
+            await _publish_transcript_frame(session, {
+                "type": "RunInput",
+                "data": {
+                    "content": prompt,
+                    "origin": "orchestrator",
+                    "system_prompt": spec.system_prompt,
+                    "backend": self.backend.name,
+                    "resume_session_id": spec.resume_session_id,
                 },
-                session=session,
-            )
-            await spi_session.send(getattr(session, "_user_prompt", "") or "")
+            })
+            await spi_session.send(prompt)
             await self._process_events(
                 spi_session, session, session_context,
                 workflow, tracker, status_dashboard, progress_reporter,
@@ -830,7 +851,7 @@ class BackendRunner:
                 logger.debug("conversation manifest completion update failed", exc_info=True)
 
     @staticmethod
-    async def _start_control_socket(session: AgentSession) -> bool:
+    async def _start_control_socket(session: AgentSession, *, pausable: bool = False) -> bool:
         """Start and publish the optional live-control endpoint for one run."""
         if session.control_socket is not None:
             return False
@@ -846,11 +867,11 @@ class BackendRunner:
             # TCP endpoints use an ephemeral port. This is the normal Windows
             # transport and the safe fallback for overlong Unix socket paths,
             # so discovery must follow the endpoint rather than the OS name.
-            if control_socket.endpoint.startswith("tcp://"):
+            if control_socket.endpoint:
                 control_dir.mkdir(parents=True, exist_ok=True)
                 endpoint_file = control_dir / f"{session.run_id}.endpoint.json"
                 endpoint_file.write_text(
-                    json.dumps({"endpoint": control_socket.endpoint}),
+                    json.dumps({"endpoint": control_socket.endpoint, "pausable": pausable}),
                     encoding="utf-8",
                 )
 
@@ -954,7 +975,7 @@ class BackendRunner:
         async for event in _poll_events(spi_session.events()):
             # Commands are drained before handling the event so an operator
             # request arriving at a turn boundary is available immediately.
-            if _drain_control_commands(session):
+            if await self._drain_backend_controls(spi_session, session):
                 session.status = "failed"
                 break
 
@@ -968,7 +989,7 @@ class BackendRunner:
                 stop_while_paused = False
                 while getattr(session, "paused", False):
                     await asyncio.sleep(_EVENT_POLL_INTERVAL)
-                    if _drain_control_commands(session):
+                    if await self._drain_backend_controls(spi_session, session):
                         stop_while_paused = True
                         break
                 paused_for = time.monotonic() - pause_started
@@ -1315,12 +1336,42 @@ class BackendRunner:
                 await _broadcast_to_socket(session, event)
 
             # Drain control commands.
-            if _drain_control_commands(session):
+            if await self._drain_backend_controls(spi_session, session):
                 session.status = "failed"
                 break
 
         session.completed_at = time.time()
         session.duration_ms = max(0.0, (time.monotonic() - run_start) * 1000)
+
+    @staticmethod
+    async def _drain_backend_controls(spi_session: Any, session: AgentSession) -> bool:
+        """Confirm native execution control before publishing a state change."""
+        socket = session.control_socket
+        if socket is None:
+            return False
+        while not socket._command_queue.empty():
+            command = socket._command_queue.get_nowait()
+            if command.cmd in {"pause", "resume"}:
+                try:
+                    caps = getattr(spi_session, "capabilities", None)
+                    if not getattr(caps, "pausable", False):
+                        raise RuntimeError("Backend does not support pausing local execution")
+                    await getattr(spi_session, command.cmd)()
+                except Exception as exc:  # noqa: BLE001 - backend capability boundary
+                    logger.warning("Backend control %s failed: %s", command.cmd, exc)
+                    await _publish_transcript_frame(session, {
+                        "type": "ControlError",
+                        "data": {"command": command.cmd, "message": str(exc)},
+                    })
+                    continue
+            if _drain_control_commands(session, commands=[command]):
+                return True
+            if command.cmd in {"pause", "resume"}:
+                await _publish_transcript_frame(session, {
+                    "type": "SessionPaused" if command.cmd == "pause" else "SessionResumed",
+                    "data": {"run_id": session.run_id},
+                })
+        return False
 
     # ------------------------------------------------------------------
     # Tool call handling

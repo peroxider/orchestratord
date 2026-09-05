@@ -1,26 +1,9 @@
-"""Cordis config generation for custom dsh provider routes.
+"""Cordis profile patches for custom DSH provider routes.
 
-The DeepSeek Harness runtime mounts LLM adapters as cordis plugins. The
-bundled default config only mounts ``@deepseek-ai/dsh-llm-deepseek``
-(hence the historical "deepseek-official only" limitation), but the
-runtime also ships ``@deepseek-ai/dsh-llm-pi-ai`` — the same
-configurable multi-provider adapter its web Models page uses. This
-module surfaces that capability for orchestratord: it text-appends an
-``llm-pi-ai`` plugin block (one route per ``agent.providers`` entry) to
-the bundled default config.
-
-Why text-append instead of YAML parse → emit: the bundled default uses
-``!!js`` runtime tags (``process.env`` fallbacks) that no Python YAML
-loader understands. Appending to the original text keeps those tags
-byte-identical; the appended block contains only plain YAML nodes.
-Both adapters then coexist — route keys never collide because
-``deepseek-official`` is owned by ``llm-deepseek`` and registry routes
-are user-chosen names registered by ``llm-pi-ai``.
-
-Secrets: route credentials are NEVER written into the generated file.
-Each configured route names an injected environment variable
-(``apiKeyEnv``); the literal key travels to the runtime subprocess via
-the environment only (see ``DshSession._default_harness_factory``).
+The SDK profile already owns model routing, approval and persistence plugins.
+Generated patches update their stable IDs without copying the profile tree or
+interpreting its JavaScript tags. Route credentials travel only in the child
+environment; patches contain environment variable names, never secret values.
 """
 
 from __future__ import annotations
@@ -37,7 +20,7 @@ import yaml
 LLM_PI_AI_PLUGIN_ID = "llm-pi-ai"
 LLM_PI_AI_PLUGIN_NAME = "@deepseek-ai/dsh-llm-pi-ai"
 
-USER_APPROVAL_PLUGIN_ID = "user-approval"
+USER_APPROVAL_PLUGIN_ID = "approval"
 USER_APPROVAL_PLUGIN_NAME = "@deepseek-ai/dsh-user-approval"
 
 # The runtime's approval seam (@deepseek-ai/dsh-user-approval) defaults
@@ -297,6 +280,17 @@ def build_approval_block(policy: str) -> str:
             "config": {"policy": policy},
         }
     ]
+    # Preserve the runtime's sandbox while making the composed approval
+    # defaults representable by its permission-preset service. A never/ask
+    # change alone otherwise prevents the SDK profile from booting.
+    block.append({
+        "id": "permission",
+        "name": "@deepseek-ai/dsh-permission-presets",
+        "config": {"presets": {
+            f"orchestratord-{mode}": {"sandbox": mode, "approval": policy}
+            for mode in ("read-only", "workspace-write", "danger-full-access")
+        }},
+    })
     return yaml.safe_dump(
         block, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
@@ -308,15 +302,11 @@ def build_cordis_text(
     environ: dict[str, str] | None = None,
     approval_policy: str | None = None,
 ) -> str:
-    """Return the full cordis config text: the bundled default (verbatim,
-    preserving ``!!js`` tags) plus the appended llm-pi-ai plugin block
-    and/or the user-approval policy block.
+    """Return an invocation patch merged by ID into the SDK profile.
 
-    The bundled default mounts neither plugin, so text-appending is
-    collision-free; a future runtime default that already mounts either
-    raises (see ``_bundled_cordis_text``).
+    Profile composition, including its JavaScript tags and mandatory SDK
+    plugins, belongs to the runtime. Do not copy or reparse that configuration.
     """
-    base = _bundled_cordis_text()
     blocks: list[str] = []
     if providers:
         block = [
@@ -348,7 +338,7 @@ def build_cordis_text(
             "nothing to generate: no provider routes and no approval "
             "policy requested"
         )
-    return f"{base.rstrip()}\n\n{marker_note}" + "\n".join(blocks)
+    return marker_note + "\n".join(blocks)
 
 
 def generate_cordis_file(
@@ -469,31 +459,6 @@ def resolve_route(
 _probe_cache: bool | None = False  # False = not yet probed; True/bool result cached
 
 
-def bundled_default_cordis_text() -> str:
-    """The bundled default cordis.yml shipped with the runtime wheel."""
-    try:
-        from deepseek_harness_runtime import bundled_default_config_path
-    except ImportError as exc:  # pragma: no cover - packaging failure
-        raise CordisConfigError(
-            "deepseek-harness-runtime is not installed — the dsh backend "
-            "cannot locate the bundled default cordis config. Install "
-            "deepseek-harness-runtime-bin."
-        ) from exc
-    path = bundled_default_config_path()
-    return path.read_text(encoding="utf-8")
-
-
-def _bundled_cordis_text() -> str:
-    text = bundled_default_cordis_text()
-    if LLM_PI_AI_PLUGIN_NAME in text:
-        # A future runtime default may already mount the adapter; the
-        # generated block would then collide with a second mount.
-        raise CordisConfigError(
-            "the bundled default cordis config already mounts "
-            f"{LLM_PI_AI_PLUGIN_NAME}; custom route generation is only "
-            "supported for runtimes whose default config does not"
-        )
-    return text
 
 
 def probe_llm_pi_ai_available() -> bool:

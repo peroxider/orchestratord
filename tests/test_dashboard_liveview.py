@@ -17,6 +17,7 @@ from orchestratord.cli.dashboard import (
     DashboardState,
     _build_dashboard_html,
     _conversation_history_sessions,
+    _followup_completed_run,
     _gather_issue_metadata,
     _snapshot_run_is_active,
 )
@@ -35,7 +36,7 @@ def test_liveview_html_exposes_one_shell_with_conversation() -> None:
     assert "Overview" in html
     assert "Run evidence" in html
     assert "Conversation" in html
-    assert "Complete conversation" in html
+    assert "Recorded conversation" in html
     assert "each run keeps its own Evidence" in html
     assert "chat-tool-group" in html
     assert 'data-chat-session-toggle="${esc(session.runId)}"' in html
@@ -72,6 +73,9 @@ def test_liveview_html_exposes_one_shell_with_conversation() -> None:
     assert "previousEpoch !== snapshot.event_epoch" in html
     assert 'aria-label="${esc(connText)}"' in html
     assert "Queue follow-up" in html
+    assert "Queue after current run" in html
+    assert "Question queued. It will start a follow-up run" in html
+    assert "Suspend the local agent and tools" in html
     assert "This starts a new provider run" in html
     assert "Start follow-up run" in html
     assert 'data-chat-followup-confirm' in html
@@ -80,7 +84,10 @@ def test_liveview_html_exposes_one_shell_with_conversation() -> None:
     assert "Latest run completed. This task is waiting for human review" in html
     assert 'fetch("/api/runs/"' in html
     assert "Follow-up queued" in html
-    assert "codexWireItems" in html
+    assert "codexWireItems" not in html
+    assert "chatWireBuffer" not in html
+    assert "item.completed" not in html
+    assert "thread.started" not in html
     assert "content_truncated" in html
     assert "Object.values(usage)" not in html
     assert "cached input" in html
@@ -91,6 +98,50 @@ def test_liveview_html_exposes_one_shell_with_conversation() -> None:
     assert "data-open-session" not in html
     assert "ClawCodex" not in html
     assert "onclick=" not in html
+
+
+def test_liveview_header_groups_actions_and_keeps_status_labels_visible() -> None:
+    html = _build_dashboard_html()
+
+    assert "grid-template-columns: minmax(0, 1fr) auto" in html
+    assert ".run-titlebar > .head-actions { grid-column: 2; grid-row: 1;" in html
+    assert ".run-titlebar > .run-states { grid-column: 2; grid-row: 2;" in html
+    assert ".run-titlebar { display: flex; }" in html
+    assert ".connection > span { display: none; }" not in html
+    assert "not a separate service" in html
+    assert "recorded PID, not a browser connection" in html
+    assert 'conn.setAttribute("aria-label", connText)' in html
+
+
+def test_liveview_process_status_is_independent_of_update_connection() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    html = _build_dashboard_html()
+    functions = html.split("    function liveUpdatesText()", 1)[1].split(
+        "    function daemonBanner()", 1
+    )[0]
+    harness = (
+        'const state = {snapshot: {metadata: {found: true, alive: false}}};\n'
+        'const esc = value => String(value); const findIssue = () => null;\n'
+        "function liveUpdatesText()"
+        + functions
+        + '\nconst results = ["connected", "disconnected", "connecting", "paused"].map(connection => {'
+        + 'state.connection = connection; return topbar("overview"); });'
+        + 'state.snapshot.metadata.alive = true; results.push(topbar("overview"));'
+        + 'state.snapshot.metadata = {}; results.push(topbar("overview"));'
+        + "process.stdout.write(JSON.stringify(results));"
+    )
+    result = subprocess.run(
+        [node, "-e", harness], text=True, capture_output=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    rendered = json.loads(result.stdout)
+    for markup, label in zip(rendered[:4], ("Connected", "Reconnecting", "Connecting", "Paused")):
+        assert "Daemon · Stopped" in markup
+        assert f"Live updates · {label}" in markup
+    assert "Daemon · Running" in rendered[4]
+    assert "Daemon · Unknown" in rendered[5]
 
 
 def test_liveview_javascript_parses() -> None:
@@ -524,8 +575,228 @@ state.runObservations["run-1"] = [];
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
         "fetchCalls": 1,
-        "status": "paused",
+        "status": "",
         "pending": "",
+    }
+
+
+def test_chat_control_run_end_race_is_not_reported_as_a_failure() -> None:
+    """A run ending between paint and click is a terminal race, not an error."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    html = _build_dashboard_html()
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    harness = (
+        r"""
+const appNode = { innerHTML: "" };
+class FakeEventSource {
+  constructor(url) { this.url = url; }
+  close() { this.closed = true; }
+}
+globalThis.EventSource = FakeEventSource;
+globalThis.fetch = async () => ({
+  ok: false,
+  status: 409,
+  async json() { return { code: "run_not_active", error: "run not active" }; },
+});
+globalThis.location = {
+  href: "http://127.0.0.1:8765/chat?run=ISSUE-1",
+  pathname: "/chat",
+  search: "?run=ISSUE-1",
+  reload() {},
+};
+globalThis.history = { replaceState() {} };
+globalThis.navigator = { clipboard: { writeText: async () => {} } };
+globalThis.requestAnimationFrame = callback => callback();
+globalThis.setInterval = () => 0;
+globalThis.window = {
+  addEventListener() {},
+  matchMedia() { return { matches: false }; },
+};
+globalThis.document = {
+  activeElement: null,
+  hidden: false,
+  title: "",
+  addEventListener() {},
+  getElementById() { return appNode; },
+  querySelector() { return null; },
+  querySelectorAll() { return []; },
+};
+"""
+        + script
+        + r"""
+const issue = {
+  issue_id: "issue-1",
+  identifier: "ISSUE-1",
+  title: "Control race test",
+  status: "running",
+  run_id: "run-1",
+  chat_control_available: true,
+  updated_at: 1,
+  execution: {},
+  data_quality: {},
+};
+state.snapshot = {
+  event_epoch: "epoch-1",
+  revision: 1,
+  issues: { issues: [issue] },
+  events: { recent: [], total: 0 },
+  metadata: { alive: true },
+};
+state.runKey = "ISSUE-1";
+state.view = "chat";
+state.chatConnectedRunId = "run-1";
+state.chatConnection = "live";
+state.chatSessions = [{ runId: "run-1", current: true, evidenceCount: 0, items: [] }];
+state.chatItems = state.chatSessions[0].items;
+state.expandedChatRunIds = new Set(["run-1"]);
+state.runObservations["run-1"] = [];
+(async () => {
+  await controlChat("pause");
+  process.stdout.write(JSON.stringify({
+    error: state.chatError,
+    notice: state.chatNotice,
+    status: state.chatControlStatus,
+    controlAvailable: issue.chat_control_available,
+  }));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    )
+
+    result = subprocess.run(
+        [node], input=harness, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "error": "",
+        "notice": "The run ended before the control request was applied.",
+        "status": "ended",
+        "controlAvailable": False,
+    }
+
+
+def test_live_control_attachment_updates_buttons_without_full_page_render() -> None:
+    """Late control readiness must patch controls without resetting the feed."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    html = _build_dashboard_html()
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    harness = (
+        r"""
+const appNode = { innerHTML: "" };
+const actionsNode = {
+  innerHTML: '<button class="button primary" data-nav-view="run">Open latest Evidence</button>',
+};
+const countsNode = { textContent: "0 messages · 0 tools · 0 observations" };
+const sessionNode = {
+  dataset: { chatSession: "run-1" },
+  querySelector(selector) {
+    if (selector === ".chat-session-counts") return countsNode;
+    return null;
+  },
+};
+const feedNode = { scrollLeft: 0, scrollTop: 25, scrollHeight: 100 };
+const statusNode = { innerHTML: "" };
+const noticeNode = {
+  textContent: "",
+  classList: { toggle() {} },
+};
+class FakeEventSource {
+  constructor(url) { this.url = url; }
+  close() { this.closed = true; }
+}
+globalThis.EventSource = FakeEventSource;
+globalThis.location = {
+  href: "http://127.0.0.1:8765/chat?run=ISSUE-1",
+  pathname: "/chat",
+  search: "?run=ISSUE-1",
+  reload() {},
+};
+globalThis.history = { replaceState() {} };
+globalThis.navigator = { clipboard: { writeText: async () => {} } };
+globalThis.requestAnimationFrame = callback => { callback(); return 1; };
+globalThis.cancelAnimationFrame = () => {};
+globalThis.setInterval = () => 0;
+globalThis.window = {
+  addEventListener() {},
+  matchMedia() { return { matches: false }; },
+};
+globalThis.document = {
+  activeElement: null,
+  hidden: false,
+  title: "",
+  addEventListener() {},
+  getElementById() { return appNode; },
+  querySelector(selector) {
+    if (selector === "[data-chat-feed]") return feedNode;
+    if (selector === ".conversation-actions") return actionsNode;
+    if (selector === ".thread-state") return statusNode;
+    if (selector === ".composer-notice") return noticeNode;
+    return null;
+  },
+  querySelectorAll(selector) {
+    if (selector === "[data-chat-session]") return [sessionNode];
+    return [];
+  },
+};
+"""
+        + script
+        + r"""
+const initialIssue = {
+  issue_id: "issue-1",
+  identifier: "ISSUE-1",
+  title: "Late control attachment test",
+  status: "running",
+  run_id: "run-1",
+  chat_control_available: false,
+  updated_at: 1,
+  execution: {},
+  data_quality: {},
+};
+state.snapshot = {
+  event_epoch: "epoch-1",
+  revision: 1,
+  issues: { issues: [initialIssue] },
+  events: { recent: [], total: 0 },
+  metadata: { alive: true },
+};
+state.runKey = "ISSUE-1";
+state.view = "chat";
+state.chatConnectedRunId = "run-1";
+state.chatConnection = "live";
+state.chatAutoFollow = false;
+state.chatSessions = [{ runId: "run-1", current: true, evidenceCount: 0, items: [] }];
+state.chatItems = state.chatSessions[0].items;
+state.runObservations["run-1"] = [];
+state.lastSignature = snapshotSignature(state.snapshot);
+
+applySnapshot({
+  event_epoch: "epoch-1",
+  revision: 1,
+  issues: { issues: [{ ...initialIssue, chat_control_available: true }] },
+  events: { recent: [], total: 0 },
+  metadata: { alive: true },
+});
+process.stdout.write(JSON.stringify({
+  hasPause: actionsNode.innerHTML.includes('data-chat-action="pause"'),
+  hasStop: actionsNode.innerHTML.includes('data-chat-action="stop"'),
+  scrollTop: feedNode.scrollTop,
+}));
+"""
+    )
+
+    result = subprocess.run(
+        [node], input=harness, text=True, capture_output=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "hasPause": True,
+        "hasStop": True,
+        "scrollTop": 25,
     }
 
 
@@ -1572,8 +1843,37 @@ def test_read_model_reuses_old_report_title_without_old_run_metrics(
 
     assert issue["issue_title"] == "Repair the status page"
     assert issue["report_status"] == ""
+    assert issue["report_path"] == ""
     assert issue["run_turn_count"] == 1
     assert issue["run_tool_count"] == 0
+
+
+def test_read_model_preserves_paused_as_an_active_run_state(tmp_path: Path) -> None:
+    issue_workspace = tmp_path / "PAUSED-1"
+    issue_workspace.mkdir()
+    (tmp_path / ".orchestratord_issue_registry.json").write_text(
+        json.dumps(
+            {
+                "paused-1": {
+                    "issue_identifier": "PAUSED-1",
+                    "status": "paused",
+                    "pause_reason": "operator_interrupt",
+                    "workspace_path": str(issue_workspace),
+                    "run_id": "run-paused",
+                    "created_at": 100.0,
+                    "updated_at": 200.0,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    model = RunReadModel(tmp_path).read(now=201.0)
+
+    assert model["issues"][0]["status"] == "paused"
+    assert model["issues"][0]["pause_reason"] == "operator_interrupt"
+    assert model["by_status"]["paused"] == 1
+    assert model["totals"]["active"] == 1
 
 
 def test_event_tailer_reads_canonical_transcript_directory(
@@ -1678,6 +1978,144 @@ def test_followup_operator_message_belongs_to_replacement_run(
         "please continue",
         "new reply",
     ]
+
+
+def test_active_run_followups_are_durably_queued_in_order(tmp_path: Path) -> None:
+    """Messages sent mid-run must survive until a replacement run can start."""
+    issue_workspace = tmp_path / "ISSUE-7"
+    issue_workspace.mkdir()
+    registry_path = tmp_path / ".orchestratord_issue_registry.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "issue-7": {
+                    "issue_identifier": "ISSUE-7",
+                    "status": "running",
+                    "workspace_path": str(issue_workspace),
+                    "run_id": "run-7",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _followup_completed_run(
+        tmp_path, "run-7", "first question", defer_until_idle=True
+    )
+    assert _followup_completed_run(
+        tmp_path, "run-7", "second question", defer_until_idle=True
+    )
+
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert registry["issue-7"]["status"] == "running"
+    assert registry["issue-7"].get("intent", "none") == "none"
+    control_files = sorted((tmp_path / ".orchestrator_control").glob("*.control"))
+    assert len(control_files) == 2
+    assert not list((tmp_path / ".orchestrator_control").glob("*.tmp"))
+    queued_questions = [
+        path.read_text(encoding="utf-8").splitlines()[2] for path in control_files
+    ]
+    assert queued_questions == [
+        "first question",
+        "second question",
+    ]
+    hints = (issue_workspace / ".operator_hints.md").read_text(encoding="utf-8")
+    assert hints.index("first question") < hints.index("second question")
+
+
+def test_active_message_api_queues_without_live_control(tmp_path: Path) -> None:
+    """Question delivery must not depend on the transient control socket."""
+    issue_workspace = tmp_path / "ISSUE-8"
+    issue_workspace.mkdir()
+    (tmp_path / ".orchestratord_issue_registry.json").write_text(
+        json.dumps(
+            {
+                "issue-8": {
+                    "issue_identifier": "ISSUE-8",
+                    "status": "running",
+                    "workspace_path": str(issue_workspace),
+                    "run_id": "run-8",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class UnusedGateway:
+        def send_message(self, *_args: object) -> bool:
+            raise AssertionError("active questions must use the durable queue")
+
+    class FakeState:
+        workspace = tmp_path
+        chat_gateway = UnusedGateway()
+
+        @staticmethod
+        def refresh_snapshot(force: bool = False) -> dict[str, object]:
+            assert force is True
+            return {"issues": {"issues": [{"run_id": "run-8", "status": "running"}]}}
+
+    body = json.dumps({"text": "queue this question"}).encode()
+    statuses: list[int] = []
+    handler = object.__new__(dashboard_mod.DashboardHandler)
+    handler.state = FakeState()
+    handler.path = "/api/runs/run-8/messages"
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
+    handler.wfile = io.BytesIO()
+    handler.send_response = statuses.append
+    handler.send_header = lambda _name, _value: None
+    handler.end_headers = lambda: None
+
+    handler.do_POST()
+
+    assert statuses == [202]
+    assert json.loads(handler.wfile.getvalue()) == {
+        "accepted": True,
+        "run_id": "run-8",
+        "mode": "followup_deferred",
+    }
+    controls = list((tmp_path / ".orchestrator_control").glob("*.control"))
+    assert len(controls) == 1
+    assert controls[0].read_text(encoding="utf-8").splitlines() == [
+        "followup",
+        "issue-8",
+        "queue this question",
+    ]
+
+
+def test_control_api_identifies_a_run_end_race(tmp_path: Path) -> None:
+    class InactiveGateway:
+        @staticmethod
+        def control(_run_id: str, _verb: str, _payload: str) -> bool:
+            return False
+
+    class FakeState:
+        workspace = tmp_path
+        chat_gateway = InactiveGateway()
+
+        @staticmethod
+        def refresh_snapshot(force=False):
+            return {"issues": {"issues": []}}
+
+    statuses: list[int] = []
+    handler = object.__new__(dashboard_mod.DashboardHandler)
+    handler.state = FakeState()
+    handler.path = "/api/runs/run-ended/pause"
+    handler.headers = {"Content-Length": "0"}
+    handler.rfile = io.BytesIO()
+    handler.wfile = io.BytesIO()
+    handler.send_response = statuses.append
+    handler.send_header = lambda _name, _value: None
+    handler.end_headers = lambda: None
+
+    handler.do_POST()
+
+    assert statuses == [409]
+    assert json.loads(handler.wfile.getvalue()) == {
+        "code": "run_not_active",
+        "error": "run not active",
+        "run_id": "run-ended",
+    }
 
 
 def test_dashboard_replays_previous_run_evidence_for_conversation(

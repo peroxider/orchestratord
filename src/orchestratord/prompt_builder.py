@@ -261,11 +261,11 @@ class PromptBuilder:
 
         ws_path = _resolve_workspace_path(session)
 
-        # Operator hints injection: if the workspace has .operator_hints.md,
-        # prepend operator guidance before the issue context so it is the
-        # first thing the agent sees on every turn.
+        # A replacement conversation run has a new request, not a new attempt
+        # at the original task. Keep it in the user part, after old context.
         operator_hints = _get_operator_hints(ws_path) if ws_path else None
-        if operator_hints:
+        followup_request = operator_hints if getattr(session, "run_kind", None) == "agent_followup" else None
+        if operator_hints and not followup_request:
             rendered = f"---\n## Operator Hints\n\n{operator_hints}\n---\n\n{rendered}"
 
         # Root-cause fix: inject workspace diff context so the
@@ -384,6 +384,23 @@ class PromptBuilder:
         task_guidance = get_task_guidelines()
         if task_guidance:
             rendered = f"{rendered}\n\n---\n{task_guidance}\n---"
+
+        if followup_request:
+            system, marker, context = rendered.partition(PromptBuilder.USER_MESSAGE_MARKER)
+            if not marker:
+                context, system = system, ""
+            current = (
+                "## Previous task context\n\n"
+                "The following describes the earlier task, not a request to repeat it. "
+                "Keep its workspace and safety constraints, and use it as context for "
+                "the current operator request below.\n\n"
+                f"{context.strip()}\n\n"
+                "## Current operator request\n\n"
+                "Answer or perform this follow-up only. Do not repeat the original "
+                "task's actions unless this request asks for them.\n\n"
+                f"{followup_request}"
+            )
+            rendered = f"{system}{marker}\n{current}" if marker else current
 
         return rendered
 

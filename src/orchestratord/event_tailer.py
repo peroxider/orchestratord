@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .paths import SESSIONS_DIR
+from .transcript_compat import normalize_legacy_history
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +81,18 @@ def _append_history_message(
     messages: list[dict[str, Any]], message: dict[str, Any]
 ) -> None:
     """Coalesce transport fragments that belong to one assistant message."""
+    if messages and message.get("type") == "RunEnded" and messages[-1].get("type") == "SessionComplete":
+        # The runner's authoritative terminal record supersedes the backend's
+        # completion notification in the conversation, not in raw evidence.
+        messages[-1] = message
+        return
     if messages and message.get("role") == "assistant" and message.get("ts") not in (None, ""):
         previous = messages[-1]
-        if previous.get("role") == "assistant" and previous.get("ts") == message.get("ts"):
+        if (
+            previous.get("role") == "assistant"
+            and previous.get("ts") == message.get("ts")
+            and previous.get("type") == message.get("type")
+        ):
             previous_text = _history_text(previous.get("content"))
             message_text = _history_text(message.get("content"))
             if previous_text is not None and message_text is not None:
@@ -166,20 +176,24 @@ def read_history_direct(run_id: str) -> list[dict[str, Any]]:
                 # 1. Classic transcript: {"role": "...", "content": "...", "ts": "..."}
                 # 2. Live frames:       {"type": "TextDelta|ToolCallEvent|...", "data": {...}}
                 if "role" in entry:
+                    if entry.get("type") in {"SessionComplete", "RunEnded", "Error"}:
+                        _append_history_message(messages, _frame_to_history_entry(entry))
+                        continue
                     message = {
                         "role": entry.get("role", "unknown"),
                         "content": entry.get("content", ""),
                         "ts": entry.get("ts", ""),
                     }
-                    if entry.get("origin"):
-                        message["origin"] = entry["origin"]
+                    for key in ("type", "origin", "system_prompt", "delivery", "backend", "resume_session_id"):
+                        if key in entry:
+                            message[key] = entry[key]
                     _append_history_message(messages, message)
                 elif "type" in entry:
                     _append_history_message(messages, _frame_to_history_entry(entry))
     except (FileNotFoundError, OSError):
         return []
 
-    return messages
+    return normalize_legacy_history(messages)
 
 
 def _frame_to_history_entry(frame: dict[str, Any]) -> dict[str, Any]:
@@ -189,11 +203,17 @@ def _frame_to_history_entry(frame: dict[str, Any]) -> dict[str, Any]:
     ts = frame.get("ts", "")
 
     if frame_type == "TextDelta":
-        return {"role": "assistant", "content": data.get("content", ""), "ts": ts}
+        return {
+            "role": "assistant", "type": "TextDelta",
+            "content": data.get("content", ""), "ts": ts,
+        }
     if frame_type == "ToolCallEvent":
         return {
             "role": "assistant",
-            "content": [{"type": "tool_use", "name": data.get("tool_name", "?"), "id": data.get("tool_use_id", "")}],
+            "content": [{
+                "type": "tool_use", "name": data.get("tool_name", "?"),
+                "id": data.get("tool_use_id", ""), "input": data.get("params", {}),
+            }],
             "ts": ts,
         }
     if frame_type == "ToolResultEvent":
@@ -205,13 +225,26 @@ def _frame_to_history_entry(frame: dict[str, Any]) -> dict[str, Any]:
             output = str(result)[:500]
         return {
             "role": "tool",
-            "content": [{"type": "tool_result", "tool_use_id": data.get("tool_use_id", ""), "content": output}],
+            "content": [{
+                "type": "tool_result", "tool_use_id": data.get("tool_use_id", ""),
+                "content": output,
+                "is_error": bool(data.get("is_error") or (
+                    isinstance(result, dict) and result.get("is_error")
+                )),
+                "exit_code": data.get("exit_code", (
+                    result.get("exit_code") if isinstance(result, dict) else None
+                )),
+            }],
             "ts": ts,
         }
     if frame_type == "TurnComplete":
         return {"role": "system", "content": f"Turn {data.get('turn', '?')} complete", "ts": ts}
-    if frame_type == "SessionComplete":
-        return {"role": "system", "content": f"Session ended: {data.get('reason', '?')}", "ts": ts}
+    if frame_type in {"SessionComplete", "RunEnded"}:
+        return {"role": "system", "type": frame_type,
+                "content": f"Run ended: {data.get('reason', '?')}", "ts": ts,
+                "reason": data.get("reason"), "status": data.get("status")}
+    if frame_type == "Error":
+        return {"role": "system", "type": "Error", "content": data.get("message", "Backend error"), "ts": ts}
     # Unknown frame type — skip.
     return {"role": "system", "content": "", "ts": ts}
 
@@ -554,7 +587,9 @@ class _SessionTailer:
                     text = block.get("text", "")
                     if text and text.strip():
                         source_ts = entry.get("timestamp") or entry.get("ts")
-                        if self._consume_codex_wire_text(str(text), source_ts):
+                        if not entry.get("type") and self._consume_codex_wire_text(
+                            str(text), source_ts
+                        ):
                             continue
                         flattened = _flatten_content(text)
                         self._emit_event(
@@ -719,6 +754,15 @@ class _SessionTailer:
     def _process_user_message(self, entry: dict[str, Any]) -> None:
         """Extract tool_result events from a user message's content blocks."""
         content = entry.get("content")
+        text = _history_text(content)
+        if text:
+            self._emit_event(
+                "run_input" if entry.get("type") == "RunInput" else "operator_input",
+                {"content": text, "origin": entry.get("origin", "operator"),
+                 "system_prompt": entry.get("system_prompt", ""),
+                 "delivery": entry.get("delivery", "recorded"),
+                 "ts": entry.get("timestamp") or entry.get("ts")},
+            )
         if isinstance(content, list):
             for block in content:
                 if not isinstance(block, dict):
@@ -749,10 +793,17 @@ class _SessionTailer:
 
     def _process_system_message(self, entry: dict[str, Any]) -> None:
         """Surface terminal telemetry persisted by the backend runner."""
-        if entry.get("type") != "SessionComplete":
+        frame_type = entry.get("type")
+        if frame_type not in {"SessionComplete", "RunEnded", "Error"}:
             return
         data = entry.get("data")
         if not isinstance(data, dict):
+            return
+        if frame_type in {"RunEnded", "Error"}:
+            self._emit_event("run_ended" if frame_type == "RunEnded" else "run_error", {
+                **data, "ts": entry.get("timestamp") or entry.get("ts"),
+                "content": data.get("summary") or data.get("message") or data.get("reason", ""),
+            })
             return
         metrics = {
             key: data[key]

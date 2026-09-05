@@ -44,6 +44,26 @@ stages:
 
 The core daemon coordinates agent sessions through a small SPI (Service Provider Interface). Concrete backends (ClawCodex, OpenAI Codex, DeepSeek Harness, Hermes, OpenCode…) ship as independent PyPI plugins and are discovered at runtime via Python entry points.
 
+## Visualization boundary
+
+The dashboard consumes common history messages (`role` and `content` blocks)
+and core SSE frames (`TextDelta`, `ToolCallEvent`, `ToolResultEvent`, and
+lifecycle events). It does not decode an agent's native wire protocol.
+Backend adapters translate native output to `EventEnvelope`; the core handles
+persistence and browser delivery. New integrations must use that contract,
+not send native JSONL disguised as `TextDelta`.
+
+New text transcript rows retain `type: TextDelta`, so JSON examples remain
+literal text both live and on replay. Old untyped Codex wire transcripts are
+normalized read-only by `transcript_compat.py` before history reaches the
+browser; no backend package is needed and stored files are not rewritten.
+Historical format detection is best-effort because those old rows did not
+record their format. Unsupported or malformed content remains visible.
+
+This display boundary does not add backend control capabilities: pause,
+resume, stop, and follow-up support still depend on the adapter and the core's
+capability checks.
+
 ## Why
 
 Different agent runtimes have very different capabilities — streaming deltas, session resume, tool-call approval, cost reporting, terminal takeover. Rather than force a lowest-common-denominator interface, orchestratord advertises a [capability matrix](#backend-capability-matrix) per backend and lets the **core** enforce uniform degradation paths (`src/orchestratord/spi/capabilities.py:21`). Backends never self-degrade; they report what they have.
@@ -80,7 +100,7 @@ The script:
    | `clawcodex` | `extensions/api/query.py` importable from `CLAWCODEX_SOURCE`     | local checkout (auto-detects `~/clawcodex`, `~/clawcodex-ascend`, `/opt/clawcodex`)    |
    | `claude`    | `claude` or `ccb` on `PATH`                                     | `npm i -g @anthropic-ai/claude-code`                                                   |
    | `codex`     | `codex` on `PATH`                                               | `npm i -g @openai/codex`                                                               |
-   | `dsh`       | `import deepseek_harness_sdk` + `dsh` on `PATH`                 | `pip install deepseek-harness-sdk`                                                     |
+   | `dsh`       | `deepseek-harness-sdk>=0.1.2rc1,<0.2` with its bundled runtime | install the `orchestratord-dsh` adapter (global `dsh` is not required) |
    | `hermes`    | `hermes` on `PATH`                                              | upstream repository                                                                    |
    | `cursor`    | `cursor-agent` on `PATH`                                        | see https://cursor.com/cli — event stream shape not yet exercised, buffered as TEXT    |
    | `copilot`   | `copilot` on `PATH`                                             | `gh extension install github/gh-copilot` — event stream needs experimentation         |
@@ -129,7 +149,7 @@ The core daemon and the backends are separate PyPI packages. Pick one (or more) 
 pip install orchestratord
 
 # Add one backend (transitively pulls in orchestratord).
-pip install orchestratord orchestratord-clawcodex     # InProcess, reference impl
+pip install orchestratord orchestratord-clawcodex     # isolated SDK worker
 pip install orchestratord orchestratord-codex         # Codex CLI
 pip install orchestratord orchestratord-dsh           # DeepSeek Harness SDK
 pip install orchestratord orchestratord-hermes        # Hermes CLI
@@ -157,7 +177,7 @@ pip install orchestratord orchestratord-qwen          # Qwen / DashScope CLI (st
         │                                 │                   │
    ┌────▼─────┐  ┌───────┐  ┌──────┐  ┌──────┐  ┌────────────┐
    │clawcodex │  │ codex │  │ dsh  │  │hermes│  │ opencode   │
-   │InProcess │  │  Cli  │  │ Sdk  │  │ Cli  │  │ Protocol   │
+   │SdkProcess│  │  Cli  │  │ Sdk  │  │ Cli  │  │ Protocol   │
    └──────────┘  └───────┘  └──────┘  └──────┘  └────────────┘
         each is its own PyPI package, registers via
         [project.entry-points."orchestratord.backends"]
@@ -173,9 +193,9 @@ Each backend advertises a `BackendCapabilities` dataclass. A checkmark means the
 
 | Capability bit        | clawcodex | codex (Cli / As)¹ | dsh | hermes | opencode | cursor | copilot | kimi | qwen |
 | --------------------- | :-------: | :---------------: | :-: | :----: | :------: | :----: | :-----: | :--: | :--: |
-| Family (heuristic)    | InProcess |   Cli / SdkProcess | Cli²|  Cli   | Protocol |  Cli   |   Cli   | Cli  | Cli  |
+| Family                | SdkProcess |   Cli / SdkProcess | Cli²|  Cli   | Protocol |  Cli   |   Cli   | Cli  | Cli  |
 | `streaming_deltas`    |     ✓     |      ✓ / ✓        |  ✓  |        |    ✓     |        |         |      |  ✓   |
-| `resumable`           |           |      ✓ /          |     |   ✓    |          |        |         |      |      |
+| `resumable`           |     ✓     |      ✓ /          |     |   ✓    |          |        |         |      |      |
 | `interrupt`           |           |        / ✓        |     |        |          |        |         |      |      |
 | `approval_hooks`      |     ✓     |        / ✓        |     |        |    ✓     |        |         |      |      |
 | `parallel_sessions`   |           |      ✓ / ✓        |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |
@@ -188,7 +208,7 @@ Each backend advertises a `BackendCapabilities` dataclass. A checkmark means the
 
 ² `dsh` streams real deltas via its notification pump, but the SdkProcess heuristic requires `interrupt + approval_hooks + streaming_deltas` together, so `backend_registry._classify_family()` still classifies it as `Cli`. The descriptor mirrors this classification. Cross-process `resume` is off: the harness runtime has no remount protocol for persisted sessions (id collision).
 
-³ dsh reports real **token usage** (accumulated from `assistant/message` events, carried on the `SESSION_COMPLETE` payload as `usage`); it does not fabricate USD — there is no price table. Backends that report USD (clawcodex/claude) use the `total_cost_usd` payload key; the core extracts both.
+³ DSH and the AgentSDK ClawCodex bridge report **token usage** on the `SESSION_COMPLETE` payload as `usage`; they do not fabricate USD. Other runtimes may supply `total_cost_usd`; the core extracts either form.
 
 **Capability degradation is enforced by the core, not by backends** (`src/orchestratord/spi/capabilities.py:21`):
 
@@ -221,9 +241,39 @@ The session SPI exposes a single async iterator of `EventEnvelope` events. Backe
 
 Observations from reading the session modules:
 
-- **`clawcodex`** is the only backend that emits the full tool lifecycle (`TOOL_CALL` + `TOOL_RESULT`) and the only one that emits `TEXT_DELTA` and `PHASE_COMPLETE`. Native permission waits are translated to `APPROVAL_REQUEST`; the core evaluates its approval policy and calls `approve()` to release the matching ClawCodex waiter. `interrupt()` remains unsupported and is therefore not advertised.
+- **`clawcodex`** wraps `QueryRunner` from the configured `CLAWCODEX_SOURCE` and translates its native text, tool and lifecycle events. Native permission waits are translated to `APPROVAL_REQUEST`; the core evaluates its approval policy and calls `approve()` to release the matching waiter. Preflight requires the source tree's query bridge to expose `ApprovalRequestEvent` and `QueryRunner.approve/cancel_pending_approvals`; an incomplete bridge fails before provider startup. The AgentSDK bridge enables approval callbacks explicitly for this adapter, while ordinary headless callers retain their non-interactive default. `interrupt()` remains unsupported and is therefore not advertised.
+  With the AgentSDK structured query bridge, native message boundaries keep
+  intermediate text and final snapshots from being duplicated; a model turn
+  with multiple tools completes only after all its tool results. Native
+  session IDs are reused for later `send()` calls, and terminal events carry
+  actual token usage and errors. Native wire parsing stays in AgentSDK, not
+  the browser or core. Authentication preflight checks saved OAuth status
+  for `openai-codex`, and native API-key/keychain lookup for other providers;
+  this local check does not refresh credentials or prove provider access.
+  Each conversation runs in an owned Python worker rather than the daemon's
+  interpreter. On POSIX, `pause()`/`resume()` suspend its local process tree;
+  `close()` stops active execution and waits for the worker to exit. This
+  does not suspend remote inference or provider billing. Daemon pipe loss
+  terminates the worker, and queued followups use the core's common `send()`
+  path. Saved native session IDs can resume in a replacement worker.
 - **`codex`** ships two implementations selected at runtime. The backend probes `codex app-server --help` (`backends/orchestratord-codex/src/orchestratord_codex/backend.py`); a 0 exit wires up `CodexAppServerSession` (`backends/orchestratord-codex/src/orchestratord_codex/app_server_session.py`) with `streaming_deltas + interrupt + approval_hooks` (4/8, SdkProcess). A non-0 exit or missing binary falls back to `CodexSession` (2/8, Cli, `codex exec --json`).
 - **`dsh`** wraps `deepseek-harness-sdk`. The SDK is synchronous, so each turn runs on a worker thread while a notification pump forwards `session.event` notifications into an asyncio queue — `send()` returns immediately and events flow incrementally (`backends/orchestratord-dsh/src/orchestratord_dsh/session.py`). It translates `assistant/chunk` (text/reasoning deltas → `TEXT_DELTA`), `assistant/message`, `tool/call`, `tool/result`, `turn/end`. As of `DESIGN_backends_hardening.md` Scheme C it also emits an `ERROR` branch when the SDK raises or `finish_reason` is non-success (`dsh_init_error` / `dsh_error` / `dsh_finish`, the latter carrying the real error message), and advertises `cost_reporting=True` backed by the token usage it accumulates onto the `SESSION_COMPLETE` payload.
+  The adapter requires SDK `>=0.1.2rc1,<0.2` and uses the runtime's `sdk`
+  profile; generated route/approval files are ID-merged patches, not copies
+  of the runtime configuration. An explicit `agent.cordis` patch can mount
+  a provider plugin with its own authentication; the generated approval patch
+  is appended without replacing it or changing the selected sandbox mode.
+  Native JSON tool arguments are normalized, and the Bash exit-code footer
+  determines command failure even when the native transport says `isError=false`.
+  Each `send()` reports only its own captured token usage, not cumulative
+  usage from earlier requests or an invented dollar cost. SDK persistence defaults to
+  `<workspace>/.reports/dsh-home`; an explicit `DSH_HOME` overrides it.
+  POSIX pause/resume controls the owned runtime and tool process tree,
+  including tools that create a new process session. This does not pause
+  remote inference or provider billing. Stop kills active local execution
+  and waits for the SDK worker to exit; normal completion retains the SDK's
+  bounded shutdown flush before residual tool cleanup. Local process tests
+  use the real SDK with a Python protocol stub, not a real model provider.
 - **`hermes`** is the simplest CLI backend. It always passes `--yolo` (auto-approve) and `--pass-session-id` for resume. Tool events are not translated; only `TEXT/ERROR` are emitted. The docstring notes an upgrade path: "if hermes gateway protocol opens, migrate to Protocol family".
 - **`opencode`** spawns `opencode serve --port 0` and discovers the listening line via stderr regex. As of `DESIGN_backends_hardening.md` Scheme B, `send()` opens `POST /v1/chat` with `Accept: text/event-stream` and translates each `data:` frame into `TEXT_DELTA / TOOL_CALL / TOOL_RESULT / TURN_COMPLETE / ERROR`; `approval.request` frames are cached in `_pending_approvals` and forwarded through `session.approve()`. Old opencode binaries that return a non-SSE response degrade to a single `TEXT` event so consumers still see the bytes.
 
@@ -293,7 +343,7 @@ The nine guarded binaries today:
 
 | Binary | Backend package | Notes |
 | --- | --- | --- |
-| `clawcodex-dev` | `orchestratord-clawcodex` | in-process SDK; capability probe |
+| `clawcodex-dev` | `orchestratord-clawcodex` | isolated Python SDK worker; capability probe |
 | `codex` | `orchestratord-codex` | dual-path: `codex app-server` (SdkProcess) or `codex exec --json` (Cli) |
 | `hermes` | `orchestratord-hermes` | spawn-per-turn Cli |
 | `opencode` | `orchestratord-opencode` | `opencode serve --port 0` + SSE |

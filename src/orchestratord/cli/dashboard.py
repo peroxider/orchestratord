@@ -37,6 +37,8 @@ from .dashboard_ui import LIVEVIEW_HTML
 
 logger = logging.getLogger(__name__)
 
+_FOLLOWUP_QUEUE_LOCK = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Issue status taxonomy
@@ -62,11 +64,13 @@ STATUS_META: dict[str, dict[str, str]] = {
     "queued": {"label": "Queued", "color": "#6e7681", "icon": "◷", "group": "active"},
     "pending": {"label": "Pending", "color": "#d29922", "icon": "○", "group": "active"},
     "running": {"label": "Running", "color": "#58a6ff", "icon": "◉", "group": "active"},
+    "paused": {"label": "Paused", "color": "#d29922", "icon": "Ⅱ", "group": "active"},
     "synced": {"label": "Synced", "color": "#a371f7", "icon": "⇄", "group": "active"},
     "pending_review": {"label": "Review", "color": "#79c0ff", "icon": "◎", "group": "active"},
     "completed": {"label": "Completed", "color": "#3fb950", "icon": "✓", "group": "terminal"},
     "failed": {"label": "Failed", "color": "#f85149", "icon": "✗", "group": "terminal"},
     "abandoned": {"label": "Abandoned", "color": "#8b949e", "icon": "⊘", "group": "terminal"},
+    "stopped": {"label": "Stopped", "color": "#8b949e", "icon": "■", "group": "terminal"},
     "verification_failed": {
         "label": "Verify Failed",
         "color": "#db6d28",
@@ -418,6 +422,13 @@ class DashboardState:
                         and _issue_run_is_live(issue)
                         and self.chat_gateway.is_control_ready(run_id)
                     )
+                    issue["chat_pause_available"] = False
+                    if issue["chat_control_available"]:
+                        endpoint_file = Path(issue["workspace_path"]) / ".run_control" / f"{run_id}.endpoint.json"
+                        try:
+                            issue["chat_pause_available"] = json.loads(endpoint_file.read_text()).get("pausable") is True
+                        except (OSError, ValueError, TypeError):
+                            pass
 
                 # 4. Assemble snapshot with events + token_activity
                 candidate = {
@@ -664,7 +675,13 @@ def _conversation_history_sessions(
         while messages:
             candidate = messages[-1]
             role = str(candidate.get("role") or "").lower()
-            if role not in {"user", "human"}:
+            content = candidate.get("content")
+            text_only = isinstance(content, str) or (
+                isinstance(content, list) and bool(content)
+                and all(isinstance(block, dict) and block.get("type") == "text" for block in content)
+            )
+            if (role not in {"user", "human"} or not text_only
+                    or candidate.get("origin") not in (None, "followup")):
                 break
             followup_messages.insert(0, messages.pop())
 
@@ -735,83 +752,102 @@ def _merge_previous_run_history(run_id: str) -> list[dict[str, Any]]:
     return _flatten_previous_run_history(_previous_run_histories(run_id))
 
 
-def _followup_completed_run(workspace: Path, run_id: str, text: str) -> bool:
-    """Queue a follow-up for a completed session.
+def _followup_completed_run(
+    workspace: Path,
+    run_id: str,
+    text: str,
+    *,
+    defer_until_idle: bool = False,
+) -> bool:
+    """Durably queue a follow-up for a session.
 
     Writes the follow-up text to ``.operator_hints.md`` in the issue's
-    workspace, marks ``Intent.FOLLOWUP`` in the registry, and drops a
-    ``chat_followup`` control file so the daemon re-launches the issue
-    without resetting the existing PR / branch.
+    workspace and drops a uniquely named control file so multiple questions
+    retain their order.  Completed sessions are marked ``Intent.FOLLOWUP``
+    immediately.  Active sessions leave their registry state untouched; the
+    daemon retains the control file until the current run has exited, then
+    starts a replacement follow-up on the same issue and branch.
 
     Returns ``True`` if the follow-up was queued successfully.
     """
-    registry_path = workspace / ".orchestratord_issue_registry.json"
-    raw = _safe_read_json(registry_path) or {}
+    with _FOLLOWUP_QUEUE_LOCK:
+        registry_path = workspace / ".orchestratord_issue_registry.json"
+        raw = _safe_read_json(registry_path) or {}
 
-    # Find the issue record by run_id.
-    issue_id = ""
-    issue_workspace_path = ""
-    for rid, record in raw.items():
-        if not isinstance(record, dict):
-            continue
-        if record.get("run_id") == run_id:
-            issue_id = rid
-            issue_workspace_path = record.get("workspace_path") or ""
-            break
+        # Find the issue record by run_id.
+        issue_id = ""
+        issue_workspace_path = ""
+        for rid, record in raw.items():
+            if not isinstance(record, dict):
+                continue
+            if record.get("run_id") == run_id:
+                issue_id = rid
+                issue_workspace_path = record.get("workspace_path") or ""
+                break
 
-    if not issue_id:
-        logger.warning("_followup_completed_run: no issue found for run_id=%s", run_id)
-        return False
-
-    # Write the follow-up text to .operator_hints.md so prompt_builder
-    # prepends it to the agent's context on re-launch.
-    if issue_workspace_path:
-        try:
-            hints_file = Path(issue_workspace_path) / ".operator_hints.md"
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-            header = f"--- Chat Follow-up (sent at {timestamp}) ---\n"
-            separator = "\n" + "-" * 50 + "\n"
-            with open(hints_file, "a", encoding="utf-8") as f:
-                f.write(header)
-                f.write(text + "\n")
-                f.write(separator)
-        except Exception:
-            logger.exception(
-                "Failed to write operator_hints for run_id=%s", run_id
+        if not issue_id:
+            logger.warning(
+                "_followup_completed_run: no issue found for run_id=%s", run_id
             )
             return False
 
-    # Mark intent in the registry.
-    try:
-        from ..issue_registry import IssueRegistry
+        # Write the follow-up text to .operator_hints.md so prompt_builder
+        # prepends it to the agent's context on re-launch.
+        if issue_workspace_path:
+            try:
+                hints_file = Path(issue_workspace_path) / ".operator_hints.md"
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                header = f"--- Chat Follow-up (sent at {timestamp}) ---\n"
+                separator = "\n" + "-" * 50 + "\n"
+                with open(hints_file, "a", encoding="utf-8") as f:
+                    f.write(header)
+                    f.write(text + "\n")
+                    f.write(separator)
+            except Exception:
+                logger.exception(
+                    "Failed to write operator_hints for run_id=%s", run_id
+                )
+                return False
 
-        registry = IssueRegistry(registry_path)
-        registry.mark_intent(
-            issue_id,
-            Intent.FOLLOWUP,
-            source="chat",
-            command=f"chat:followup:{text[:64]}",
-        )
-    except Exception:
-        logger.exception(
-            "Failed to mark intent for issue_id=%s", issue_id
-        )
-        return False
+        # A completed run can be made eligible immediately.  An active run
+        # must retain RUNNING until its owner finishes and releases it.
+        if not defer_until_idle:
+            try:
+                from ..issue_registry import IssueRegistry
 
-    # Write a control file so the daemon picks this up immediately
-    # instead of waiting for the next poll cycle.
-    try:
-        control_dir = workspace / ".orchestrator_control"
-        control_dir.mkdir(parents=True, exist_ok=True)
-        control_file = control_dir / f"followup_{issue_id}.control"
-        control_file.write_text(
-            f"followup\n{issue_id}\n{text}\n", encoding="utf-8"
-        )
-    except Exception:
-        logger.exception(
-            "Failed to write control file for issue_id=%s", issue_id
-        )
-        return False
+                registry = IssueRegistry(registry_path)
+                registry.mark_intent(
+                    issue_id,
+                    Intent.FOLLOWUP,
+                    source="chat",
+                    command=f"chat:followup:{text[:64]}",
+                )
+            except Exception:
+                logger.exception("Failed to mark intent for issue_id=%s", issue_id)
+                return False
+
+        # One file per message prevents later questions from overwriting an
+        # earlier queued question.  The fixed-width timestamp preserves order.
+        pending_file: Path | None = None
+        try:
+            control_dir = workspace / ".orchestrator_control"
+            control_dir.mkdir(parents=True, exist_ok=True)
+            sequence = time.time_ns()
+            file_id = uuid.uuid4().hex
+            control_file = control_dir / f"followup_{sequence:020d}_{file_id}.control"
+            pending_file = control_dir / f"followup_{sequence:020d}_{file_id}.tmp"
+            pending_file.write_text(
+                f"followup\n{issue_id}\n{text}\n", encoding="utf-8"
+            )
+            pending_file.replace(control_file)
+        except Exception:
+            if pending_file is not None:
+                try:
+                    pending_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            logger.exception("Failed to write control file for issue_id=%s", issue_id)
+            return False
 
     logger.info(
         "Chat follow-up queued for issue_id=%s run_id=%s",
@@ -1104,42 +1140,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if not isinstance(text, str) or not text.strip():
                 self._send_json({"error": "text is required"}, status=400)
                 return
-            ok = gateway.send_message(run_id, text.strip())
-            if not ok:
-                snapshot = self.state.refresh_snapshot(force=True)
-                if _snapshot_run_is_active(snapshot, run_id):
-                    # A new run can become visible just before its control
-                    # socket is ready. Do not reinterpret that delivery race
-                    # as a request to start another provider run.
-                    self._send_json(
-                        {
-                            "error": "run control channel is not ready",
-                            "run_id": run_id,
-                            "retryable": True,
-                        },
-                        status=409,
-                    )
-                    return
-                # The session is durably complete. Fall back to the registry
-                # follow-up path and let the daemon create one replacement
-                # run on the same issue and branch.
-                queued = _followup_completed_run(
-                    self.state.workspace, run_id, text.strip()
-                )
-                if not queued:
-                    self._send_json(
-                        {"error": "run not active and followup queue failed",
-                         "run_id": run_id},
-                        status=409,
-                    )
-                    return
+            snapshot = self.state.refresh_snapshot(force=True)
+            active = _snapshot_run_is_active(snapshot, run_id)
+            queued = _followup_completed_run(
+                self.state.workspace,
+                run_id,
+                text.strip(),
+                defer_until_idle=active,
+            )
+            if not queued:
                 self._send_json(
-                    {"accepted": True, "run_id": run_id, "mode": "followup_queued"},
-                    status=202,
+                    {"error": "followup queue failed", "run_id": run_id},
+                    status=409,
                 )
                 return
+            self._send_json(
+                {
+                    "accepted": True,
+                    "run_id": run_id,
+                    "mode": "followup_deferred" if active else "followup_queued",
+                },
+                status=202,
+            )
+            return
         else:
             verb = suffix[1:]
+            if verb in {"pause", "resume"}:
+                snapshot = self.state.refresh_snapshot(force=True)
+                issue = next((i for i in snapshot["issues"]["issues"] if i.get("run_id") == run_id), {})
+                if issue.get("chat_control_available") and not issue.get("chat_pause_available"):
+                    self._send_json({"error": "Backend does not support pausing local execution", "code": "pause_unsupported"}, status=409)
+                    return
             payload = body.get("message", "") if verb == "resume" else ""
             if not isinstance(payload, str):
                 self._send_json({"error": "message must be a string"}, status=400)
@@ -1147,7 +1178,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ok = gateway.control(run_id, verb, payload)
 
         if not ok:
-            self._send_json({"error": "run not active", "run_id": run_id}, status=409)
+            self._send_json(
+                {
+                    "code": "run_not_active",
+                    "error": "run not active",
+                    "run_id": run_id,
+                },
+                status=409,
+            )
             return
         self._send_json({"accepted": True, "run_id": run_id}, status=202)
 

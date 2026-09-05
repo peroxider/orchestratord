@@ -10,6 +10,106 @@ from orchestratord.spi.events import EventKind
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("native_boundaries", [False, True])
+async def test_native_three_turns_resume_and_report_exact_usage(tmp_path, monkeypatch, native_boundaries):
+    import json
+
+    from extensions.capabilities import headless_runner
+    from orchestratord_clawcodex.session import ClawcodexSession
+
+    resumes = []
+
+    def headless(options):
+        resumes.append(options.resume_session_id)
+        records = [
+            {"type": "system", "subtype": "init", "session_id": "native-persisted"},
+            {"type": "partial_text", "text": "reply"},
+        ]
+        if native_boundaries:
+            records.extend([
+                {"type": "model_turn", "text": "reply", "tool_ids": []},
+                {"type": "model_turn", "text": "", "tool_ids": []},
+            ])
+        records.extend([
+            {"type": "assistant", "text": "reply"},
+            {"type": "result", "session_id": "native-persisted", "num_turns": 2,
+             "result": "reply", "usage": {"input_tokens": 11, "output_tokens": 3}},
+        ])
+        for record in records:
+            options.stdout.write(json.dumps(record) + "\n")
+        return 0
+
+    monkeypatch.setattr(headless_runner, "run_headless_session", headless)
+    session = ClawcodexSession(SessionSpec(cwd=str(tmp_path)))
+    try:
+        for index in range(3):
+            await session.send(f"turn {index}")
+            events = [event async for event in session.events()]
+            assert "".join(e.payload["text"] for e in events if e.kind is EventKind.TEXT_DELTA) == "reply"
+            assert events[0].kind is EventKind.SESSION_STARTED
+            turns = [e for e in events if e.kind is EventKind.TURN_COMPLETE]
+            assert sum(e.payload["turn_delta"] for e in turns) == 2
+            assert turns[-1].payload["turn"] == (index + 1) * 2
+            assert events[-1].payload["usage"] == {"input_tokens": 11, "output_tokens": 3}
+        assert resumes == [None, "native-persisted", "native-persisted"]
+        assert session.session_id == "native-persisted"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_native_query_permission_reaches_spi_before_execution(tmp_path, monkeypatch):
+    from clawcodex_ext.permissions.types import PermissionAskRequest
+    from extensions.capabilities import headless_runner
+    from orchestratord_clawcodex.session import ClawcodexSession
+
+    replies = []
+
+    def headless(options):
+        reply = options.permission_handler(PermissionAskRequest(
+            tool_name="Bash", message="Execute?", tool_input={"command": "echo local"},
+            tool_use_id="tool-native-1",
+        ))
+        replies.append(reply)
+        options.stdout.write('{"type":"result","subtype":"success","num_turns":0}\n')
+        return 0
+
+    monkeypatch.setattr(headless_runner, "run_headless_session", headless)
+    session = ClawcodexSession(SessionSpec(cwd=str(tmp_path), permission_mode="default"))
+    try:
+        await session.send("task")
+        stream = session.events()
+        request = await anext(stream)
+        assert request.kind is EventKind.APPROVAL_REQUEST
+        assert request.payload["call_id"] == "tool-native-1"
+        assert replies == []
+        await session.approve(request.payload["request_id"], ApprovalDecision.ALLOW)
+        remaining = [event async for event in stream]
+        assert replies[0].behavior == "allow"
+        assert remaining[-1].kind is EventKind.SESSION_COMPLETE
+        assert remaining[-1].payload["reason"] == "success"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+async def test_unsupported_requested_query_option_is_not_silently_dropped(monkeypatch):
+    from extensions.api import query
+    from orchestratord_clawcodex.session import ClawcodexSession
+
+    def config_without_tools(prompt, workspace):
+        raise AssertionError("unsupported options should fail before construction")
+
+    monkeypatch.setattr(query, "QueryConfig", config_without_tools)
+    session = ClawcodexSession(SessionSpec(cwd="/tmp", tools_allow=["bash"]))
+    await session.send("task")
+    events = [event async for event in session.events()]
+    await session.close()
+    assert events[0].kind is EventKind.ERROR
+    assert "does not support QueryConfig.tools" in events[0].payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_default_spec_does_not_override_query_timeout_defaults(
     monkeypatch,
 ) -> None:

@@ -10,14 +10,18 @@ dispatched; events flow incrementally through ``events()``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
+import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
+from orchestratord.process_control import ProcessTree
 from orchestratord.spi.approval import ApprovalDecision
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
@@ -65,6 +69,7 @@ class DshSession:
             cost_reporting=True,
             tool_filtering=False,
             takeover=False,
+            pausable=os.name == "posix",
         )
         self._harness_factory = harness_factory
         self._queue: asyncio.Queue[EventEnvelope] = asyncio.Queue()
@@ -74,10 +79,17 @@ class DshSession:
         self._seq = 0
         self._closed = False
         self._harness: Any = None
+        self._lifecycle_lock = threading.RLock()
+        self._process_tree: ProcessTree | None = None
+        self._native_process: Any = None
+        self._process_ready = asyncio.Event()
+        self._turn_active = threading.Event()
         self._last_error_message: str | None = None
         # Real token usage accumulated from assistant/message
         # events (data.usage) — surfaced on SESSION_COMPLETE.
         self._usage_totals: dict[str, int] = {}
+        self._streamed_text = ""
+        self._tool_names: dict[str, str] = {}
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -89,8 +101,12 @@ class DshSession:
     def _default_harness_factory(self) -> Any:
         from deepseek_harness.api import DeepSeekHarness, DeepSeekHarnessConfig
 
+        from orchestratord_dsh.cordis_gen import resolve_route_credential
+
+        environ = {**os.environ, **self._spec.env}
         env_extra: dict[str, str] = {}
         cordis = self._spec.cordis
+        patches = [str(Path(cordis).expanduser().resolve())] if cordis else []
         provider, model = self._resolve_provider_model()
         # Approval policy: map the orchestrator's permission_mode onto
         # the runtime's user-approval seam. Without this the approval
@@ -105,10 +121,9 @@ class DshSession:
         # Custom provider routes: generate the cordis config mounting the
         # registry's llm-pi-ai routes and inject each route's credential
         # as an environment variable (never into the config file).
-        if provider != "deepseek-official":
+        if providers and provider != "deepseek-official":
             from orchestratord_dsh.cordis_gen import (
                 generate_cordis_file,
-                resolve_route_credential,
                 route_env_var_name,
             )
 
@@ -117,12 +132,12 @@ class DshSession:
                     providers,
                     Path(self._spec.cwd) / ".reports",
                     run_id=self._spec.run_id,
-                    environ=dict(os.environ),
+                    environ=environ,
                     approval_policy=approval_policy,
                 )
             )
             key = resolve_route_credential(
-                (providers.get(provider) or {}).get("api_key"), dict(os.environ)
+                (providers.get(provider) or {}).get("api_key"), environ
             )
             if key:
                 env_extra[route_env_var_name(provider)] = key
@@ -140,7 +155,7 @@ class DshSession:
                     providers or None,
                     Path(self._spec.cwd) / ".reports",
                     run_id=self._spec.run_id,
-                    environ=dict(os.environ),
+                    environ=environ,
                     approval_policy=approval_policy,
                 )
             )
@@ -150,25 +165,92 @@ class DshSession:
                 approval_policy,
                 cordis,
             )
+        if cordis:
+            resolved_patch = str(Path(cordis).expanduser().resolve())
+            if resolved_patch not in patches:
+                patches.append(resolved_patch)
         config = DeepSeekHarnessConfig(
             cwd=self._spec.cwd,
             model=model,
             provider=provider,
             env={**self._spec.env, **env_extra},
             base_url=self._spec.base_url,
-            api_key=self._spec.api_key,
-            cordis=cordis,
-            runtime_bin=self._spec.runtime_bin,
-            # Keep the SDK's session persistence (session.jsonl.zstd) out
-            # of the git workspace root: the runtime defaults to
-            # ./.sessions in the process cwd, which git-sync's
-            # ``git add -A`` would otherwise commit into the PR. Park it
-            # under .reports/ — already orchestratord-ignored.
-            session_root=str(Path(self._spec.cwd) / ".reports" / "dsh-sessions"),
+            api_key=(
+                resolve_route_credential(self._spec.api_key, environ)
+                if provider == "deepseek-official" else None
+            ),
+            patches=tuple(patches),
+            dsh_bin=self._spec.runtime_bin,
+            # The profile owns credentials and session persistence. Default
+            # to an ignored workspace-local home, never the user's ~/.dsh.
+            dsh_home=environ.get("DSH_HOME")
+            or str(Path(self._spec.cwd) / ".reports" / "dsh-home"),
         )
         harness = DeepSeekHarness(config)
+        self._bind_harness(harness)
         harness.start()
         return harness
+
+    def _signal_process_ready(self) -> None:
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._process_ready.set)
+            except RuntimeError:
+                pass  # The owning event loop may finish during disposal.
+
+    def _bind_harness(self, harness: Any) -> None:
+        """Own SDK startup and shutdown, including the initialize handshake.
+
+        SDK 0.1.2 exposes the client but not its process handle. Keep the
+        private ``_proc`` dependency here, covered by real-SDK local tests.
+        Every SDK start passes this guard, so a racing run cannot respawn
+        the subprocess after close has killed it.
+        """
+        with self._lifecycle_lock:
+            if self._closed:
+                harness.close()
+                raise RuntimeError("DSH session closed before runtime startup")
+            if self._harness is harness:
+                return
+            self._harness = harness
+            client = getattr(harness, "client", None)
+            if client is None:
+                return  # In-memory harnesses used by translation tests.
+            start = client.start
+            close = client.close
+
+            def capture_process() -> None:
+                process = getattr(client, "_proc", None)
+                if process is None:
+                    raise RuntimeError("DSH SDK did not expose its runtime process")
+                if process is not self._native_process:
+                    self._process_tree = ProcessTree(process.pid)
+                    self._native_process = process
+                self._signal_process_ready()
+
+            def managed_start() -> None:
+                with self._lifecycle_lock:
+                    if self._closed:
+                        raise RuntimeError("DSH session is closed")
+                    start()
+                    capture_process()
+
+            def managed_close() -> None:
+                with self._lifecycle_lock:
+                    tree = self._process_tree
+                    if tree is not None:
+                        tree.remember_descendants()
+                    try:
+                        close()
+                    finally:
+                        if tree is not None:
+                            tree.kill()
+
+            client.start = managed_start
+            client.close = managed_close
+            if getattr(client, "_proc", None) is not None:
+                capture_process()
 
     def _resolve_provider_model(self) -> tuple[str, str]:
         """The (provider, model) pair for the runtime's initialize call."""
@@ -196,7 +278,10 @@ class DshSession:
     def _ensure_harness(self) -> Any:
         if self._harness is None:
             factory = self._harness_factory or self._default_harness_factory
-            self._harness = factory()
+            harness = factory()
+            self._bind_harness(harness)
+            if self._harness_factory is not None:
+                harness.start()
         return self._harness
 
     async def send(self, content: str | list[Any]) -> None:
@@ -210,7 +295,12 @@ class DshSession:
             await self._turn_task
 
         self._loop = asyncio.get_running_loop()
+        self._streamed_text = ""
+        self._last_error_message = None
+        # Each send emits its own SESSION_COMPLETE; consumers add these totals.
+        self._usage_totals = {}
         self._turn_started = True
+        self._turn_active.set()
         self._turn_task = asyncio.create_task(
             asyncio.to_thread(self._run_turn, text)
         )
@@ -224,6 +314,8 @@ class DshSession:
                     raise RuntimeError("session closed before turn started")
                 harness = self._ensure_harness()
             except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
+                if self._closed:
+                    return
                 error_message = f"{type(exc).__name__}: {exc}"
                 self._last_error_message = error_message
                 self._emit_threadsafe(
@@ -236,6 +328,8 @@ class DshSession:
                 error_emitted = True
                 return
 
+            if self._closed:
+                return
             try:
                 result = harness.run(
                     text,
@@ -243,6 +337,8 @@ class DshSession:
                     on_notification=self._on_notification,
                 )
             except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
+                if self._closed:
+                    return
                 error_message = f"{type(exc).__name__}: {exc}"
                 self._last_error_message = error_message
                 self._emit_threadsafe(
@@ -276,8 +372,10 @@ class DshSession:
                     )
                     error_emitted = True
         finally:
+            self._turn_active.clear()
+            self._signal_process_ready()
             complete_payload: dict[str, Any] = {
-                "reason": "error" if error_emitted else "success"
+                "reason": "stopped" if self._closed else ("error" if error_emitted else "success")
             }
             if self._usage_totals:
                 # Real token usage (not fabricated USD — DeepSeek
@@ -336,7 +434,7 @@ class DshSession:
                 if isinstance(block, dict) and block.get("type") == "text":
                     text_parts.append(str(block.get("text", "")))
             # Accumulate real token usage (data.usage) so the
-            # SESSION_COMPLETE payload can carry session totals.
+            # SESSION_COMPLETE payload can carry totals for this send.
             usage = data.get("usage")
             if isinstance(usage, dict):
                 for key, value in usage.items():
@@ -344,12 +442,21 @@ class DshSession:
                         self._usage_totals[key] = (
                             self._usage_totals.get(key, 0) + int(value)
                         )
+            text = "".join(text_parts)
+            streamed = self._streamed_text
+            self._streamed_text = ""
+            # The complete message is a snapshot of already-delivered deltas,
+            # not a second answer. Preserve any tail omitted by the stream.
+            if streamed and text.startswith(streamed):
+                text = text[len(streamed):]
+                if not text:
+                    return []
             return [
                 EventEnvelope(
                     seq=self._next_seq(),
                     timestamp=self._now(),
                     kind=EventKind.TEXT,
-                    payload={"text": "".join(text_parts)},
+                    payload={"text": text},
                 )
             ]
 
@@ -357,8 +464,11 @@ class DshSession:
             chunk = data.get("chunk", {}) if isinstance(data.get("chunk"), dict) else {}
             chunk_type = chunk.get("type", "")
             if chunk_type in ("text-delta", "reasoning-delta"):
+                text = str(chunk.get("text", ""))
+                if chunk_type == "text-delta":
+                    self._streamed_text += text
                 payload = {
-                    "text": str(chunk.get("text", "")),
+                    "text": text,
                     "raw": dict(chunk),
                 }
                 if chunk_type == "reasoning-delta":
@@ -381,6 +491,13 @@ class DshSession:
             ]
 
         elif event_type == "tool/call":
+            self._tool_names[str(data.get("callId", ""))] = str(data.get("name", ""))
+            arguments = data.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    pass  # Preserve malformed native evidence for inspection.
             return [
                 EventEnvelope(
                     seq=self._next_seq(),
@@ -389,7 +506,7 @@ class DshSession:
                     payload={
                         "call_id": data.get("callId", ""),
                         "name": data.get("name", ""),
-                        "arguments": data.get("arguments", {}),
+                        "arguments": arguments,
                     },
                 )
             ]
@@ -424,6 +541,15 @@ class DshSession:
                 source = message.get("source", {})
                 if isinstance(source, dict) and source.get("callId"):
                     call_id = str(source["callId"])
+            output = "\n".join(texts)
+            exit_code = None
+            # DSH bash reports transport success even for a failed command.
+            # Its terminal footer is native protocol, not a generic text heuristic.
+            if self._tool_names.pop(call_id, "") == "bash":
+                match = re.search(r"(?:^|\n)\[exit code: (-?\d+)\]\s*\Z", output)
+                if match:
+                    exit_code = int(match.group(1))
+                    is_error = is_error or exit_code != 0
             return [
                 EventEnvelope(
                     seq=self._next_seq(),
@@ -432,7 +558,8 @@ class DshSession:
                     payload={
                         "call_id": call_id,
                         "ok": not is_error,
-                        "output": "\n".join(texts),
+                        "output": output,
+                        **({"exit_code": exit_code} if exit_code is not None else {}),
                     },
                 )
             ]
@@ -504,6 +631,31 @@ class DshSession:
     async def interrupt(self) -> None:
         pass
 
+    async def pause(self) -> None:
+        """Suspend owned local processes, not inference at the provider."""
+        if not self._turn_started or self._closed:
+            raise RuntimeError("DSH session is not active")
+        await asyncio.wait_for(
+            self._process_ready.wait(), self._spec.handshake_timeout_s or 30.0
+        )
+        await asyncio.to_thread(self._pause_sync)
+
+    def _pause_sync(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed or self._process_tree is None:
+                raise RuntimeError("DSH runtime process is not active")
+            self._process_tree.pause()
+
+    async def resume(self) -> None:
+        await asyncio.to_thread(self._resume_sync)
+
+    def _resume_sync(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise RuntimeError("DSH session is closed")
+            if self._process_tree is not None:
+                self._process_tree.resume()
+
     async def approve(self, request_id: str, decision: ApprovalDecision) -> None:
         pass
 
@@ -520,29 +672,21 @@ class DshSession:
         return ResumeStatus.UNDETECTABLE
 
     async def close(self) -> None:
-        if self._turn_task is not None and not self._turn_task.done():
-            # The SDK has no session cancel, so a turn
-            # in flight cannot be terminated — closing the harness makes
-            # the worker fail on its next transport read. Log it so an
-            # unexpected post-close worker burst is diagnosable.
-            logger.warning(
-                "dsh session closed while a turn was still in flight "
-                "(session_id=%s) — the worker will unwind on its own",
-                self.session_id,
-            )
+        # Mark closed before scheduling cleanup, including before the first
+        # worker dispatch. Never cancel a to_thread task and call it stopped.
         self._closed = True
-        if self._harness is not None:
-            try:
-                await asyncio.to_thread(self._harness.close)
-            except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                logger.debug("dsh harness close failed: %s", exc)
-            self._harness = None
+        await asyncio.to_thread(self.close_sync)
+        if self._turn_task is not None:
+            await asyncio.wait_for(asyncio.shield(self._turn_task), timeout=5.0)
 
     def close_sync(self) -> None:
         self._closed = True
-        if self._harness is not None:
-            try:
+        with self._lifecycle_lock:
+            if self._process_tree is not None and (
+                self._turn_active.is_set() or self._process_tree.frozen
+            ):
+                self._process_tree.kill()
+            if self._harness is not None:
                 self._harness.close()
-            except Exception as exc:  # noqa: BLE001 - best-effort teardown
-                logger.debug("dsh harness close failed: %s", exc)
-            self._harness = None
+                self._harness = None
+            self._signal_process_ready()

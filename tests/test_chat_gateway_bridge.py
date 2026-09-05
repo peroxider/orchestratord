@@ -187,6 +187,7 @@ async def test_backend_runner_publishes_tcp_fallback_for_dashboard_discovery(
         )
         assert json.loads(endpoint_file.read_text(encoding="utf-8")) == {
             "endpoint": session.control_socket_path,
+            "pausable": False,
         }
     finally:
         if session.control_socket is not None:
@@ -244,6 +245,43 @@ async def test_long_workspace_dashboard_delivers_pause_to_backend(
     finally:
         state.tailer_manager.stop_all()
         state.chat_gateway.stop()
+        await session.control_socket.stop()
+
+
+@__import__("pytest").mark.parametrize("run_kind", ["issue", "agent_followup"])
+@__import__("pytest").mark.asyncio
+async def test_initial_and_followup_runs_share_lifecycle_controls(
+    tmp_path: Path,
+    run_kind: str,
+) -> None:
+    """Run origin must not change pause, resume, or stop availability."""
+    run_id = f"run-{run_kind}"
+    session = SimpleNamespace(
+        control_socket=None,
+        control_socket_path=None,
+        run_id=run_id,
+        run_kind=run_kind,
+        workspace=SimpleNamespace(path=tmp_path / run_kind),
+    )
+    gateway = ChatGateway()
+    assert await BackendRunner._start_control_socket(session) is True
+    try:
+        gateway.sync_active_run_ids({run_id: session.control_socket_path})
+        for _ in range(100):
+            if session.control_socket._clients:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("dashboard did not attach to run control endpoint")
+
+        for verb in ("pause", "resume", "stop"):
+            assert gateway.control(run_id, verb) is True
+            command = await asyncio.wait_for(
+                session.control_socket._command_queue.get(), timeout=1.0
+            )
+            assert command.cmd == verb
+    finally:
+        gateway.stop()
         await session.control_socket.stop()
 
 

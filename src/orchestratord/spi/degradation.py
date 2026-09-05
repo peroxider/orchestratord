@@ -90,6 +90,16 @@ class DegradingSession:
     async def interrupt(self):
         await self._inner.interrupt()
 
+    async def pause(self):
+        if not getattr(self.capabilities, "pausable", False):
+            raise RuntimeError("Backend does not support pausing local execution")
+        await self._inner.pause()
+
+    async def resume(self):
+        if not getattr(self.capabilities, "pausable", False):
+            raise RuntimeError("Backend does not support resuming local execution")
+        await self._inner.resume()
+
     async def approve(self, request_id, decision):
         await self._inner.approve(request_id, decision)
 

@@ -1,4 +1,4 @@
-"""orchestratord-clawcodex — ClawCodex InProcess backend.
+"""orchestratord-clawcodex — ClawCodex isolated SDK backend.
 
 Wraps ``extensions.api.query.QueryRunner`` in the orchestratord SPI
 so that the existing clawcodex agent runtime can be driven as a

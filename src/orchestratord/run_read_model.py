@@ -21,18 +21,20 @@ ISSUE_STATUSES: tuple[str, ...] = (
     "queued",
     "pending",
     "running",
+    "paused",
     "synced",
     "pending_review",
     "completed",
     "failed",
     "abandoned",
     "verification_failed",
+    "stopped",
 )
 ACTIVE_STATUSES = frozenset(
-    {"queued", "pending", "running", "synced", "pending_review"}
+    {"queued", "pending", "running", "paused", "synced", "pending_review"}
 )
 TERMINAL_STATUSES = frozenset(
-    {"completed", "failed", "abandoned", "verification_failed"}
+    {"completed", "failed", "abandoned", "verification_failed", "stopped"}
 )
 
 
@@ -180,6 +182,18 @@ class RunReadModel:
         now: float,
     ) -> dict[str, Any]:
         status = self._status(record.get("status"))
+        # Enrich the presentation copy only; never rewrite durable task state.
+        terminal = next((event.get("data") or {} for event in reversed(observations)
+                         if event.get("event_type") == "run_ended"), {})
+        record = {
+            **record,
+            "session_end_reason": terminal.get("reason") or record.get("session_end_reason") or report.get("session_end_reason"),
+            "session_end_summary": terminal.get("summary") or record.get("session_end_summary") or report.get("session_end_summary"),
+        }
+        if record.get("session_end_reason") == "operator_stop" and status not in ACTIVE_STATUSES:
+            status = "stopped"
+        if status in TERMINAL_STATUSES:
+            record["pause_reason"] = ""
         created_at = _number(record.get("created_at"))
         updated_at = _number(record.get("updated_at"))
         workspace_path = str(record.get("workspace_path") or "")
@@ -215,6 +229,13 @@ class RunReadModel:
             idle_seconds=max(0, int(now - updated_at)) if updated_at else 0,
         )
         verification_status = record.get("verification_status")
+        report_path = str(record.get("report_path") or "")
+        if not run_id or Path(report_path).stem != run_id:
+            candidate = Path(workspace_path) / ".reports" / f"{run_id}.json"
+            report_path = str(candidate) if run_id and candidate.is_file() else ""
+        from .paths import SESSIONS_DIR
+
+        transcript_path = SESSIONS_DIR / run_id / "transcript.jsonl"
 
         return {
             "issue_id": issue_id,
@@ -233,7 +254,8 @@ class RunReadModel:
             "retry_count": int(record.get("retry_count") or 0),
             "sequence_index": record.get("sequence_index"),
             "intent": record.get("intent") or "none",
-            "report_path": record.get("report_path"),
+            "report_path": report_path,
+            "transcript_path": str(transcript_path) if run_id and transcript_path.is_file() else "",
             "verification_status": verification_status,
             "clarification_status": record.get("clarification_status"),
             "created_at": created_at,
@@ -301,6 +323,10 @@ class RunReadModel:
     def _agent_state(
         status: str, report: dict[str, Any], record: dict[str, Any]
     ) -> str:
+        if record.get("session_end_reason") == "operator_stop":
+            return "stopped"
+        if status == "paused" or (status in ACTIVE_STATUSES and record.get("pause_reason")):
+            return "paused"
         if report.get("status"):
             return str(report["status"])
         if not record.get("run_id"):
@@ -323,7 +349,7 @@ class RunReadModel:
     ) -> dict[str, Any]:
         metrics: dict[str, Any] = {}
         for observation in observations:
-            if observation.get("event_type") != "run_metrics":
+            if observation.get("event_type") not in {"run_metrics", "run_ended"}:
                 continue
             data = observation.get("data")
             if isinstance(data, dict):
@@ -475,13 +501,13 @@ class RunReadModel:
         elif status == "verification_failed":
             reason = "Verification failed"
             action_id, action_label, tone = "inspect_verification", "Inspect failure", "bad"
-        elif status in {"failed", "abandoned"}:
-            reason = str(
+        elif status in {"failed", "abandoned", "stopped"}:
+            reason = "Stopped by operator" if record.get("session_end_reason") == "operator_stop" else str(
                 record.get("session_end_summary")
                 or record.get("session_end_reason")
                 or "Execution stopped"
             )
-            action_id, action_label, tone = "inspect_run", "Inspect run", "bad"
+            action_id, action_label, tone = "inspect_run", "Inspect run", "warn" if record.get("session_end_reason") == "operator_stop" else "bad"
         elif status in ACTIVE_STATUSES and idle_seconds > 300:
             reason = "No registry update for more than 5 minutes"
             action_id, action_label = "inspect_stall", "Inspect activity"

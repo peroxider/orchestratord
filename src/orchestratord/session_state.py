@@ -153,6 +153,7 @@ class RunSession:
     # because the runner rebuilds the prompt each turn.
     _pending_followups: list[str] = field(default_factory=list)
     _snapshot_provider: str = ""
+    _snapshot_backend: str = ""
     _snapshot_model: str = ""
     _pause_gate: Any = None
     _on_pause_state_change: Any | None = None

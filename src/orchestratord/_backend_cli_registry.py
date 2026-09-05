@@ -43,7 +43,7 @@ KNOWN_BACKEND_CLIS: tuple[BackendCLI, ...] = (
     BackendCLI(
         "clawcodex-dev",
         "orchestratord-clawcodex",
-        "in-process SDK; 探针仅做 capability 探测",
+        "isolated Python SDK worker; 探针仅做 capability 探测",
     ),
     BackendCLI(
         "codex",

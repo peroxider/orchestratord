@@ -1,7 +1,7 @@
 [project]
 name = "orchestratord-clawcodex"
 version = "0.1.0"
-description = "ClawCodex InProcess backend for orchestratord"
+description = "ClawCodex isolated SDK backend for orchestratord"
 requires-python = ">=3.11"
 dependencies = [
     "orchestratord",

@@ -170,16 +170,15 @@ def test_validate_providers_does_not_resolve_credentials(monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-def test_build_cordis_text_appends_pi_ai_block_and_preserves_js_tags(
+def test_build_cordis_patch_updates_existing_profile_without_copying_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GW_KEY", "sk-test")
     text = cordis_gen.build_cordis_text({"my-gateway": _route(api_key="$GW_KEY")})
-    # Bundled default verbatim (byte-identical prefix, !!js tags intact).
-    bundled = cordis_gen.bundled_default_cordis_text()
-    assert text.startswith(bundled.rstrip())
-    assert "!!js process.env.DSH_SESSION_ROOT ?? './.sessions'" in text
-    # Generated block: plugin mounted, camelCase profile, env-only secret.
+    # The runtime composes its own profile, including JavaScript tags.
+    assert "sdk-jsonrpc-server" not in text
+    assert "session-persistence" not in text
+    assert "id: llm-pi-ai" in text
     assert "name: '@deepseek-ai/dsh-llm-pi-ai'" in text
     assert "baseURL: https://gw.example/v1" in text
     assert "apiKeyEnv: DSH_ROUTE_MY_GATEWAY_KEY" in text
@@ -216,7 +215,7 @@ def test_generate_cordis_file_writes_reports_dir_with_run_stem(
     )
     assert path.parent == tmp_path / ".reports"
     assert path.name == "dsh-cordis-stage-01-ab12cd34.yml"
-    assert path.read_text(encoding="utf-8").startswith("# Bundled default config")
+    assert path.read_text(encoding="utf-8").startswith("# --- orchestratord generated")
     # Concurrent/second run with the same id overwrites deterministically.
     again = cordis_gen.generate_cordis_file(
         {"gw": _route()}, tmp_path / ".reports", run_id="stage-01-ab12cd34"
@@ -488,7 +487,7 @@ def test_session_factory_generates_cordis_and_injects_credential(
 
     assert captured["started"] is True
     config = captured["config"]
-    cordis_path = getattr(config, "cordis", None)
+    cordis_path = config.patches[0]
     assert cordis_path and "dsh-cordis-stage-01-feedface.yml" in str(cordis_path)
     generated_files = list((tmp_path / ".reports").glob("*.yml"))
     assert len(generated_files) == 1
@@ -497,6 +496,91 @@ def test_session_factory_generates_cordis_and_injects_credential(
     assert env["DSH_ROUTE_MY_GATEWAY_KEY"] == "sk-test"
     assert config.provider == "my-gateway"
     assert config.model == "m1"
+
+
+@pytest.mark.parametrize("reference", ["$DSH_TEST_KEY", "${DSH_TEST_KEY}"])
+@pytest.mark.parametrize("session_override", [False, True])
+def test_legacy_credential_reference_matches_native_child_environment(
+    monkeypatch, tmp_path, reference, session_override
+) -> None:
+    from deepseek_harness.api import DeepSeekHarness
+    from orchestratord_dsh.session import DshSession
+
+    monkeypatch.setenv("DSH_TEST_KEY", "test-parent-key")
+    monkeypatch.setattr(DeepSeekHarness, "start", lambda self: None)
+    spec = SessionSpec(
+        cwd=str(tmp_path),
+        api_key=reference,
+        env={"DSH_TEST_KEY": "test-session-key"} if session_override else {},
+    )
+    DshBackend().preflight(spec)
+    harness = DshSession(spec)._default_harness_factory()
+    assert harness.client.config.env["DEEPSEEK_API_KEY"] == (
+        "test-session-key" if session_override else "test-parent-key"
+    )
+
+
+def test_legacy_preflight_accepts_session_only_credential(monkeypatch, tmp_path) -> None:
+    from deepseek_harness.api import DeepSeekHarness
+    from orchestratord_dsh.session import DshSession
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(DeepSeekHarness, "start", lambda self: None)
+    spec = SessionSpec(cwd=str(tmp_path), env={"DEEPSEEK_API_KEY": "test-session-key"})
+    DshBackend().preflight(spec)
+    harness = DshSession(spec)._default_harness_factory()
+    assert harness.client.config.env["DEEPSEEK_API_KEY"] == "test-session-key"
+
+
+def test_legacy_preflight_rejects_credential_masked_in_session(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-parent-key")
+    spec = SessionSpec(cwd="/workspace", env={"DEEPSEEK_API_KEY": ""})
+    with pytest.raises(RuntimeError, match="DEEPSEEK_API_KEY"):
+        DshBackend().preflight(spec)
+
+
+def test_route_credential_uses_session_environment_without_persisting_secret(
+    monkeypatch, tmp_path, patched_probe
+) -> None:
+    from deepseek_harness.api import DeepSeekHarness
+    from orchestratord_dsh.session import DshSession
+
+    monkeypatch.delenv("DSH_TEST_ROUTE_KEY", raising=False)
+    monkeypatch.setattr(DeepSeekHarness, "start", lambda self: None)
+    spec = SessionSpec(
+        cwd=str(tmp_path),
+        provider="gw",
+        env={"DSH_TEST_ROUTE_KEY": "test-session-route-key"},
+        extra={"providers": {"gw": _route(api_key="$DSH_TEST_ROUTE_KEY")}},
+    )
+    DshBackend().preflight(spec)
+    harness = DshSession(spec)._default_harness_factory()
+    assert harness.client.config.env["DSH_ROUTE_GW_KEY"] == "test-session-route-key"
+    assert "test-session-route-key" not in Path(harness.config.patches[0]).read_text()
+
+
+def test_custom_cordis_owns_nonstock_provider_and_survives_permission_overlay(
+    monkeypatch, tmp_path
+) -> None:
+    from deepseek_harness.api import DeepSeekHarness
+    from orchestratord_dsh.session import DshSession
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(DeepSeekHarness, "start", lambda self: None)
+    custom = tmp_path / "oauth-provider.yml"
+    custom.write_text("- insert:\n    - id: test-oauth\n      name: test-oauth-plugin\n")
+    spec = SessionSpec(
+        cwd=str(tmp_path), provider="test-oauth", model="test-mini",
+        cordis=str(custom), permission_mode="bypassPermissions",
+    )
+    DshBackend().preflight(spec)
+    harness = DshSession(spec)._default_harness_factory()
+    assert harness.config.provider == "test-oauth"
+    assert harness.config.model == "test-mini"
+    assert harness.config.patches[0] == str(custom)
+    assert len(harness.config.patches) == 2
+    assert "policy: never" in Path(harness.config.patches[1]).read_text()
+    assert "test-oauth-plugin" in custom.read_text()
 
 
 def test_resolve_route_explicit_unknown_provider_is_rejected() -> None:
@@ -562,8 +646,8 @@ def test_session_factory_parks_sdk_transcripts_outside_git_tree(
     spec = _spec_with_routes({"my-gateway": _route(api_key="$GW_KEY")})
     spec.cwd = str(tmp_path)
     DshSession(spec)._default_harness_factory()
-    session_root = getattr(captured["config"], "session_root", None)
-    assert session_root == str(tmp_path / ".reports" / "dsh-sessions")
+    session_root = captured["config"].dsh_home
+    assert session_root == str(tmp_path / ".reports" / "dsh-home")
     assert ".sessions" not in str(session_root)
 
 
@@ -615,9 +699,21 @@ def test_build_cordis_text_approval_block_only() -> None:
     assert "name: '@deepseek-ai/dsh-user-approval'" in text
     assert "policy: never" in text
     assert "dsh-llm-pi-ai" not in text  # no provider routes requested
-    bundled = cordis_gen.bundled_default_cordis_text()
-    assert text.startswith(bundled.rstrip())
-    assert "!!js process.env.DSH_SESSION_ROOT" in text
+    assert "id: approval" in text
+    assert "session-persistence" not in text
+
+
+def test_autonomous_approval_presets_preserve_all_sandbox_modes() -> None:
+    import yaml
+
+    entries = yaml.safe_load(cordis_gen.build_approval_block("never"))
+    permission = next(entry for entry in entries if entry["id"] == "permission")
+    presets = permission["config"]["presets"]
+    assert {p["sandbox"] for p in presets.values()} == {
+        "read-only", "workspace-write", "danger-full-access",
+    }
+    assert all(p["approval"] == "never" for p in presets.values())
+    assert "defaultPreset" not in permission["config"]
 
 
 def test_build_cordis_text_providers_and_approval_together() -> None:
@@ -656,7 +752,7 @@ def test_session_factory_generates_cordis_for_bypass_permissions_only(
     DshSession(spec)._default_harness_factory()
 
     config = captured["config"]
-    cordis_path = getattr(config, "cordis", None)
+    cordis_path = config.patches[0]
     assert cordis_path and "dsh-cordis-" in str(cordis_path)
     text = Path(cordis_path).read_text()
     assert "policy: never" in text
@@ -681,7 +777,7 @@ def test_session_factory_no_cordis_for_restrictive_mode(
 
     spec = SessionSpec(cwd=str(tmp_path), permission_mode="dontAsk")
     DshSession(spec)._default_harness_factory()
-    assert getattr(captured["config"], "cordis", None) is None
+    assert captured["config"].patches == ()
 
 
 # ---------------------------------------------------------------------------

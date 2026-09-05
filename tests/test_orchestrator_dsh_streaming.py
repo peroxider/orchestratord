@@ -151,7 +151,7 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         await session.close()
 
     async def test_stream_yields_full_pipeline_and_terminal(self) -> None:
-        """Delta → TEXT → TURN_COMPLETE → SESSION_COMPLETE ordering."""
+        """Deltas are delivered once before turn and session completion."""
         harness = FakeHarness(_script())
         session = DshSession(_spec(), harness_factory=lambda: harness)
 
@@ -162,7 +162,6 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
             [
                 EventKind.TEXT_DELTA,
                 EventKind.TEXT_DELTA,
-                EventKind.TEXT,
                 EventKind.TURN_COMPLETE,
                 EventKind.SESSION_COMPLETE,
             ],

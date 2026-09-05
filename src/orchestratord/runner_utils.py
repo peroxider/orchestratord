@@ -18,6 +18,38 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+async def _await_with_active_timeout(awaitable, session: Any, timeout: float):
+    """Bound active wall time, excluding confirmed operator pauses.
+
+    Cancellation still tears down the child coroutine and its backend. Never
+    restart work merely because a polling interval expired.
+    """
+    import time
+
+    task = asyncio.ensure_future(awaitable)
+    remaining = timeout
+    previous = time.monotonic()
+    was_paused = bool(getattr(session, "paused", False))
+    try:
+        while not task.done():
+            done, _ = await asyncio.wait({task}, timeout=.02)
+            now = time.monotonic()
+            if not was_paused:
+                remaining -= now - previous
+            previous = now
+            was_paused = bool(getattr(session, "paused", False))
+            session.timeout_deadline_at = None if was_paused else time.time() + max(0, remaining)
+            if done:
+                return await task
+            if remaining <= 0 and not was_paused:
+                raise TimeoutError("Active run timeout exceeded")
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 # ---------------------------------------------------------------------------
 # Event serialisation for control-socket broadcast
 # ---------------------------------------------------------------------------
@@ -132,6 +164,7 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
         kind = getattr(event, "kind", None)
         kind_value = getattr(kind, "value", kind)
         type_map = {
+            "session_started": "SessionStarted",
             "text": "TextDelta",
             "text_delta": "TextDelta",
             "tool_call": "ToolCallEvent",
@@ -159,8 +192,6 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
                 "branch_id": getattr(session, "branch_id", None),
                 "parent_run_id": getattr(session, "parent_run_id", None),
             })
-        if session.control_socket is not None:
-            await session.control_socket.send_event(frame)
         conversation_id = getattr(session, "conversation_id", None)
         if conversation_id and getattr(session, "run_id", None):
             try:
@@ -179,18 +210,34 @@ async def _broadcast_to_socket(session: Any, event: Any) -> None:
                 )
             except Exception:
                 logger.debug("conversation manifest event update failed", exc_info=True)
-        # Persist to transcript so the chat UI can replay history after
-        # a page refresh and the CLI can tail a live run.
-        transcript_frame = dict(frame)
-        transcript_frame["ts"] = getattr(event, "timestamp", None)
-        _write_transcript_frame(
-            getattr(session, "run_id", None),
-            transcript_frame,
-            session=session,
-            event=event,
-        )
+        frame["ts"] = getattr(event, "timestamp", None)
+        await _publish_transcript_frame(session, frame, event=event)
     except Exception:
         pass
+
+
+async def _publish_transcript_frame(
+    session: Any, frame: dict, *, event: Any | None = None
+) -> None:
+    """Persist before live delivery; a disconnected viewer cannot lose history."""
+    if getattr(session, "conversation_id", None) or getattr(session, "run_id", None):
+        frame.update({
+            "conversation_id": getattr(session, "conversation_id", None),
+            "run_id": getattr(session, "run_id", None),
+            "backend": getattr(session, "backend_name", None),
+            "backend_session_id": getattr(session, "backend_session_id", None),
+            "stage_id": getattr(session, "stage_id", None),
+            "branch_id": getattr(session, "branch_id", None),
+            "parent_run_id": getattr(session, "parent_run_id", None),
+        })
+    _write_transcript_frame(
+        getattr(session, "run_id", None), frame, session=session, event=event
+    )
+    if getattr(session, "control_socket", None) is not None:
+        try:
+            await session.control_socket.send_event({key: value for key, value in frame.items() if key != "ts"})
+        except Exception:
+            logger.debug("Live transcript delivery failed", exc_info=True)
 
 
 def _transcript_message_from_frame(frame: dict) -> dict:
@@ -207,8 +254,21 @@ def _transcript_message_from_frame(frame: dict) -> dict:
     frame_type = frame.get("type")
     data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
 
+    if frame_type == "RunInput":
+        return {
+            "type": "RunInput",
+            "schema_version": 1,
+            "role": "user",
+            "content": [{"type": "text", "text": str(data.get("content", ""))}],
+            "origin": data.get("origin", "orchestrator"),
+            "system_prompt": data.get("system_prompt") or "",
+            "delivery": "submitted",
+            "backend": data.get("backend") or "",
+            "resume_session_id": data.get("resume_session_id"),
+        }
     if frame_type == "TextDelta":
         return {
+            "type": "TextDelta",
             "role": "assistant",
             "content": [{"type": "text", "text": str(data.get("content", ""))}],
             "turn": data.get("turn"),
@@ -268,6 +328,8 @@ def _transcript_message_from_frame(frame: dict) -> dict:
         }
     if frame_type == "Error":
         return {
+            "type": "Error",
+            "data": data,
             "role": "system",
             "content": [
                 {"type": "text", "text": str(data.get("message", "Backend error"))}
@@ -292,7 +354,7 @@ def _write_transcript_frame(
 
     The frame is stored as a claude-style message (see
     :func:`_transcript_message_from_frame`). Best-effort: failures are
-    silently ignored so a full disk or permission error never breaks
+    logged so a full disk or permission error never breaks
     the agent run.
     """
     if not run_id:
@@ -374,7 +436,7 @@ def _write_transcript_frame(
         with open(transcript_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except Exception:
-        pass
+        logger.warning("Unable to persist transcript for run %s", run_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -385,9 +447,11 @@ def _write_transcript_frame(
 def _apply_pause_session(session: Any, reason: str = "operator_interrupt") -> None:
     """Apply pause state to a session (shared by socket + control-file paths).
 
-    Sets ``paused``, clears ``pause_resume_event`` and ``_pause_gate``
-    so the agent stops making LLM API calls.  Does **not** notify the
-    registry — callers are responsible for that via
+    Sets ``paused`` and clears any backend-supplied pause gates.  The generic
+    BackendRunner always stops consuming events at the next boundary; a
+    backend already executing an operation may finish that operation unless
+    it supplied a stronger native gate.  Does **not** notify the registry —
+    callers are responsible for that via
     ``_on_pause_state_change`` (socket path) or ``registry.mark_paused``
     (control-file path).
     """
@@ -408,9 +472,9 @@ def _apply_pause_session(session: Any, reason: str = "operator_interrupt") -> No
 def _apply_resume_session(session: Any, prompt_override: str | None = None) -> None:
     """Apply resume state to a session (shared by socket + control-file paths).
 
-    Sets ``paused = False``, restores ``pause_resume_event`` and
-    ``_pause_gate`` so the agent resumes LLM API calls.  Does **not**
-    notify the registry — callers are responsible for that.
+    Sets ``paused = False`` and restores any backend-supplied gates so event
+    consumption can resume.  Does **not** notify the registry — callers are
+    responsible for that.
     """
     if prompt_override:
         session.prompt_override = prompt_override
@@ -473,7 +537,7 @@ def _write_operator_hint(session: Any, hint: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _drain_control_commands(session: Any) -> bool:
+def _drain_control_commands(session: Any, *, commands: list | None = None) -> bool:
     """Drain pending control-socket commands non-blockingly.
 
     Returns ``True`` if ``stop`` or ``takeover`` was received,
@@ -491,10 +555,11 @@ def _drain_control_commands(session: Any) -> bool:
     stop_requested = False
     try:
         _q = session.control_socket._command_queue
+        supplied = iter(commands) if commands is not None else None
         while True:
             try:
-                cmd = _q.get_nowait()
-            except asyncio.QueueEmpty:
+                cmd = next(supplied) if supplied is not None else _q.get_nowait()
+            except (asyncio.QueueEmpty, StopIteration):
                 break
             if cmd.cmd == "pause":
                 _apply_pause_session(session, "operator_interrupt")
@@ -521,6 +586,8 @@ def _drain_control_commands(session: Any) -> bool:
                     except Exception:
                         logger.exception("_on_pause_state_change failed")
             elif cmd.cmd == "stop":
+                session.paused = False
+                session.pause_reason = ""
                 session.status = "failed"
                 session.session_end_reason = "operator_stop"
                 session.session_end_summary = "operator sent stop via control socket"
