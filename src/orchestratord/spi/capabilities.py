@@ -51,3 +51,6 @@ class BackendCapabilities:
     # "can I create a session that resumes" bit; ``resume_detection`` is
     # the "can I tell whether the remote still has the transcript" bit.
     resume_detection: bool = False
+    # Optional PausableSession extension. This freezes local execution and
+    # tools; it does not promise cancellation of an in-flight remote request.
+    pausable: bool = False

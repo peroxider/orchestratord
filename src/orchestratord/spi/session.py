@@ -70,6 +70,20 @@ class SessionResult:
 
 
 @runtime_checkable
+class PausableSession(Protocol):
+    """Optional additive extension, independent of transcript resumability.
+
+    Successful return confirms local execution and tools are suspended or
+    resumed. Failures must raise; the core must not publish a success state.
+    Backends without this protocol remain valid AgentSession implementations.
+    """
+
+    async def pause(self) -> None: ...
+
+    async def resume(self) -> None: ...
+
+
+@runtime_checkable
 class AgentSession(Protocol):
     """A live conversation with a backend agent.
 

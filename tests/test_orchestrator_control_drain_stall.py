@@ -47,6 +47,14 @@ class _StalledSpiSession:
 
 
 class _ImmediateSpiSession:
+    capabilities = SimpleNamespace(pausable=True)
+
+    async def pause(self):
+        pass
+
+    async def resume(self):
+        pass
+
     async def events(self):
         yield EventEnvelope(
             seq=1,
@@ -60,6 +68,44 @@ class _ImmediateSpiSession:
             kind=EventKind.SESSION_COMPLETE,
             payload={"reason": "success"},
         )
+
+
+@pytest.mark.asyncio
+async def test_native_pause_is_applied_before_registry_notification():
+    session = _agent_session(with_stop=False)
+    applied = []
+
+    class Native(_ImmediateSpiSession):
+        async def pause(self):
+            assert session.paused is False
+            applied.append("native_pause")
+
+    session._on_pause_state_change = lambda *_: applied.append("registry_pause")
+    session.control_socket._command_queue.put_nowait(ControlCommand(cmd="pause"))
+    await _runner()._drain_backend_controls(Native(), session)
+    assert applied == ["native_pause", "registry_pause"]
+    assert session.paused
+
+
+@pytest.mark.asyncio
+async def test_rejected_native_pause_does_not_publish_paused():
+    session = _agent_session(with_stop=False)
+
+    class Native(_ImmediateSpiSession):
+        async def pause(self):
+            raise RuntimeError("test permission denied")
+
+    session.control_socket._command_queue.put_nowait(ControlCommand(cmd="pause"))
+    await _runner()._drain_backend_controls(Native(), session)
+    assert not session.paused
+
+
+@pytest.mark.asyncio
+async def test_backend_without_native_pause_cannot_fake_success():
+    session = _agent_session(with_stop=False)
+    session.control_socket._command_queue.put_nowait(ControlCommand(cmd="pause"))
+    await _runner()._drain_backend_controls(_StalledSpiSession(1), session)
+    assert not session.paused
 
 
 def _agent_session(with_stop: bool) -> SimpleNamespace:

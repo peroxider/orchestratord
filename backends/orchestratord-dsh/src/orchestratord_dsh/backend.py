@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+from pathlib import Path
 
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
@@ -105,7 +106,7 @@ class DshBackend:
             return
         cfg = providers.get(provider) or {}
         try:
-            resolve_route_credential(cfg.get("api_key"))
+            resolve_route_credential(cfg.get("api_key"), {**os.environ, **spec.env})
         except CordisConfigError as exc:
             raise RuntimeError(str(exc)) from exc
         self._probe_runtime_plugin(spec)
@@ -120,7 +121,7 @@ class DshBackend:
         incompatible build surfaces at turn time with the runtime's own
         error.
         """
-        if os.environ.get("DSH_RUNTIME_MODE") == "node":
+        if {**os.environ, **spec.env}.get("DSH_RUNTIME_MODE") == "node":
             return
         if (getattr(spec, "runtime_bin", None) or "").strip():
             return
@@ -142,28 +143,32 @@ class DshBackend:
         # that points at the real fix (agent.provider in the config file).
         provider = (getattr(spec, "provider", None) or "").strip()
         if provider and provider not in self.SUPPORTED_PROVIDERS:
+            if spec.cordis:
+                # An explicit profile patch owns its plugin and authentication.
+                # The runtime, not the generic adapter, validates that mount.
+                if not spec.model:
+                    raise RuntimeError("agent.model is required for a custom cordis provider.")
+                if not Path(spec.cordis).expanduser().is_file():
+                    raise RuntimeError(f"agent.cordis file does not exist: {spec.cordis}")
+                return
             raise RuntimeError(
                 f"provider '{provider}' has no adapter in the DeepSeek "
                 "Harness runtime. Backend dsh requires "
                 "agent.provider: deepseek-official — set it in the "
                 "--config file (agent.provider) or remove the override "
                 "so the backend default applies. To serve other providers, "
-                "declare them under agent.providers."
+                "declare them under agent.providers or mount them via agent.cordis."
             )
         # Verify the credential source up front. The SDK runtime
         # inherits the caller's environment (DEEPSEEK_API_KEY), or the
         # spec can carry an explicit key — including "$VAR" references,
         # which must resolve now rather than failing mid-run.
-        api_key = (getattr(spec, "api_key", None) or "").strip()
-        if api_key.startswith("$"):
-            env_name = api_key[1:].strip("{} ")
-            if not os.environ.get(env_name):
-                raise RuntimeError(
-                    f"api_key reference '{api_key}' cannot be resolved — "
-                    f"{env_name} is not set in the environment. Export it "
-                    "or set agent.api_key in the --config file."
-                )
-        elif not api_key and not os.environ.get("DEEPSEEK_API_KEY"):
+        environ = {**os.environ, **spec.env}
+        try:
+            api_key = resolve_route_credential(spec.api_key, environ)
+        except CordisConfigError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if not api_key and not environ.get("DEEPSEEK_API_KEY"):
             raise RuntimeError(
                 "DEEPSEEK_API_KEY is not set and no api_key is configured. "
                 "Set the DEEPSEEK_API_KEY environment variable (the SDK "
@@ -183,6 +188,7 @@ class DshBackend:
             cost_reporting=True,
             tool_filtering=False,
             takeover=False,
+            pausable=os.name == "posix",
             # DSH SDK offers no resume probe; the orchestrator
             # must treat this as UNDETECTABLE (see session.py:probe_resume).
             resume_detection=False,

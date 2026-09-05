@@ -9,6 +9,8 @@ Codex 是 dynamic runtime：探测 ``codex app-server --help`` 退出码决定�
 
 from __future__ import annotations
 
+import os
+
 from orchestratord.spi.backend_descriptor import BackendDescriptor, BackendFamily
 
 CODEX_CLI_DESCRIPTOR = BackendDescriptor(
@@ -19,7 +21,7 @@ CODEX_CLI_DESCRIPTOR = BackendDescriptor(
     capabilities=frozenset({
         "resumable",
         "parallel_sessions",
-    }),
+    } | ({"pausable"} if os.name == "posix" else set())),
     cli_command="codex",
     cli_args_probe=(),
     env_prefix="CODEX_",

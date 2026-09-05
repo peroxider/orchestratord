@@ -192,7 +192,10 @@ LIVEVIEW_HTML = r"""<!doctype html>
     .next-action { display: block; margin-top: 4px; color: var(--blue); font-size: 9px; font-weight: 680; }
     .task-age { color: var(--faint); font: 10px "SFMono-Regular", monospace; text-align: right; }
 
-    .run-titlebar { margin-bottom: 10px; display: flex; gap: 14px; align-items: flex-start; }
+    .run-titlebar { margin-bottom: 10px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px 24px; align-items: start; }
+    .run-titlebar > .head-copy { grid-column: 1; grid-row: 1 / 3; overflow-wrap: anywhere; }
+    .run-titlebar > .head-actions { grid-column: 2; grid-row: 1; margin-left: 0; padding-top: 24px; }
+    .run-titlebar > .run-states { grid-column: 2; grid-row: 2; margin-left: 0; align-self: start; }
     .back { margin-bottom: 6px; padding: 2px 0; border: 0; background: transparent; color: var(--muted); font-size: 11px; }
     .back:hover { color: var(--blue); }
     .run-states { margin-left: auto; align-self: center; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
@@ -432,6 +435,9 @@ LIVEVIEW_HTML = r"""<!doctype html>
     .chat-bubble code { padding: 1px 4px; border-radius: 4px; background: #080b10; color: #c9d6e8; }
     .chat-bubble pre { margin: 8px 0; padding: 9px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: #07090d; color: #bdc8d5; font: 10px/1.58 "SFMono-Regular", monospace; white-space: pre; }
     .chat-bubble pre code { padding: 0; background: transparent; }
+    .chat-message-body > details { margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; }
+    .chat-message-body > details > summary { padding: 8px; cursor: pointer; color: var(--muted); font-size: 11px; }
+    .chat-message-body > details > pre { margin: 0; padding: 10px; max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 "SFMono-Regular", monospace; }
     .chat-bubble a { text-decoration: underline; text-underline-offset: 2px; }
     .chat-bubble.streaming::after { content: ""; display: inline-block; width: 5px; height: 11px; margin-left: 4px; background: var(--blue); animation: blink 1s steps(2, start) infinite; vertical-align: -1px; }
     @keyframes blink { 50% { opacity: 0; } }
@@ -502,10 +508,13 @@ LIVEVIEW_HTML = r"""<!doctype html>
       .coverage .warn, .coverage .button { margin-left: 0; }
     }
     @media (max-width: 820px) {
-      .topbar { padding: 0 12px; }
-      .top-meta > :not(.connection) { display: none; }
+      .topbar { padding: 8px 12px; flex-wrap: wrap; gap: 8px; }
+      .top-meta { width: 100%; flex-wrap: wrap; gap: 8px; }
+      .top-meta > .workspace-label { display: none; }
       .page { padding: 16px 12px 28px; }
       .page-head, .run-titlebar { flex-direction: column; }
+      .run-titlebar { display: flex; }
+      .run-titlebar > .head-actions { padding-top: 0; }
       .head-actions, .run-states { margin-left: 0; align-self: stretch; justify-content: flex-start; }
       .kpis { grid-template-columns: repeat(2, 1fr); }
       .kpi:nth-child(2) { border-right: 0; }
@@ -536,9 +545,8 @@ LIVEVIEW_HTML = r"""<!doctype html>
       .brand > span:last-child { display: none; }
       .nav { gap: 0; }
       .nav-button { padding: 7px; font-size: 10px; }
-      .top-meta { margin-left: auto; gap: 0; }
-      .connection { gap: 0; padding: 6px; }
-      .connection > span { display: none; }
+      .top-meta { margin-left: 0; gap: 6px; }
+      .connection { gap: 5px; padding: 5px 7px; }
       .kpis, .root-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi { border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
       .kpi:nth-child(2n) { border-right: 0; }
@@ -577,20 +585,24 @@ LIVEVIEW_HTML = r"""<!doctype html>
     const STATUS_META = __STATUS_META__;
     const STAGES = [
       { id: "intake", label: "Intake", owner: "Tracker", statuses: ["queued", "pending"] },
-      { id: "agent", label: "Agent", owner: "AgentRunner", statuses: ["running"] },
+      { id: "agent", label: "Agent", owner: "AgentRunner", statuses: ["running", "paused"] },
       { id: "verify", label: "Verify", owner: "Verifier", statuses: ["verification_failed"] },
       { id: "sync", label: "Sync", owner: "GitSync", statuses: ["synced"] },
       { id: "review", label: "Review", owner: "Human", statuses: ["pending_review"] },
       { id: "done", label: "Done", owner: "Orchestrator", statuses: ["completed"] },
-      { id: "stopped", label: "Stopped", owner: "Orchestrator", statuses: ["failed", "abandoned"] },
+      { id: "stopped", label: "Stopped", owner: "Orchestrator", statuses: ["failed", "abandoned", "stopped"] },
     ];
-    const TERMINAL = new Set(["completed", "failed", "abandoned", "verification_failed"]);
-    const EXECUTION_ACTIVE = new Set(["queued", "pending", "running", "synced"]);
+    const TERMINAL = new Set(["completed", "failed", "abandoned", "verification_failed", "stopped"]);
+    const EXECUTION_ACTIVE = new Set(["queued", "pending", "running", "paused", "synced"]);
     const EVENT_META = {
       tool_call: { label: "Tool call", icon: "TC", color: "var(--cyan)" },
       tool_result: { label: "Tool result", icon: "TR", color: "var(--green)" },
       agent_text: { label: "Agent text", icon: "AI", color: "var(--purple)" },
       run_metrics: { label: "Run metrics", icon: "Σ", color: "var(--blue)" },
+      run_input: { label: "Orchestrator input", icon: "IN", color: "var(--blue)" },
+      operator_input: { label: "Operator message", icon: "YOU", color: "var(--blue)" },
+      run_ended: { label: "Run ended", icon: "END", color: "var(--muted)" },
+      run_error: { label: "Run error", icon: "!", color: "var(--red)" },
       unknown: { label: "Event", icon: "EV", color: "var(--muted)" },
     };
     const VALID_TABS = new Set(["trace", "timeline", "artifacts", "raw"]);
@@ -631,7 +643,6 @@ LIVEVIEW_HTML = r"""<!doctype html>
       chatSessionEnded: false,
       chatControlStatus: "",
       chatControlPending: "",
-      chatWireBuffer: "",
       runObservations: {},
       runObservationMeta: {},
       observationLoads: new Set(),
@@ -780,6 +791,8 @@ LIVEVIEW_HTML = r"""<!doctype html>
       return "stale";
     }
     function currentActivity(issue) {
+      if (issue.pause_reason || issue.status === "paused") return "Run paused · resume or stop";
+      if (issue.session_end_reason === "operator_stop") return "Stopped by operator";
       if (issue.status === "pending_review") return "Waiting for human review";
       if (issue.status === "verification_failed") return "Verification failed";
       if (issue.status === "failed") return issue.session_end_reason || "Agent run failed";
@@ -868,6 +881,8 @@ LIVEVIEW_HTML = r"""<!doctype html>
         contentTruncated: Boolean(data.content_truncated),
         contentCharCount: Number(data.content_char_count || 0),
         metrics: type === "run_metrics" ? data : null,
+        outcome: data.status || "",
+        reason: data.reason || "",
         raw,
         durationMs: null,
       };
@@ -895,11 +910,17 @@ LIVEVIEW_HTML = r"""<!doctype html>
         if (event.type === "tool_call" && event.toolUseId) calls.set(event.toolUseId, event);
         if (event.type === "tool_result" && event.toolUseId && calls.has(event.toolUseId)) {
           const call = calls.get(event.toolUseId);
+          call.resultStatus = eventStatus(event);
           if (call.sourceMs != null && event.sourceMs != null && event.sourceMs >= call.sourceMs) {
             call.durationMs = event.sourceMs - call.sourceMs;
             event.durationMs = call.durationMs;
           }
         }
+      }
+      const ended = runId !== String(issue.run_id || "") || !issueHasLiveChatRun(issue)
+        || result.some(event => event.type === "run_ended");
+      if (ended) for (const call of calls.values()) {
+        if (!call.resultStatus) call.resultStatus = "result not captured";
       }
       return result;
     }
@@ -910,13 +931,16 @@ LIVEVIEW_HTML = r"""<!doctype html>
     }
     function eventStatus(event) {
       if (event.isError) return "error";
+      if (event.type === "run_error") return "error";
+      if (event.type === "run_ended") return event.reason === "operator_stop" ? "stopped" : event.outcome || "ended";
       if (event.approved === false) return "warning";
       // Some shell tools return a successful transport event while the
       // captured command output proves a failure.  Keep that distinction by
       // surfacing an evidence-derived warning rather than rewriting it as an
       // explicit tool error.
       if (hasProblemSignal(event)) return "warning";
-      return "success";
+      if (event.type === "tool_call") return event.resultStatus || "requested";
+      return event.type === "tool_result" ? "success" : "observed";
     }
     function eventTitle(event) {
       if (event.type === "tool_call") return event.tool || "Tool call";
@@ -933,6 +957,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       }
       if (event.type === "tool_result") return truncate(event.result || (event.isError ? "Tool returned an error" : "Tool completed"), 180);
       if (event.type === "agent_text") return truncate(event.content || "Agent emitted text", 180);
+      if (["run_input", "operator_input", "run_ended", "run_error"].includes(event.type)) return truncate(event.content || event.reason || eventTitle(event), 180);
       if (event.type === "run_metrics") {
         const usage = event.metrics && event.metrics.usage || {};
         const tokens = tokenTotal(usage);
@@ -946,10 +971,17 @@ LIVEVIEW_HTML = r"""<!doctype html>
       }
       return truncate(JSON.stringify(event.raw), 180);
     }
-    function eventInput(event) { return event.params == null ? "Not collected" : typeof event.params === "string" ? event.params : JSON.stringify(event.params, null, 2); }
+    function eventInput(event) {
+      if (["run_input", "operator_input"].includes(event.type)) {
+        const supplement = event.raw && event.raw.data && event.raw.data.system_prompt;
+        return (event.content || "") + (supplement ? "\n\nSystem supplement provided to adapter:\n" + supplement : "");
+      }
+      return event.params == null ? "Not collected" : typeof event.params === "string" ? event.params : JSON.stringify(event.params, null, 2);
+    }
     function eventOutput(event) {
       if (event.type === "tool_result") return event.result || "No result content captured";
       if (event.type === "agent_text") return event.content || "No text captured";
+      if (["run_input", "operator_input", "run_ended", "run_error"].includes(event.type)) return event.content || "No content captured";
       if (event.type === "run_metrics") return JSON.stringify(event.metrics || {}, null, 2);
       if (event.approved === false) return event.denyReason || "Tool call denied";
       return "Output is captured by the paired result observation when available.";
@@ -962,6 +994,8 @@ LIVEVIEW_HTML = r"""<!doctype html>
         return { label: event.isError ? "Error output" : "Output", content: eventOutput(event) };
       }
       if (event.type === "agent_text") return { label: "Response", content: eventOutput(event) };
+      if (event.type === "run_input") return { label: "Submitted task input", content: eventInput(event) };
+      if (["operator_input", "run_ended", "run_error"].includes(event.type)) return { label: eventTitle(event), content: eventOutput(event) };
       if (event.type === "run_metrics") return { label: "Metrics", content: eventOutput(event) };
       return { label: "Evidence", content: eventSummary(event) };
     }
@@ -990,12 +1024,15 @@ LIVEVIEW_HTML = r"""<!doctype html>
     }
     function eventMatches(event) {
       const filterMatch = state.eventFilter === "all"
-        || (state.eventFilter === "problems" && eventStatus(event) !== "success")
+        || (state.eventFilter === "problems" && eventHasProblem(event))
         || (state.eventFilter === "tools" && ["tool_call", "tool_result"].includes(event.type))
-        || (state.eventFilter === "text" && event.type === "agent_text");
+        || (state.eventFilter === "text" && ["agent_text", "run_input", "operator_input"].includes(event.type));
       const needle = state.search.trim().toLowerCase();
       const searchMatch = !needle || [eventTitle(event), eventSummary(event), event.tool, eventInput(event), eventOutput(event)].join(" ").toLowerCase().includes(needle);
       return filterMatch && searchMatch;
+    }
+    function eventHasProblem(event) {
+      return ["error", "warning", "failed", "result not captured"].includes(eventStatus(event));
     }
     function eventIdMatches(event, value = state.eventId) {
       return event.id === value || event.legacyId === value || Boolean(value && value.startsWith(event.id + "|"));
@@ -1003,7 +1040,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
     function selectedEvent(events) {
       const chosen = events.find(event => eventIdMatches(event));
       if (chosen) return chosen;
-      return [...events].reverse().find(event => eventStatus(event) !== "success") || events[events.length - 1] || null;
+      return [...events].reverse().find(eventHasProblem) || events[events.length - 1] || null;
     }
     function eventTabActive() { return state.tab === "trace" || state.tab === "timeline"; }
     function ensureVisibleSelection() {
@@ -1102,11 +1139,15 @@ LIVEVIEW_HTML = r"""<!doctype html>
       if (state.view === "chat") ensureChatConnection();
     }
 
+    function liveUpdatesText() {
+      const labels = { connected: "Connected", disconnected: "Reconnecting", paused: "Paused", connecting: "Connecting" };
+      return `Live updates · ${labels[state.connection] || "Connecting"}`;
+    }
     function topbar(activeView) {
       const snapshot = state.snapshot || {};
       const meta = snapshot.metadata || {};
       const connClass = state.connection === "connected" ? "ok" : state.connection === "disconnected" ? "bad" : "";
-      const connText = state.connection === "connected" ? "feed connected" : state.connection === "disconnected" ? "feed reconnecting" : "feed connecting";
+      const connText = liveUpdatesText();
       return `<header class="topbar">
         <div class="brand"><span class="brand-mark">OD</span><span>orchestratord</span></div>
         <nav class="nav" aria-label="LiveView pages">
@@ -1117,15 +1158,15 @@ LIVEVIEW_HTML = r"""<!doctype html>
         <div class="top-spacer"></div>
         <div class="top-meta">
           <span class="workspace-label mono" title="${esc(snapshot.workspace || "")}">${esc(snapshot.workspace || "workspace pending")}</span>
-          <span>${meta.alive ? `<span class="good">daemon up</span>` : `<span class="${meta.found ? "bad" : "faint"}">${meta.found ? "daemon down" : "daemon unknown"}</span>`}</span>
-          <span data-last-update>updated now</span>
-          <span class="connection ${connClass}" data-connection role="status" aria-live="polite" aria-label="${esc(connText)}" title="${esc(connText)}"><i class="dot"></i><span>${connText}</span></span>
+          <span class="connection ${meta.alive ? "ok" : meta.found ? "bad" : ""}" title="Task execution process (daemon). Status is based on the recorded PID, not a browser connection."><i class="dot"></i><span>Daemon · ${meta.alive ? "Running" : meta.found ? "Stopped" : "Unknown"}</span></span>
+          <span class="connection ${connClass}" data-connection role="status" aria-live="polite" aria-label="${esc(connText)}" title="Browser connection to dashboard updates (SSE), not a separate service. Can stay connected when the daemon is stopped."><i class="dot"></i><span>${connText}</span></span>
+          <span data-last-update title="When the dashboard last received a state snapshot">${state.lastSnapshotAt ? "" : "Awaiting snapshot"}</span>
         </div>
       </header>`;
     }
     function daemonBanner() {
       const meta = state.snapshot && state.snapshot.metadata || {};
-      if (!meta.found || meta.alive) return "";
+      if (meta.alive || !state.snapshot) return "";
       return `<div class="daemon-banner" role="status"><strong>Historical view</strong><span>The orchestrator daemon is not running. Registry, reports and transcripts remain inspectable; run controls and message delivery are disabled.</span><span class="mono">pid ${esc(meta.pid || "unknown")}</span></div>`;
     }
     function shellTop(activeView) { return topbar(activeView) + daemonBanner(); }
@@ -1136,10 +1177,10 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const feedConnected = state.connection === "connected";
       const completed = allIssues.filter(issue => issue.status === "completed").length;
       const review = allIssues.filter(issue => issue.status === "pending_review").length;
-      const stopped = allIssues.filter(issue => ["failed", "abandoned", "verification_failed"].includes(issue.status)).length;
+      const stopped = allIssues.filter(issue => ["stopped", "failed", "abandoned", "verification_failed"].includes(issue.status)).length;
       return `<section class="kpis">
-        <div class="kpi"><div class="kpi-top"><span>System</span><span>now</span></div><div class="kpi-value ${feedConnected ? "good" : "warn"}"><i class="dot ${feedConnected ? "good" : "warn"}"></i>${feedConnected ? "Live updates" : "Reconnecting"}</div><div class="kpi-note">daemon ${meta.alive ? "running" : "not running"} · registry and run data</div></div>
-        <div class="kpi"><div class="kpi-top"><span>In progress</span><span>tasks</span></div><div class="kpi-value blue">${active.length}</div><div class="kpi-note">${allIssues.filter(issue => issue.status === "running").length} running · ${allIssues.filter(issue => ["queued", "pending"].includes(issue.status)).length} queued / pending</div></div>
+        <div class="kpi"><div class="kpi-top"><span>System</span><span>now</span></div><div class="kpi-value ${feedConnected && meta.alive ? "good" : "warn"}"><i class="dot ${feedConnected && meta.alive ? "good" : "warn"}"></i>${!feedConnected ? "Reconnecting" : meta.alive ? "Live updates" : "History only"}</div><div class="kpi-note">daemon ${meta.alive ? "running" : "unavailable"} · registry and run data</div></div>
+        <div class="kpi"><div class="kpi-top"><span>In progress</span><span>tasks</span></div><div class="kpi-value blue">${active.length}</div><div class="kpi-note">${allIssues.filter(issue => issue.status === "running").length} running · ${allIssues.filter(issue => issue.status === "paused").length} paused · ${allIssues.filter(issue => ["queued", "pending"].includes(issue.status)).length} queued / pending${!meta.alive ? " · last recorded states" : ""}</div></div>
         <div class="kpi"><div class="kpi-top"><span>Needs attention</span><span>tasks</span></div><div class="kpi-value ${attentions.length ? "warn" : "good"}">${attentions.length}</div><div class="kpi-note">review, failure, pause, conflict or stale activity</div></div>
         <div class="kpi"><div class="kpi-top"><span>All tasks</span><span>tracked</span></div><div class="kpi-value">${allIssues.length}</div><div class="kpi-note">${review} awaiting review · ${completed} done · ${stopped} stopped</div></div>
       </section>`;
@@ -1239,7 +1280,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const artifactAction = issue.historical
         ? ""
         : `<button class="button" data-tab="artifacts">View source files</button>`;
-      return `<details class="coverage" aria-label="Observation coverage"><summary><strong>${fmtNumber(events.length)} observations</strong><span>${esc(visibility)}</span><span class="${quality === "batch_captured" ? "warn" : "faint"}">${esc(qualityCopy)}</span></summary><div class="coverage-details">${omitted ? `<span class="warn">${fmtNumber(omitted)} outside the current buffer</span>` : ""}${truncated ? `<span class="warn">${fmtNumber(truncated)} output${truncated === 1 ? "" : "s"} truncated at 500 characters</span>` : ""}<span>${esc(bufferCopy)}</span>${artifactAction}</div></details>`;
+      return `<details class="coverage" data-evidence-run="${esc(issue.run_id || "")}" aria-label="Observation coverage"><summary><strong>${fmtNumber(events.length)} observations</strong><span>${esc(visibility)}</span><span class="${quality === "batch_captured" ? "warn" : "faint"}">${esc(qualityCopy)}</span></summary><div class="coverage-details">${omitted ? `<span class="warn">${fmtNumber(omitted)} outside the current buffer</span>` : ""}${truncated ? `<span class="warn">${fmtNumber(truncated)} output${truncated === 1 ? "" : "s"} truncated at 500 characters</span>` : ""}<span>${esc(bufferCopy)}</span>${artifactAction}</div></details>`;
     }
     function minimapUnits(events, useTiming) {
       const results = new Map(events.filter(event => event.type === "tool_result" && event.toolUseId).map(event => [event.toolUseId, event]));
@@ -1288,7 +1329,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
         ? `${fmtNumber(units.length)} steps · ${fmtClock(geo.min)} → ${fmtClock(geo.max)} · ${quality === "arrival_timed" ? "adapter arrival time" : "source time"}`
         : `${fmtNumber(units.length)} steps · event order, not time${quality === "batch_captured" ? " · legacy timestamps batch-captured" : ""}`;
       const heading = timed ? "Time overview" : "Run sequence";
-      const description = timed ? "True timing · tool call + result combined" : "Equal spacing · tool call + result combined";
+      const description = timed ? `${quality === "arrival_timed" ? "Adapter arrival timing (approximate)" : "Source timestamps"} · tool call + result combined` : "Equal spacing · tool call + result combined";
       return `<section class="minimap"><div class="mini-head"><h2>${heading}</h2><span class="muted" style="font-size:10px">${description}</span><button class="mini-control ${state.zoom === 1 ? "active" : ""}" data-zoom="1" aria-pressed="${state.zoom === 1}">Fit</button><button class="mini-control ${state.zoom === 1.5 ? "active" : ""}" data-zoom="1.5" aria-pressed="${state.zoom === 1.5}">1.5×</button><button class="mini-control ${state.zoom === 2 ? "active" : ""}" data-zoom="2" aria-pressed="${state.zoom === 2}">2×</button></div><div class="mini-scroll" data-scroll-key="minimap"><div class="mini-inner ${timed ? "time" : "sequence"}" data-mini-mode="${timed ? "time" : "sequence"}" style="width:${state.zoom * 100}%"><div class="mini-axis"></div>${geo.rows.map(row => { const unit = row.event; const active = Boolean(selected && unit.memberIds.includes(selected.id)); const durationLabel = timed ? (unit.durationMs != null ? fmtDuration(unit.durationMs) : "instant") : "duration unavailable"; const label = `${unit.title} · ${unit.status} · ${timed ? fmtClock(unit.sourceMs) : "ordered step"} · ${durationLabel}`; return `<button class="mini-bar ${esc(unit.type)} ${unit.status} ${active ? "active" : ""}" data-select-event="${esc(unit.event.id)}" aria-label="${esc(label)}" aria-pressed="${active}" title="${esc(label)}" style="left:${row.left}%;width:${row.width}%"></button>`; }).join("")}</div><div class="mini-caption"><span>start</span><span>${esc(caption)}</span><span>latest</span></div></div></section>`;
     }
     function visibleEvents(events) { return events.filter(eventMatches); }
@@ -1328,6 +1369,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
         ["git", "Branch", issue.branch_name],
         ["git", "Commit", issue.commit_sha],
         ["report", "Run report", issue.report_path],
+        ["transcript", "Conversation transcript", issue.transcript_path],
         ["events", "Tool events", issue.tool_events_path],
         ["debug", "Debug log", issue.debug_log_path],
         ["review", "Pull request", issue.pr_url || (issue.pr_number ? `#${issue.pr_number}` : "")],
@@ -1367,7 +1409,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const eventTab = eventTabActive();
       const hasInspector = state.tab === "timeline";
       const visible = visibleEvents(events);
-      const context = { artifacts: "Recorded paths for this run", raw: "Exact captured payload" }[state.tab] || "";
+      const context = { artifacts: "Recorded paths for this run", raw: "Captured dashboard payload" }[state.tab] || "";
       const followControl = issue.status === "running" && !issue.historical
         ? `<button class="filter-button ${state.followLatest ? "active" : ""}" data-follow-latest aria-pressed="${state.followLatest}">${state.followLatest ? "Following latest" : "Follow latest"}</button>`
         : "";
@@ -1395,24 +1437,39 @@ LIVEVIEW_HTML = r"""<!doctype html>
     }
     function finishChatTool(items, tools, block) {
       const id = String(block.tool_use_id || block.id || "");
-      const item = tools.get(id) || [...items].reverse().find(entry => entry.kind === "tool" && entry.status === "running");
-      if (!item) return;
-      const result = block.result || block;
+      let item = id ? tools.get(id) : [...items].reverse().find(entry => entry.kind === "tool" && entry.status === "running");
+      if (!item) item = appendChatTool(items, tools, { id, name: "Tool (call not captured)" });
+      const rawResult = block.result ?? block;
+      const result = typeof rawResult === "string" ? {output: rawResult} : rawResult;
       item.output = result.output != null ? result.output : result.content != null ? result.content : "";
       if (typeof item.output !== "string") item.output = JSON.stringify(item.output, null, 2);
-      item.error = Boolean(block.is_error || result.is_error || (Number.isFinite(Number(result.exit_code)) && Number(result.exit_code) !== 0));
+      const exitCode = block.exit_code ?? result.exit_code;
+      item.error = Boolean(block.is_error || result.is_error || (Number.isFinite(Number(exitCode)) && Number(exitCode) !== 0));
       item.status = item.error ? "failed" : "completed";
     }
     function standardHistoryItems(messages) {
       const items = [];
       const tools = new Map();
+      let deltaItem = null;
+      let deltaTurn;
       for (const message of messages || []) {
         const role = String(message.role || "").toLowerCase();
         const content = message.content;
+        if (role === "assistant" && message.type === "TextDelta") {
+          const delta = messageText(content);
+          if (!deltaItem || deltaTurn !== message.turn) {
+            deltaItem = { kind: "message", role: "agent", text: "", ts: message.ts || "" };
+            deltaTurn = message.turn;
+            items.push(deltaItem);
+          }
+          deltaItem.text += delta;
+          continue;
+        }
+        deltaItem = null;
         const text = messageText(content).trim();
-        if (["user", "human"].includes(role) && text) items.push({ kind: "message", role: "user", text, ts: message.ts || "" });
+        if (["user", "human"].includes(role) && (text || message.type === "RunInput")) items.push({ kind: "message", role: "user", text, ts: message.ts || "", origin: message.origin || "", inputType: message.type || "", systemPrompt: message.system_prompt || "", delivery: message.delivery || "" });
         if (role === "assistant" && text) items.push({ kind: "message", role: "agent", text, ts: message.ts || "" });
-        if (role === "system" && text) items.push({ kind: "system", text, tone: "" });
+        if (role === "system" && text) items.push({ kind: "system", text, tone: message.type === "Error" ? "bad" : "", terminal: ["RunEnded", "SessionComplete"].includes(message.type) });
         if (!Array.isArray(content)) continue;
         for (const block of content) {
           if (!block || typeof block !== "object") continue;
@@ -1422,71 +1479,6 @@ LIVEVIEW_HTML = r"""<!doctype html>
       }
       return items;
     }
-    function codexWireItems(messages) {
-      const wire = (messages || [])
-        .filter(message => String(message.role || "").toLowerCase() === "assistant")
-        .map(message => messageText(message.content))
-        .join("");
-      const events = [];
-      for (const line of wire.split(/\r?\n/)) {
-        const value = line.trim();
-        if (!value.startsWith("{")) continue;
-        try {
-          const parsed = JSON.parse(value);
-          if (parsed && typeof parsed.type === "string") events.push(parsed);
-        } catch (_) {}
-      }
-      const recognized = events.filter(event => /^(thread\.|turn\.|item\.|error$)/.test(event.type));
-      if (recognized.length < 2) return null;
-      const items = [];
-      const tools = new Map();
-      let lastPlan = "";
-      for (const event of recognized) {
-        const item = event.item || {};
-        if (event.type === "item.completed" && item.type === "agent_message" && item.text) {
-          items.push({ kind: "message", role: "agent", text: String(item.text), ts: "" });
-          continue;
-        }
-        if (event.type === "item.started" && item.type === "command_execution") {
-          appendChatTool(items, tools, { id: item.id, name: "Command", input: item.command || "" });
-          continue;
-        }
-        if (event.type === "item.completed" && item.type === "command_execution") {
-          let tool = tools.get(String(item.id || ""));
-          if (!tool) tool = appendChatTool(items, tools, { id: item.id, name: "Command", input: item.command || "" });
-          finishChatTool(items, tools, { id: item.id, result: { output: item.aggregated_output || "", exit_code: item.exit_code } });
-          continue;
-        }
-        if (event.type === "item.completed" && ["file_change", "mcp_tool_call", "web_search"].includes(item.type)) {
-          const name = item.type === "file_change" ? "File change" : item.type === "web_search" ? "Web search" : (item.name || "MCP tool");
-          const tool = appendChatTool(items, tools, { id: item.id, name, input: item.changes || item.arguments || item.query || "" });
-          tool.output = item.result || item.status || "completed";
-          tool.status = item.status === "failed" ? "failed" : "completed";
-          tool.error = tool.status === "failed";
-          continue;
-        }
-        if ((event.type === "item.completed" || event.type === "item.updated") && item.type === "todo_list") {
-          const todos = Array.isArray(item.items) ? item.items : [];
-          const completed = todos.filter(todo => todo.completed).length;
-          lastPlan = todos.length ? `Plan progress · ${completed}/${todos.length} complete` : lastPlan;
-          continue;
-        }
-        if (event.type === "error") {
-          items.push({ kind: "system", text: String(event.message || event.error || "The agent reported an error."), tone: "bad" });
-        }
-      }
-      if (lastPlan) items.push({ kind: "system", text: lastPlan, tone: "" });
-      for (const message of messages || []) {
-        const role = String(message.role || "").toLowerCase();
-        const text = messageText(message.content).trim();
-        if (["user", "human"].includes(role) && text) items.push({ kind: "message", role: "user", text, ts: message.ts || "" });
-      }
-      return items;
-    }
-    function normalizeChatHistory(messages) {
-      const wire = codexWireItems(messages);
-      return wire || standardHistoryItems(messages);
-    }
     function normalizeChatSessions(rawSessions, fallbackMessages, currentRunId) {
       const source = Array.isArray(rawSessions) && rawSessions.length
         ? rawSessions
@@ -1495,7 +1487,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
         runId: String(session.run_id || (session.current ? currentRunId : `session-${index + 1}`)),
         current: Boolean(session.current) || String(session.run_id || "") === String(currentRunId || ""),
         evidenceCount: Math.max(0, Number(session.evidence_count || 0)),
-        items: normalizeChatHistory(session.messages || []),
+        items: standardHistoryItems(session.messages || []),
       }));
     }
     function chatItemHtml(item, disclosureKey = "") {
@@ -1504,14 +1496,16 @@ LIVEVIEW_HTML = r"""<!doctype html>
         const input = typeof item.input === "string" ? item.input : JSON.stringify(item.input, null, 2);
         const output = typeof item.output === "string" ? item.output : JSON.stringify(item.output, null, 2);
         const shown = truncate(output || (item.status === "running" ? "Waiting for result…" : "No output captured"), 4000);
-        const status = item.status === "running" ? "running" : item.error ? "failed" : "completed";
+        const status = item.status || (item.error ? "failed" : "completed");
         const inputSummary = truncate(input.replace(/\s+/g, " "), 110);
         const label = inputSummary ? `${item.name || "Tool"} · ${inputSummary}` : item.name || "Tool";
         return `<article class="chat-tool ${item.error ? "error" : ""}"><div class="chat-tool-head"><span class="chat-tool-icon">${item.error ? "!" : "↳"}</span><span class="chat-tool-name" title="${esc(label)}">${esc(label)}</span><span class="chat-tool-meta ${toneFor(status)}">${esc(status)}</span></div><details data-chat-disclosure="${esc(disclosureKey)}" ${item.error ? "open" : ""}><summary>${input ? "Show input and output" : "Show output"}</summary>${input ? `<pre>${esc(input)}</pre>` : ""}<pre>${esc(shown)}</pre>${output.length > 4000 ? `<div class="chat-system">Output preview limited to 4,000 characters. Open Run evidence for the captured source.</div>` : ""}</details></article>`;
       }
       const role = item.role === "user" ? "user" : "agent";
-      const author = item.synthetic ? "Task input" : role === "user" ? "Operator" : "Agent";
-      return `<article class="chat-message ${role}"><span class="chat-avatar">${role === "user" ? (item.synthetic ? "TASK" : "YOU") : "AI"}</span><div class="chat-message-body"><div class="chat-author">${author}</div><div class="chat-bubble ${item.streaming ? "streaming" : ""}">${renderMarkdown(item.text || "")}</div></div></article>`;
+      const orchestratorInput = item.inputType === "RunInput";
+      const author = orchestratorInput ? "Orchestrator input" : role === "user" ? (item.origin === "followup" ? "Operator follow-up" : "Recorded user input") : "Agent";
+      const supplement = orchestratorInput ? `<div class="chat-system">Submitted to the backend; not a capture of the complete model request.</div>${item.systemPrompt ? `<details data-chat-disclosure="${esc(disclosureKey)}:system"><summary>System supplement provided to adapter</summary><pre>${esc(item.systemPrompt)}</pre></details>` : ""}` : "";
+      return `<article class="chat-message ${role}"><span class="chat-avatar">${orchestratorInput ? "TASK" : role === "user" ? "YOU" : "AI"}</span><div class="chat-message-body"><div class="chat-author">${author}</div><div class="chat-bubble ${item.streaming ? "streaming" : ""}">${renderMarkdown(item.text || "")}</div>${supplement}</div></article>`;
     }
     function chatTranscriptHtml(items, runId = "") {
       const parts = [];
@@ -1521,7 +1515,8 @@ LIVEVIEW_HTML = r"""<!doctype html>
         if (!tools.length) return;
         const failed = tools.filter(item => item.error).length;
         const running = tools.filter(item => item.status === "running").length;
-        const stateCopy = failed ? `${failed} failed` : running ? `${running} running` : "completed";
+        const missing = tools.filter(item => item.status === "result not captured").length;
+        const stateCopy = [failed ? `${failed} failed` : "", running ? `${running} running` : "", missing ? `${missing} result not captured` : ""].filter(Boolean).join(" · ") || "completed";
         const groupKey = `${runId}:tool-group:${toolGroupIndex}`;
         parts.push(`<details class="chat-tool-group ${failed ? "has-error" : ""}" data-chat-disclosure="${esc(groupKey)}" ${failed ? "open" : ""}><summary><strong>${tools.length} tool call${tools.length === 1 ? "" : "s"}</strong><span>${esc(stateCopy)}</span></summary><div class="chat-tool-group-body">${tools.map((item, index) => chatItemHtml(item, `${groupKey}:tool:${item.id || index}`)).join("")}</div></details>`);
         tools = [];
@@ -1533,7 +1528,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
           continue;
         }
         flushTools();
-        parts.push(chatItemHtml(item));
+        parts.push(chatItemHtml(item, `${runId}:message:${parts.length}`));
       }
       flushTools();
       return parts.join("");
@@ -1548,11 +1543,17 @@ LIVEVIEW_HTML = r"""<!doctype html>
         : state.chatItems.length
           ? [{ runId: String(issue.run_id), current: true, evidenceCount: eventsFor(issue).length, items: [...state.chatItems] }]
           : [];
-      const hasOperatorMessage = sessions.some(session => session.items.some(item => item.kind === "message" && item.role === "user"));
-      if (sessions.length && !hasOperatorMessage) {
-        sessions[0].items.unshift({ kind: "message", role: "user", text: issueTitle(issue), synthetic: true });
+      return sessions.map(session => presentConversationSession(session, issue));
+    }
+    function presentConversationSession(session, issue) {
+      const ended = !session.current || (issue && !issueHasLiveChatRun(issue))
+        || state.chatSessionEnded || session.items.some(item => item.terminal);
+      const items = session.items.map(item => ended && item.kind === "tool" && item.status === "running"
+        ? { ...item, status: "result not captured" } : item);
+      if (!items.some(item => item.inputType === "RunInput")) {
+        items.unshift({ kind: "system", text: "Run input was not recorded. Displayed user messages, if any, are not the full assembled prompt.", tone: "" });
       }
-      return sessions;
+      return { ...session, items };
     }
     function chatSessionCounts(session) {
       const messages = session.items.filter(item => item.kind === "message").length;
@@ -1591,7 +1592,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const contextualNotice = issue.status === "pending_review"
         ? "Latest run completed. This task is waiting for human review; a new message will start a follow-up run."
         : state.chatNotice;
-      const notice = state.chatError || contextualNotice || (!daemonAvailable ? "The daemon is offline. Conversation history is available, but messages cannot be delivered." : requiresFollowup ? "This run has ended. A new message will queue a follow-up run on the same branch." : !controlAvailable ? "Connecting the live control channel…" : "Messages are delivered through the run control channel.");
+      const notice = state.chatError || contextualNotice || (!daemonAvailable ? "The daemon is offline. Conversation history is available, but messages cannot be delivered." : requiresFollowup ? "This run has ended. A new message will queue a follow-up run on the same branch." : "New messages are durably queued and start a follow-up run after the current run ends.");
       const connectionLabel = requiresFollowup ? "run ended" : state.chatConnection === "live" ? "stream attached" : state.chatConnection;
       return { connectionLabel, controlAvailable, daemonAvailable, notice, requiresFollowup, stateLabel };
     }
@@ -1600,34 +1601,41 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const available = daemonAvailable === undefined
         ? Boolean(state.snapshot && state.snapshot.metadata && state.snapshot.metadata.alive)
         : Boolean(daemonAvailable);
-      const requiresFollowup = chatRequiresFollowup(selectedIssue);
-      const waitingForLiveChannel = !requiresFollowup && (
-        state.chatConnection !== "live"
-        || !selectedIssue
-        || !selectedIssue.chat_control_available
-      );
-      return state.chatSending || state.chatFollowupConfirm || !state.chatDraft.trim() || !available || waitingForLiveChannel;
+      return state.chatSending || state.chatFollowupConfirm || !state.chatDraft.trim() || !available || !selectedIssue;
+    }
+    function chatRunControls(issue, daemonAvailable) {
+      const available = daemonAvailable === undefined
+        ? Boolean(state.snapshot && state.snapshot.metadata && state.snapshot.metadata.alive)
+        : Boolean(daemonAvailable);
+      const canControl = issueHasLiveChatRun(issue)
+        && available
+        && Boolean(issue && issue.chat_control_available)
+        && state.chatConnection === "live";
+      if (!canControl) return "";
+      const paused = Boolean(issue.pause_reason) || state.chatControlStatus === "paused";
+      const controlPending = Boolean(state.chatControlPending);
+      const primary = paused
+        ? `<button class="button" data-chat-action="resume" ${controlPending ? "disabled" : ""}>${state.chatControlPending === "resume" ? "Resuming…" : "Resume"}</button>`
+        : `<button class="button" data-chat-action="pause" title="${issue.chat_pause_available === false ? "This backend cannot pause local execution" : "Suspend the local agent and tools; in-flight remote inference may continue"}" ${controlPending || issue.chat_pause_available === false ? "disabled" : ""}>${state.chatControlPending === "pause" ? "Pausing…" : "Pause"}</button>`;
+      return `${primary}<button class="button danger" data-chat-action="stop" ${controlPending ? "disabled" : ""}>${state.chatControlPending === "stop" ? "Stopping…" : "Stop"}</button>`;
+    }
+    function conversationActionsHtml(issue, daemonAvailable) {
+      return `<button class="button primary" data-nav-view="run">Open latest Evidence</button>${chatRunControls(issue, daemonAvailable)}`;
     }
     function renderChat() {
       const issue = findIssue();
       if (!issue || !issue.run_id) return `${shellTop("chat")}<div class="page"><div class="empty">Select a run with a captured session before opening Conversation.</div></div>`;
-      const { connectionLabel, controlAvailable, daemonAvailable, notice, requiresFollowup, stateLabel } = chatDisplayState(issue);
-      const canControl = issueHasLiveChatRun(issue) && daemonAvailable && controlAvailable && state.chatConnection === "live";
-      const paused = Boolean(issue.pause_reason) || state.chatControlStatus === "paused";
-      const controlPending = Boolean(state.chatControlPending);
+      const { connectionLabel, daemonAvailable, notice, requiresFollowup, stateLabel } = chatDisplayState(issue);
       const sessions = conversationSessions(issue);
       const items = sessions.length
         ? sessions.map((session, index) => chatSessionHtml(session, index, sessions.length)).join("")
         : `<div class="chat-empty"><div class="chat-empty-card"><div class="chat-empty-mark">AI</div><strong>${state.chatConnection === "connecting" ? "Loading the transcript…" : "No conversation captured"}</strong><p>Live replies, tool activity and completed-session history will appear here. You can still send a message; completed runs queue a follow-up on the same issue.</p></div></div>`;
-      const sendLabel = state.chatSending ? "Sending…" : requiresFollowup ? "Queue follow-up" : "Send";
-      const inputHint = requiresFollowup ? "Click Queue follow-up to start a new provider run" : "Enter to send · Shift+Enter for a new line";
+      const sendLabel = state.chatSending ? "Sending…" : requiresFollowup ? "Queue follow-up" : "Queue after current run";
+      const inputHint = requiresFollowup ? "Click Queue follow-up to start a new provider run" : "Enter to queue · Shift+Enter for a new line";
       const followupConfirm = state.chatFollowupConfirm
         ? `<div class="followup-confirm" role="alertdialog" aria-labelledby="followup-confirm-title"><div class="followup-confirm-copy"><strong id="followup-confirm-title">Start a new provider run?</strong>This starts a new provider run for ${esc(issue.identifier)} on branch ${esc(issue.branch_name || "the current branch")} and may use provider quota.</div><div class="followup-confirm-actions"><button class="button" data-chat-followup-cancel>Cancel</button><button class="button primary" data-chat-followup-confirm>Start follow-up run</button></div></div>`
         : "";
-      const runControls = canControl
-        ? `${paused ? `<button class="button" data-chat-action="resume" ${controlPending ? "disabled" : ""}>${state.chatControlPending === "resume" ? "Resuming…" : "Resume"}</button>` : `<button class="button" data-chat-action="pause" title="Pause before the next agent event" ${controlPending ? "disabled" : ""}>${state.chatControlPending === "pause" ? "Pausing…" : "Pause"}</button>`}<button class="button danger" data-chat-action="stop" ${controlPending ? "disabled" : ""}>${state.chatControlPending === "stop" ? "Stopping…" : "Stop"}</button>`
-        : "";
-      return `${shellTop("chat")}<div class="conversation-page"><div class="conversation-shell">${renderRunQueue(issue)}<main class="conversation-main"><header class="conversation-head"><div class="conversation-title"><strong>${esc(taskLabel(issue))}</strong><span>Complete conversation · ${sessions.length} run${sessions.length === 1 ? "" : "s"} · each run keeps its own Evidence</span></div><div class="thread-state">${badge(stateLabel)}<small>${connectionLabel}</small></div><div class="conversation-actions"><button class="button primary" data-nav-view="run">Open latest Evidence</button>${runControls}</div></header><section class="conversation-feed" data-chat-feed data-scroll-key="chat-feed" aria-live="polite">${items}</section><footer class="composer-wrap"><div class="composer-notice ${state.chatError ? "bad" : ""}" role="status">${esc(notice)}</div>${followupConfirm}<div class="composer"><textarea data-chat-input rows="1" placeholder="${requiresFollowup ? "Describe the follow-up for this issue…" : "Message the running agent…"}" aria-label="Message the selected agent">${esc(state.chatDraft)}</textarea><button class="send-button" data-chat-send ${chatSendDisabled(issue, daemonAvailable) ? "disabled" : ""}>${sendLabel}</button></div><div class="composer-hint"><span>${inputHint}</span><span>${daemonAvailable ? (requiresFollowup ? "starts a new run" : controlAvailable ? "live control" : "control connecting") : "daemon offline"}</span></div></footer></main></div></div>`;
+      return `${shellTop("chat")}<div class="conversation-page"><div class="conversation-shell">${renderRunQueue(issue)}<main class="conversation-main"><header class="conversation-head"><div class="conversation-title"><strong>${esc(taskLabel(issue))}</strong><span>Recorded conversation · ${sessions.length} run${sessions.length === 1 ? "" : "s"} · each run keeps its own Evidence</span></div><div class="thread-state">${badge(stateLabel)}<small>${connectionLabel}</small></div><div class="conversation-actions">${conversationActionsHtml(issue, daemonAvailable)}</div></header><section class="conversation-feed" data-chat-feed data-scroll-key="chat-feed" aria-live="polite">${items}</section><footer class="composer-wrap"><div class="composer-notice ${state.chatError ? "bad" : ""}" role="status">${esc(notice)}</div>${followupConfirm}<div class="composer"><textarea data-chat-input rows="1" placeholder="${requiresFollowup ? "Describe the follow-up for this issue…" : "Queue a question for the next run…"}" aria-label="Message the selected agent">${esc(state.chatDraft)}</textarea><button class="send-button" data-chat-send ${chatSendDisabled(issue, daemonAvailable) ? "disabled" : ""}>${sendLabel}</button></div><div class="composer-hint"><span>${inputHint}</span><span>${daemonAvailable ? (requiresFollowup ? "starts a new run" : "durable queue") : "daemon offline"}</span></div></footer></main></div></div>`;
     }
     function currentConversationSession(issue) {
       const sessions = state.chatSessions.length
@@ -1639,12 +1647,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       const sessionIndex = currentIndex >= 0 ? currentIndex : sessions.length - 1;
       const session = sessions[sessionIndex] || sessions[sessions.length - 1];
       if (!session) return null;
-      const hasOperatorMessage = sessions.some(candidate => candidate.items.some(
-        item => item.kind === "message" && item.role === "user",
-      ));
-      const items = sessionIndex === 0 && !hasOperatorMessage
-        ? [{ kind: "message", role: "user", text: issueTitle(issue), synthetic: true }, ...session.items]
-        : session.items;
+      const items = presentConversationSession(session, issue).items;
       const runId = String(session.runId || issue.run_id || "");
       const cachedObservations = state.runObservations[runId];
       const snapshotCounts = state.snapshot && state.snapshot.events && state.snapshot.events.by_run;
@@ -1690,7 +1693,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       }
       const summaryNode = document.querySelector(".conversation-title span");
       if (summaryNode) {
-        summaryNode.textContent = `Complete conversation · ${sessions.length} run${sessions.length === 1 ? "" : "s"} · each run keeps its own Evidence`;
+        summaryNode.textContent = `Recorded conversation · ${sessions.length} run${sessions.length === 1 ? "" : "s"} · each run keeps its own Evidence`;
       }
     }
     function createConversationRenderer() {
@@ -1776,6 +1779,9 @@ LIVEVIEW_HTML = r"""<!doctype html>
         const statusNode = document.querySelector(".thread-state");
         const statusHtml = `${badge(stateLabel)}<small>${connectionLabel}</small>`;
         if (statusNode && statusNode.innerHTML !== statusHtml) statusNode.innerHTML = statusHtml;
+        const actionsNode = document.querySelector(".conversation-actions");
+        const actionsHtml = conversationActionsHtml(issue);
+        if (actionsNode && actionsNode.innerHTML !== actionsHtml) actionsNode.innerHTML = actionsHtml;
         const noticeNode = document.querySelector(".composer-notice");
         if (noticeNode) {
           if (noticeNode.textContent !== notice) noticeNode.textContent = notice;
@@ -1818,7 +1824,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
         const scopeCopy = events.length
           ? `${fmtNumber(events.length)} observations captured for this historical run.`
           : "This transcript run has no captured observations. Conversation history remains available, but Evidence will not borrow events from the latest run.";
-        return `${shellTop("run")}<div class="page"><div class="run-titlebar"><div class="head-copy"><button class="back" data-open-chat="${esc(issue.identifier || issue.issue_id)}">← Complete conversation</button><div class="eyebrow">Historical run · ${esc(selectedRunId)}</div><h1>${esc(taskLabel(issue))}</h1><p class="subtitle">${esc(scopeCopy)}</p><div class="run-facts"><span>scope <strong>this run only</strong></span><span>observations <strong>${fmtNumber(events.length)}</strong></span></div></div><div class="head-actions"><button class="button" data-copy-value="${esc(selectedRunId)}">Copy run ID</button></div><div class="run-states">${badge(events.length ? "captured" : "not captured", "Evidence", "Historical evidence scope")}</div></div><div class="data-note"><strong>Historical scope</strong><span>Latest task status, verification and Git facts are hidden because they belong to another run.</span></div>${renderMinimap(evidenceIssue, events)}${coverageFor(evidenceIssue, events)}${workbench(evidenceIssue, events)}</div>`;
+        return `${shellTop("run")}<div class="page"><div class="run-titlebar"><div class="head-copy"><button class="back" data-open-chat="${esc(issue.identifier || issue.issue_id)}">← Recorded conversation</button><div class="eyebrow">Historical run · ${esc(selectedRunId)}</div><h1>${esc(taskLabel(issue))}</h1><p class="subtitle">${esc(scopeCopy)}</p><div class="run-facts"><span>scope <strong>this run only</strong></span><span>observations <strong>${fmtNumber(events.length)}</strong></span></div></div><div class="head-actions"><button class="button" data-copy-value="${esc(selectedRunId)}">Copy run ID</button></div><div class="run-states">${badge(events.length ? "captured" : "not captured", "Evidence", "Historical evidence scope")}</div></div><div class="data-note"><strong>Historical scope</strong><span>Latest task status, verification and Git facts are hidden because they belong to another run.</span></div>${renderMinimap(evidenceIssue, events)}${coverageFor(evidenceIssue, events)}${workbench(evidenceIssue, events)}</div>`;
       }
       const prUrl = safeUrl(issue.pr_url);
       const attention = attentionFor(issue);
@@ -1847,7 +1853,9 @@ LIVEVIEW_HTML = r"""<!doctype html>
           : active.matches("[data-chat-input]") ? "[data-chat-input]" : "[data-overview-search]",
         start: active.selectionStart, end: active.selectionEnd,
       } : null;
-      return { scroll, focus, chatDisclosures };
+      const coverage = document.querySelector(".coverage");
+      const coverageState = coverage ? {runId: coverage.dataset.evidenceRun, open: coverage.open} : null;
+      return { scroll, focus, chatDisclosures, coverageState };
     }
     function restoreUi(saved) {
       for (const [key, value] of Object.entries(saved.scroll || {})) {
@@ -1859,6 +1867,10 @@ LIVEVIEW_HTML = r"""<!doctype html>
         if (input) { input.focus(); input.setSelectionRange(saved.focus.start, saved.focus.end); }
       }
       restoreChatDisclosures(saved.chatDisclosures);
+      const coverage = document.querySelector(".coverage");
+      if (coverage && saved.coverageState && coverage.dataset.evidenceRun === saved.coverageState.runId) {
+        coverage.open = saved.coverageState.open;
+      }
     }
     function render() {
       if (!state.snapshot) return;
@@ -1883,7 +1895,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       if (["run", "chat"].includes(state.view)) ensureRunObservations(findIssue());
     }
     function snapshotSignature(snapshot) {
-      const rows = ((snapshot.issues && snapshot.issues.issues) || []).map(issue => [issue.issue_id, issue.status, issue.updated_at, issue.run_turn_count, issue.run_tool_count, issue.verification_status, issue.report_status]);
+      const rows = ((snapshot.issues && snapshot.issues.issues) || []).map(issue => [issue.issue_id, issue.status, issue.updated_at, issue.run_id, Boolean(issue.chat_control_available), issue.pause_reason, issue.run_turn_count, issue.run_tool_count, issue.verification_status, issue.report_status]);
       return JSON.stringify([snapshot.event_epoch, snapshot.revision, rows, snapshot.events && snapshot.events.total, snapshot.metadata && snapshot.metadata.alive]);
     }
     function applySnapshot(snapshot) {
@@ -1992,7 +2004,9 @@ LIVEVIEW_HTML = r"""<!doctype html>
         conn.classList.toggle("ok", state.connection === "connected");
         conn.classList.toggle("bad", state.connection === "disconnected");
         const label = conn.querySelector("span");
-        if (label) label.textContent = state.connection === "connected" ? "feed connected" : state.connection === "disconnected" ? "feed reconnecting" : "feed connecting";
+        const connText = liveUpdatesText();
+        if (label) label.textContent = connText;
+        conn.setAttribute("aria-label", connText);
       }
     }
     function pushEvent(event) {
@@ -2078,7 +2092,6 @@ LIVEVIEW_HTML = r"""<!doctype html>
       state.chatSessions = sessions;
       state.chatItems = currentSession.items;
       state.expandedChatRunIds = new Set([normalizedRunId]);
-      state.chatWireBuffer = "";
     }
     function ensureChatConnection() {
       if (state.view !== "chat" || document.hidden || chatReconnectTimer) return;
@@ -2118,7 +2131,6 @@ LIVEVIEW_HTML = r"""<!doctype html>
         state.chatSessionEnded = false;
         state.chatControlStatus = "";
         state.chatItems = stagedSession.items;
-        state.chatWireBuffer = "";
       }
       const source = new EventSource("/api/runs/" + encodeURIComponent(runId) + "/events");
       chatEventSource = source;
@@ -2173,7 +2185,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
             ? "history"
             : frameType === "TextDelta"
             ? "text"
-            : ["ToolCallEvent", "ToolResultEvent", "TurnComplete", "Error"].includes(frameType)
+            : ["RunInput", "ToolCallEvent", "ToolResultEvent", "TurnComplete", "Error"].includes(frameType)
               ? "session"
               : "chrome";
           const incrementalHistory = payload.type === "history";
@@ -2188,16 +2200,17 @@ LIVEVIEW_HTML = r"""<!doctype html>
     function applyChatFrame(frame) {
       const type = frame.type || "";
       const data = frame.data || {};
-      if (type === "TextDelta") {
+      if (["RunInput", "ToolCallEvent", "ToolResultEvent", "TurnComplete", "RunEnded", "SessionComplete", "Error"].includes(type)) {
+        for (const item of state.chatItems) if (item.kind === "message") item.streaming = false;
+      }
+      if (type === "RunInput") {
+        state.chatItems.push(...standardHistoryItems([{role: "user", type: "RunInput", ...data}]));
+      } else if (type === "TextDelta") {
         const text = String(data.content || data.text || "");
-        if (state.chatWireBuffer || /^\s*\{"type"\s*:/.test(text)) {
-          state.chatWireBuffer += text;
-          state.chatNotice = "Receiving structured backend events…";
-          return;
-        }
-        let item = [...state.chatItems].reverse().find(entry => entry.kind === "message" && entry.role === "agent" && entry.streaming);
-        if (!item) {
+        let item = state.chatItems[state.chatItems.length - 1];
+        if (!item || item.kind !== "message" || item.role !== "agent" || !item.streaming || item.turn !== data.turn) {
           item = { kind: "message", role: "agent", text: "", streaming: true, ts: "" };
+          item.turn = data.turn;
           state.chatItems.push(item);
         }
         item.text += text;
@@ -2206,24 +2219,21 @@ LIVEVIEW_HTML = r"""<!doctype html>
         appendChatTool(state.chatItems, tools, { id: data.tool_use_id, name: data.tool_name, params: data.params });
       } else if (type === "ToolResultEvent") {
         const tools = new Map(state.chatItems.filter(item => item.kind === "tool").map(item => [item.id, item]));
-        finishChatTool(state.chatItems, tools, { tool_use_id: data.tool_use_id, result: data.result || {} });
+        finishChatTool(state.chatItems, tools, { tool_use_id: data.tool_use_id, result: data.result ?? {}, is_error: data.is_error, exit_code: data.exit_code });
       } else if (type === "TurnComplete") {
         for (const item of state.chatItems) if (item.kind === "message") item.streaming = false;
-        if (state.chatWireBuffer) {
-          const decoded = codexWireItems([{ role: "assistant", content: state.chatWireBuffer }]);
-          if (decoded) state.chatItems.push(...decoded);
-          else state.chatItems.push({ kind: "message", role: "agent", text: state.chatWireBuffer, ts: "" });
-          state.chatWireBuffer = "";
-        }
         state.chatNotice = "Turn completed.";
       } else if (type === "FollowupQueued") {
         state.chatNotice = "Follow-up accepted. Waiting for the replacement run…";
-      } else if (type === "Paused") {
+      } else if (type === "Paused" || type === "SessionPaused") {
         state.chatControlStatus = "paused";
         state.chatNotice = "Run paused.";
-      } else if (type === "Resumed") {
+      } else if (type === "Resumed" || type === "SessionResumed") {
         state.chatControlStatus = "running";
         state.chatNotice = "Run resumed.";
+      } else if (type === "ControlError") {
+        state.chatControlStatus = "";
+        state.chatError = "Control request failed: " + String(data.message || "Backend rejected control");
       } else if (type === "RunEnded" || type === "SessionComplete") {
         state.chatSessionEnded = true;
         state.chatConnection = "ended";
@@ -2247,7 +2257,7 @@ LIVEVIEW_HTML = r"""<!doctype html>
       state.chatError = "";
       state.chatNotice = "Delivering message…";
       const autoFollowBeforeSend = state.chatAutoFollow;
-      const optimisticMessage = { kind: "message", role: "user", text, ts: "" };
+      const optimisticMessage = { kind: "message", role: "user", origin: "followup", text, ts: "" };
       state.chatItems.push(optimisticMessage);
       state.chatDraft = "";
       state.chatAutoFollow = true;
@@ -2260,11 +2270,11 @@ LIVEVIEW_HTML = r"""<!doctype html>
         });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
-        state.chatNotice = payload.mode === "followup_queued"
-          ? "Follow-up queued. The daemon will continue this issue on the same branch."
-          : "Message delivered to the running agent.";
-        if (payload.mode === "followup_queued") {
-          state.chatItems.push({ kind: "system", text: "Follow-up queued · waiting for a new run", tone: "" });
+        state.chatNotice = payload.mode === "followup_deferred"
+          ? "Question queued. It will start a follow-up run after the current run ends."
+          : "Follow-up queued. The daemon will continue this issue on the same branch.";
+        if (payload.mode === "followup_queued" || payload.mode === "followup_deferred") {
+          state.chatItems.push({ kind: "system", text: payload.mode === "followup_deferred" ? "Question queued · waiting for the current run to finish" : "Follow-up queued · waiting for a new run", tone: "" });
         }
       } catch (error) {
         const optimisticIndex = state.chatItems.indexOf(optimisticMessage);
@@ -2289,8 +2299,16 @@ LIVEVIEW_HTML = r"""<!doctype html>
       try {
         const response = await fetch("/api/runs/" + encodeURIComponent(issue.run_id) + "/" + verb, { method: "POST" });
         const payload = await response.json();
+        if (response.status === 409 && payload.code === "run_not_active") {
+          issue.chat_control_available = false;
+          state.chatControlStatus = "ended";
+          state.chatNotice = "The run ended before the control request was applied.";
+          return;
+        }
         if (!response.ok) throw new Error(payload.error || ("HTTP " + response.status));
-        state.chatControlStatus = verb === "pause" ? "paused" : verb === "resume" ? "running" : "stopping";
+        // HTTP acceptance is not confirmation that the backend has applied it.
+        // Pause/resume state arrives from the native-control event or snapshot.
+        if (verb === "stop") state.chatControlStatus = "stopping";
         state.chatNotice = verb === "pause" ? "Pause requested." : verb === "resume" ? "Resume requested." : "Stop requested.";
       } catch (error) {
         state.chatError = "Control request failed: " + String(error.message || error);

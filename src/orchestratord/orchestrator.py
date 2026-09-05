@@ -25,7 +25,7 @@ from .git.utils import (
     run_git as _run_git,
 )
 from .session_state import AgentSession, RetryItem
-from .runner_utils import _apply_pause_session, _apply_resume_session
+from .runner_utils import _apply_pause_session, _apply_resume_session, _await_with_active_timeout
 from .config.schema import WorkflowConfig
 from .debug_log import append_debug_event
 from .events import EventLevel
@@ -1377,20 +1377,24 @@ class Orchestrator:
                         source=(intent_source or ("command" if command is not None else "label")),
                         command=(f"/agent {command.value}" if command is not None else None),
                     )
-                    # /agent follow-up = 检视意见处理的重试：拉取 PR 上未处理的
-                    # 检视（pending）并让 agent 处理——而不是退回"完整 issue
-                    # 任务重跑"（agent_followup 的 fresh issue-style run）。
-                    followup_handled = await self._launch_followup_with_pending_reviews(
-                        issue
-                    )
-                    if followup_handled:
+                    followup_record = self._registry.get(issue.id or "")
+                    if self._uses_review_feedback_followup(followup_record):
+                        # Command follow-up handles pending PR review feedback
+                        # instead of rerunning the entire issue. Dashboard chat
+                        # keeps its agent_followup path because the operator's
+                        # text is the work to perform.
+                        followup_handled = (
+                            await self._launch_followup_with_pending_reviews(issue)
+                        )
+                        if followup_handled:
+                            continue
+                        # Do not rerun the issue when no feedback is pending.
+                        logger.info(
+                            "Issue %s follow-up: no pending review feedback "
+                            "to process — skip",
+                            issue.id,
+                        )
                         continue
-                    # 无待处理检视（或无法采集）——不启动完整任务重跑。
-                    logger.info(
-                        "Issue %s follow-up: no pending review feedback to process — skip",
-                        issue.id,
-                    )
-                    continue
 
                 if intent is Intent.REBASE:
                     # REBASE intent — the orchestrator itself
@@ -2622,6 +2626,15 @@ class Orchestrator:
             session.base_branch,
         )
 
+    @staticmethod
+    def _uses_review_feedback_followup(record: Any) -> bool:
+        """Keep command follow-ups distinct from Dashboard conversation turns."""
+        return bool(
+            record is not None
+            and record.intent is Intent.FOLLOWUP
+            and record.intent_source != "chat"
+        )
+
     async def _complete_read_only_chat_followup(
         self,
         session: AgentSession,
@@ -3096,14 +3109,11 @@ class Orchestrator:
                     "phase": f"mode:{mode_decision.mode}",
                 }
             )
-        # 统一：intent FOLLOWUP（命令/重试）一律走检视意见处理（review_followup
-        # ——fetch pending 检视——带检视）——不再启动 agent_followup 重跑任务
-        # （重跑 issue 仅由 /agent retry 承担）。
+        # Command/review FOLLOWUP intents fetch pending PR feedback. Dashboard
+        # conversation turns remain agent_followup runs so operator text is not
+        # discarded merely because there is no pending PR review.
         followup_record = self._registry.get(issue.id or "")
-        if (
-            followup_record is not None
-            and followup_record.intent == Intent.FOLLOWUP
-        ):
+        if self._uses_review_feedback_followup(followup_record):
             followup_handled = await self._launch_followup_with_pending_reviews(issue)
             if not followup_handled:
                 logger.info(
@@ -3193,8 +3203,11 @@ class Orchestrator:
             started_at=getattr(session, "started_at", None),
             completed_at=getattr(session, "completed_at", None),
             duration_ms=getattr(session, "duration_ms", None),
-            backend=getattr(session, "_snapshot_provider", None) or None,
+            backend=getattr(session, "_snapshot_backend", None) or None,
             model=getattr(session, "_snapshot_model", None) or None,
+            session_end_reason=getattr(session, "session_end_reason", None),
+            session_end_summary=getattr(session, "session_end_summary", None),
+            pause_reason=getattr(session, "pause_reason", None),
         )
         if record is None:
             if not (issue_id or "").startswith("stage-"):
@@ -3544,7 +3557,7 @@ class Orchestrator:
                         runner = self._resolve_session_runner(session)
                         run_timeout_seconds = self.workflow.agent.run_timeout_ms / 1000.0
                         session.timeout_deadline_at = time.time() + run_timeout_seconds
-                        await asyncio.wait_for(
+                        await _await_with_active_timeout(
                             runner.run(
                                 session,
                                 self.workflow,
@@ -3555,6 +3568,7 @@ class Orchestrator:
                                 progress_reporter=progress_sink,
                                 diagnostics_callback=self._update_run_diagnostics,
                             ),
+                            session=session,
                             timeout=run_timeout_seconds,
                         )
                     if session.status in (
@@ -4905,7 +4919,9 @@ class Orchestrator:
             return
 
         try:
-            for control_file in control_dir.iterdir():
+            for control_file in sorted(
+                control_dir.iterdir(), key=lambda path: path.name
+            ):
                 if not control_file.name.endswith(".control"):
                     continue
                 parts = control_file.read_text(encoding="utf-8").strip().split("\n")
@@ -4915,6 +4931,7 @@ class Orchestrator:
                 issue_id = parts[1].strip() if len(parts) > 1 else ""
                 extra = "\n".join(parts[2:]).strip() if len(parts) > 2 else ""
 
+                remove_control_file = True
                 try:
                     if cmd == "review_followup":
                         await self._handle_review_followup_control(issue_id, extra)
@@ -4932,15 +4949,17 @@ class Orchestrator:
                     elif cmd == "retry":
                         await self._handle_retry_control(issue_id, extra)
                     elif cmd == "followup":
-                        await self._handle_followup_control(issue_id, extra)
+                        remove_control_file = await self._handle_followup_control(
+                            issue_id, extra
+                        )
                     else:
                         self._apply_control_command(cmd, issue_id, extra)
                 finally:
-                    # Clean up control file after processing
-                    try:
-                        control_file.unlink()
-                    except Exception:
-                        pass
+                    if remove_control_file:
+                        try:
+                            control_file.unlink()
+                        except Exception:
+                            pass
         except Exception as exc:
             logger.warning("Failed to process control commands: %s", exc)
 
@@ -5194,7 +5213,7 @@ class Orchestrator:
             return
         await self._sync_tracker_issue_state(issue_id, "open")
 
-    async def _handle_followup_control(self, issue_id: str, extra: str) -> None:
+    async def _handle_followup_control(self, issue_id: str, extra: str) -> bool:
         """Re-launch a completed issue with FOLLOWUP intent.
 
         Unified handler for both CLI ``--mode followup`` and chat follow-up.
@@ -5204,7 +5223,7 @@ class Orchestrator:
         ``.operator_hints.md`` by ``prompt_builder`` at launch time.
         """
         if not issue_id:
-            return
+            return True
         record = self._registry._records.get(issue_id)
         is_known = bool(
             record
@@ -5215,7 +5234,14 @@ class Orchestrator:
         )
         if not is_known:
             logger.debug("chat_followup control for unknown issue %s", issue_id)
-            return
+            return True
+
+        if issue_id in self._state.running:
+            logger.debug(
+                "Deferring chat follow-up for active issue %s until its run exits",
+                issue_id,
+            )
+            return False
 
         # Clear daemon state so the issue is re-eligible for polling.
         self._state.completed.discard(issue_id)
@@ -5243,6 +5269,7 @@ class Orchestrator:
             issue_id,
         )
         await self._sync_tracker_issue_state(issue_id, "open")
+        return True
 
     async def _handle_review_retry_control(self, issue_id: str, feedback: str) -> None:
         """Queue a rejected review as a follow-up that preserves the existing PR."""

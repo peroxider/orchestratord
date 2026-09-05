@@ -189,9 +189,11 @@ def test_create_session_picks_cli_session_when_runtime_cli() -> None:
 def test_cli_session_translates_codex_jsonl_to_typed_events() -> None:
     session = CodexSession(_spec())
 
-    assert session._translate_wire_event(  # noqa: SLF001
+    started = session._translate_wire_event(  # noqa: SLF001
         {"type": "thread.started", "thread_id": "thread-7"}, timestamp=10.0
-    ) == []
+    )
+    assert started[0].kind is EventKind.SESSION_STARTED
+    assert started[0].timestamp == 10.0
     session._translate_wire_event({"type": "turn.started"}, timestamp=11.0)  # noqa: SLF001
     started = session._translate_wire_event(  # noqa: SLF001
         {
@@ -288,6 +290,7 @@ async def test_cli_session_streams_events_while_process_is_running() -> None:
 
     class FakeProcess:
         def __init__(self) -> None:
+            self.pid = 12345
             self.stdin = FakeStdin()
             self.stdout = FakeStdout()
             self.stderr = FakeStderr()
@@ -311,7 +314,7 @@ async def test_cli_session_streams_events_while_process_is_running() -> None:
     with patch(
         "orchestratord_codex.session.asyncio.create_subprocess_exec",
         side_effect=fake_exec,
-    ):
+    ), patch("orchestratord_codex.session.ProcessTree"):
         await session.send("inspect")
         assert session._run_task is not None  # noqa: SLF001
         assert session._run_task.done() is False  # noqa: SLF001
@@ -345,6 +348,14 @@ def test_cli_session_reads_new_prompt_from_stdin() -> None:
 
     assert argv == ["codex", "exec", "--json", "-m", "gpt-5.5", "-"]
     assert stdin_payload == b"---\noperator follow-up"
+
+
+def test_cli_native_handshake_is_not_discarded_while_model_is_silent():
+    session = CodexSession(SessionSpec(cwd="/tmp"))
+    events = session._translate_wire_event({"type": "thread.started", "thread_id": "ready"})
+    assert len(events) == 1
+    assert events[0].kind.value == "session_started"
+    assert events[0].payload["session_id"] == "ready"
 
 
 def test_cli_session_applies_workflow_reasoning_override_before_exec() -> None:

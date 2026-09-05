@@ -9,6 +9,7 @@ a ``SESSION_COMPLETE`` event is emitted or ``close()`` is called.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -51,6 +52,9 @@ class ClawcodexSession:
     def __init__(self, spec: SessionSpec) -> None:
         self._spec = spec
         self.session_id = spec.resume_session_id or f"ccx-{id(self)}"
+        self._native_session_id = spec.resume_session_id
+        self._structured_output = False
+        self._reported_query_turns = 0
         self.capabilities = BackendCapabilities(
             streaming_deltas=True,
             resumable=False,
@@ -104,6 +108,8 @@ class ClawcodexSession:
             await self._current_task
 
         text = content if isinstance(content, str) else str(content)
+        self._turn_open = False
+        self._reported_query_turns = 0
         self._current_task = asyncio.create_task(self._run_turn(text))
 
     def events(self) -> AsyncIterator[EventEnvelope]:
@@ -444,6 +450,7 @@ class ClawcodexSession:
         A ``None`` sentinel is always pushed to the queue after the turn
         finishes (success or failure), so ``events()`` never hangs.
         """
+        self._reported_query_turns = 0
         try:
             from extensions.api.query import (
                 QueryConfig,
@@ -469,13 +476,14 @@ class ClawcodexSession:
                 "permission_mode": self._spec.permission_mode,
                 "append_system_prompt": self._spec.system_prompt,
                 "tools": self._spec.tools_allow,
+                "disallowed_tools": self._spec.tools_deny or None,
                 "env": self._spec.env,
                 # resume_session_id is only populated for genuine resume
                 # requests (the core keeps run_id and resume_session_id
                 # separate); passing the orchestrator run_id here would make
                 # headless Session.resume() fail. None falls through to a
                 # fresh session, matching upstream's TEMP-DISABLED guard.
-                "resume_session_id": self._spec.resume_session_id,
+                "resume_session_id": self._native_session_id,
                 "run_id": self._spec.run_id,
                 "debug_log_path": self._spec.debug_log_path,
                 "agent_id": self._spec.extra.get("agent_id"),
@@ -504,6 +512,29 @@ class ClawcodexSession:
             if self._spec.approval is not None:
                 config_kwargs["approval_timeout_s"] = self._spec.approval.timeout_seconds
 
+            # AgentSDK and standalone releases expose different optional
+            # QueryConfig fields. Never silently discard a requested feature.
+            parameters = inspect.signature(QueryConfig).parameters
+            if "approval_hooks" in parameters:
+                config_kwargs["approval_hooks"] = True
+            self._structured_output = "structured_output" in parameters
+            if self._structured_output:
+                config_kwargs["structured_output"] = True
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if not accepts_kwargs:
+                for name in list(config_kwargs):
+                    if name not in parameters:
+                        if config_kwargs[name] is not None:
+                            raise RuntimeError(
+                                f"ClawCodex runtime does not support QueryConfig.{name}"
+                            )
+                        config_kwargs.pop(name)
+                if config_kwargs.get("max_turns") is None:
+                    config_kwargs.pop("max_turns", None)
+
             config = QueryConfig(**config_kwargs)
             runner = QueryRunner(config)
             self._current_runner = runner
@@ -512,7 +543,7 @@ class ClawcodexSession:
                 # PhaseComplete events, so derive turns from the stream —
                 # a new model output batch (TextDelta/ToolCallEvent) after a
                 # tool result starts a new turn.
-                if isinstance(event, (TextDelta, ToolCallEvent)) and not self._turn_open:
+                if not self._structured_output and isinstance(event, (TextDelta, ToolCallEvent)) and not self._turn_open:
                     self._native_turn_count += 1
                     self._turn_open = True
                 elif isinstance(event, ToolResultEvent):
@@ -523,7 +554,7 @@ class ClawcodexSession:
                     self._events_buffer.append(translated)
                 # Emit TURN_COMPLETE after each turn's tool results so the
                 # orchestrator's turn_count accumulates (Run Summary, stats).
-                if isinstance(event, ToolResultEvent) and self._native_turn_count:
+                if not self._structured_output and isinstance(event, ToolResultEvent) and self._native_turn_count:
                     await self._event_queue.put(
                         EventEnvelope(
                             seq=self._next_seq(),
@@ -604,8 +635,16 @@ class ClawcodexSession:
         # probe_transcript). Degrade: when missing, the approval branch
         # simply never matches and no approval event is emitted.
         ApprovalRequestEvent = getattr(_query_mod, "ApprovalRequestEvent", None)
+        SessionStarted = getattr(_query_mod, "SessionStarted", None)
 
-        if isinstance(event, TextDelta):
+        if SessionStarted is not None and isinstance(event, SessionStarted):
+            self._native_session_id = event.session_id
+            self.session_id = event.session_id
+            return EventEnvelope(
+                seq=self._next_seq(), timestamp=self._now(), kind=EventKind.SESSION_STARTED,
+                payload={"session_id": event.session_id, "model": event.model, "provider": event.provider},
+            )
+        elif isinstance(event, TextDelta):
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),
@@ -649,12 +688,14 @@ class ClawcodexSession:
                 payload={
                     "call_id": event.tool_use_id,
                     "ok": not event.result.get("is_error", False),
-                    "output": event.result.get("output", ""),
+                    "output": event.result.get("output") if event.result.get("output") is not None else event.result.get("error", ""),
+                    "error": event.result.get("error"),
                 },
             )
         elif isinstance(event, TurnComplete):
             turn_delta = max(int(event.turn or 0), 1)
             self._native_turn_count += turn_delta
+            self._reported_query_turns += turn_delta
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),
@@ -676,10 +717,30 @@ class ClawcodexSession:
                 },
             )
         elif isinstance(event, SessionComplete):
+            native_id = getattr(event, "session_id", None)
+            if native_id:
+                self._native_session_id = native_id
+                self.session_id = native_id
+            count = getattr(event, "num_turns", None)
+            missing_turns = max(0, count - self._reported_query_turns) if isinstance(count, int) else 0
+            if missing_turns:
+                self._native_turn_count += missing_turns
+                self._add_event(EventKind.TURN_COMPLETE, {
+                    "turn": self._native_turn_count, "turn_delta": missing_turns,
+                })
             payload: dict[str, Any] = {"reason": event.reason}
+            if self._native_session_id:
+                payload["session_id"] = self._native_session_id
             usage = getattr(event, "usage", None)
-            if usage:
+            if isinstance(usage, dict):
                 payload["usage"] = dict(usage)
+                self._cumulative_tokens += sum(
+                    int(usage.get(key) or 0) for key in ("input_tokens", "output_tokens")
+                )
+            error = getattr(event, "error", None)
+            if error:
+                payload["error"] = error
+                self._add_event(EventKind.ERROR, {"message": error})
             return EventEnvelope(
                 seq=self._next_seq(),
                 timestamp=self._now(),

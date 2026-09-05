@@ -1,15 +1,4 @@
-"""ClawcodexBackend — InProcess backend wrapping clawcodex QueryRunner.
-
-This is the reference InProcess backend.  It imports ``extensions.api.query``
-directly (the ONLY place in the orchestratord ecosystem outside of
-this backend package where this is allowed — it is the backend's
-responsibility to bridge its native types into the SPI).
-
-Per the strangler-fig migration (§6.1):
-- Phase B (current): this backend wraps QueryRunner directly
-- Phase C: freezes as shim, forwarding to orchestratord
-- Phase D: deleted, replaced by entry_points registration
-"""
+"""ClawCodex backend factory, native preflight, and isolated SDK workers."""
 
 from __future__ import annotations
 
@@ -22,17 +11,17 @@ from orchestratord.spi.backend import AgentBackend, SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.session import AgentSession
 
-from orchestratord_clawcodex.session import ClawcodexSession
+from orchestratord_clawcodex.process_session import ClawcodexProcessSession
 
 
 class ClawcodexBackend:
-    """InProcess backend that wraps the clawcodex QueryRunner."""
+    """Run each ClawCodex conversation in a separately owned Python process."""
 
     name = "clawcodex"
-    display_name = "ClawCodex (InProcess)"
+    display_name = "ClawCodex (isolated SDK)"
 
     def __init__(self) -> None:
-        self._sessions: list[ClawcodexSession] = []
+        self._sessions: list[ClawcodexProcessSession] = []
 
     def preflight(self, spec: SessionSpec) -> None:
         """Validate the clawcodex runtime and configured provider locally."""
@@ -56,6 +45,17 @@ class ClawcodexBackend:
             raise RuntimeError(
                 "extensions.api.query must export QueryConfig and QueryRunner."
             )
+        if not (
+            hasattr(query, "ApprovalRequestEvent")
+            and callable(getattr(query.QueryRunner, "approve", None))
+            and callable(getattr(query.QueryRunner, "cancel_pending_approvals", None))
+        ):
+            raise RuntimeError(
+                "ClawCodex approval bridge is incomplete. The configured "
+                "CLAWCODEX_SOURCE must expose ApprovalRequestEvent and "
+                "QueryRunner.approve/cancel_pending_approvals; update the "
+                "AgentSDK query bridge before starting this backend."
+            )
 
         provider = (spec.provider or "").strip()
         if not provider:
@@ -66,7 +66,17 @@ class ClawcodexBackend:
             raise RuntimeError(
                 f"clawcodex provider '{provider}' is not configured: {exc}"
             ) from exc
-        if not config.get("api_key"):
+        if provider == "openai-codex":
+            auth = importlib.import_module("src.auth.codex_oauth")
+            if not auth.get_codex_auth_status(include_cli=True).is_authenticated:
+                raise RuntimeError(
+                    "No OAuth credentials configured for openai-codex. Run "
+                    "'clawcodex-dev login' and select openai-codex."
+                )
+            return
+        if not config.get("api_key") and not importlib.import_module(
+            "src.auth.auth"
+        ).load_api_key(provider):
             raise RuntimeError(
                 f"No API key configured for provider '{provider}'. Run "
                 "'clawcodex-dev login' or configure its provider API key."
@@ -75,7 +85,7 @@ class ClawcodexBackend:
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             streaming_deltas=True,
-            resumable=False,
+            resumable=True,
             interrupt=False,
             approval_hooks=True,
             parallel_sessions=False,
@@ -91,20 +101,16 @@ class ClawcodexBackend:
             # → session_storage directory check → UNDETECTABLE), so every
             # failure mode degrades gracefully and never kills a run.
             resume_detection=True,
+            pausable=os.name == "posix",
         )
 
     def create_session(self, spec: SessionSpec) -> AgentSession:
-        session = ClawcodexSession(spec)
+        session = ClawcodexProcessSession(spec, self.capabilities())
         self._sessions.append(session)
         return session
 
-    def get_task_registry(self):
-        """Return a new RuntimeTaskRegistry for real-time message injection."""
-        try:
-            from clawcodex_ext.task_registry import RuntimeTaskRegistry
-            return RuntimeTaskRegistry()
-        except ImportError:
-            return None
+    def get_task_registry(self) -> None:
+        """Native task registries stay in the worker; core followups use send()."""
 
     def dispose(self) -> None:
         for s in self._sessions:

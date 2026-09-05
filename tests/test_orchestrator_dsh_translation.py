@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
 from orchestratord_dsh.session import DshSession
 
 from orchestratord.spi.backend import SessionSpec
@@ -83,6 +84,38 @@ def _run(script: list[dict], finish_reason: str | None = "completed") -> list:
     return asyncio.run(main())
 
 
+def test_streamed_text_is_not_repeated_by_complete_message() -> None:
+    events = _run([
+        {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "text": "Hel"}}},
+        {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "text": "lo"}}},
+        {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "Hello"}]}}},
+    ])
+    text = "".join(event.payload.get("text", "") for event in events
+                   if event.kind in {EventKind.TEXT, EventKind.TEXT_DELTA})
+    assert text == "Hello"
+
+
+def test_snapshot_preserves_missing_tail_and_repeated_later_message() -> None:
+    events = _run([
+        {"type": "assistant/chunk", "data": {"chunk": {"type": "text-delta", "text": "Hel"}}},
+        {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "Hello"}]}}},
+        {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "Hello"}]}}},
+    ])
+    text = [event.payload.get("text", "") for event in events
+            if event.kind in {EventKind.TEXT, EventKind.TEXT_DELTA}]
+    assert text == ["Hel", "lo", "Hello"]
+
+
+def test_reasoning_does_not_suppress_identical_answer() -> None:
+    events = _run([
+        {"type": "assistant/chunk", "data": {"chunk": {"type": "reasoning-delta", "text": "Hello"}}},
+        {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "Hello"}]}}},
+    ])
+    text = [event.payload.get("text", "") for event in events
+            if event.kind in {EventKind.TEXT, EventKind.TEXT_DELTA}]
+    assert text == ["Hello", "Hello"]
+
+
 def _tool_result_event(
     tool_call_id: str,
     text: str,
@@ -106,6 +139,23 @@ def _tool_result_event(
 
 
 class TestToolResultMapping:
+    @pytest.mark.parametrize("name,output,expected", [
+        ("bash", "[stderr]\nVIZ_EXPECTED_ERROR\n[exit code: 7]", False),
+        ("bash", "ok\n[exit code: 0]", True),
+        ("read", "Example: [exit code: 7]", True),
+        ("bash", "quoted [exit code: 7]\nnormal output", True),
+    ])
+    def test_native_bash_exit_footer_is_preserved_as_command_status(self, name, output, expected):
+        events = _run([
+            {"type": "tool/call", "data": {"callId": "one", "name": name, "arguments": {}}},
+            _tool_result_event("one", output),
+        ])
+        result = next(event.payload for event in events if event.kind is EventKind.TOOL_RESULT)
+        assert result["ok"] is expected
+        assert result["output"] == output
+        if not expected:
+            assert result["exit_code"] == 7
+
     def test_real_payload_shape_maps_call_id_and_output(self) -> None:
         """The real wire shape (data.message.content[0]) must be read —
         not the phantom ``data.callId`` / ``data.result``.
@@ -157,8 +207,8 @@ class TestToolResultMapping:
         payload = next(e for e in events if e.kind is EventKind.TOOL_RESULT).payload
         assert payload["output"] == "part one\npart two"
 
-    def test_tool_call_mapping_unchanged(self) -> None:
-        """TOOL_CALL was already correct (data.callId/name/arguments)."""
+    @pytest.mark.parametrize("arguments", [{"command": "ls"}, '{"command": "ls"}'])
+    def test_tool_call_normalizes_native_json_arguments(self, arguments) -> None:
         events = _run(
             [
                 {
@@ -166,7 +216,7 @@ class TestToolResultMapping:
                     "data": {
                         "callId": "call_1",
                         "name": "bash",
-                        "arguments": '{"command": "ls"}',
+                        "arguments": arguments,
                     },
                 },
                 {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
@@ -176,8 +226,16 @@ class TestToolResultMapping:
         assert payload == {
             "call_id": "call_1",
             "name": "bash",
-            "arguments": '{"command": "ls"}',
+            "arguments": {"command": "ls"},
         }
+
+    def test_tool_call_preserves_malformed_arguments_for_evidence(self) -> None:
+        events = _run([
+            {"type": "tool/call", "data": {"callId": "bad", "name": "bash", "arguments": '{"command":'}},
+            {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
+        ])
+        payload = next(e for e in events if e.kind is EventKind.TOOL_CALL).payload
+        assert payload["arguments"] == '{"command":'
 
 
 class TestErrorDetailPropagation:
@@ -278,6 +336,30 @@ class TestErrorDetailPropagation:
 
 class TestCostUsageReporting:
     """Real token usage must reach the SESSION_COMPLETE payload."""
+
+    def test_each_send_reports_only_its_own_usage(self) -> None:
+        session = _session([
+            {"type": "assistant/message", "data": {"message": {"content": []}, "usage": {"inputTokens": 100, "outputTokens": 10}}},
+            {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
+        ])
+
+        async def main():
+            totals = []
+            try:
+                for prompt in ["First request", "Follow-up request"]:
+                    await session.send(prompt)
+                    async for event in session.events():
+                        if event.kind is EventKind.SESSION_COMPLETE:
+                            totals.append(event.payload["usage"])
+                            break
+            finally:
+                await session.close()
+            return totals
+
+        assert asyncio.run(main()) == [
+            {"inputTokens": 100, "outputTokens": 10},
+            {"inputTokens": 100, "outputTokens": 10},
+        ]
 
     def test_usage_accumulated_across_messages(self) -> None:
         events = _run(

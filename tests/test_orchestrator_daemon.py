@@ -50,6 +50,16 @@ from orchestratord.tracker import Intent, MergeableStatus, PullRequestRef
 
 
 class TestReadOnlyChatFollowup(unittest.IsolatedAsyncioTestCase):
+    def test_chat_followup_does_not_require_pending_pr_feedback(self) -> None:
+        record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="chat")
+
+        self.assertFalse(Orchestrator._uses_review_feedback_followup(record))
+
+    def test_command_followup_uses_pending_pr_feedback(self) -> None:
+        record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="cli")
+
+        self.assertTrue(Orchestrator._uses_review_feedback_followup(record))
+
     async def test_completed_read_only_followup_returns_to_review(self) -> None:
         """A conversational follow-up is valid even without a new commit."""
         orch = Orchestrator.__new__(Orchestrator)
@@ -85,6 +95,54 @@ class TestReadOnlyChatFollowup(unittest.IsolatedAsyncioTestCase):
         self.assertIn("7", orch._state.pending_review)
         orch._sync_tracker_issue_state.assert_awaited_once_with("7", "pending_review")
         orch.status_dashboard.on_session_complete.assert_called_once_with("7")
+
+    async def test_active_chat_followup_waits_for_current_run_to_finish(self) -> None:
+        """A durable follow-up control file must not mutate a live run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            control_dir = workspace / ".orchestrator_control"
+            control_dir.mkdir()
+            control_file = control_dir / "followup_1.control"
+            control_file.write_text(
+                "followup\n7\nqueued question\n", encoding="utf-8"
+            )
+            record = SimpleNamespace(
+                status=IssueStatus.RUNNING,
+                intent=Intent.NONE,
+                intent_source="",
+                last_command="",
+                touch=MagicMock(),
+            )
+            orch = Orchestrator.__new__(Orchestrator)
+            orch._workspace_root = workspace
+            orch._registry = SimpleNamespace(
+                _records={"7": record},
+                _save=MagicMock(),
+            )
+            orch._state = SimpleNamespace(
+                running={"7": object()},
+                completed=set(),
+                claimed=set(),
+                pending_review=set(),
+                failed=set(),
+                retry_queue=[],
+            )
+            orch._sync_tracker_issue_state = AsyncMock()
+
+            await orch._process_control_commands()
+
+            self.assertTrue(control_file.exists())
+            self.assertIs(record.status, IssueStatus.RUNNING)
+            self.assertIs(record.intent, Intent.NONE)
+            orch._sync_tracker_issue_state.assert_not_awaited()
+
+            orch._state.running.clear()
+            await orch._process_control_commands()
+
+            self.assertFalse(control_file.exists())
+            self.assertIs(record.status, IssueStatus.PENDING)
+            self.assertIs(record.intent, Intent.FOLLOWUP)
+            orch._sync_tracker_issue_state.assert_awaited_once_with("7", "open")
 
 
 class TestWorkspaceIgnoreInvariants(unittest.TestCase):

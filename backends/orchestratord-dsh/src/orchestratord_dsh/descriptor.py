@@ -9,6 +9,8 @@ streaming_deltas 三者齐备)将其归类为 ``Cli`` —— 本 descriptor 沿�
 
 from __future__ import annotations
 
+import os
+
 from orchestratord.spi.backend_descriptor import BackendDescriptor, BackendFamily
 
 DSH_DESCRIPTOR = BackendDescriptor(
@@ -20,7 +22,7 @@ DSH_DESCRIPTOR = BackendDescriptor(
         "streaming_deltas",
         "parallel_sessions",
         "cost_reporting",
-    }),
+    } | ({"pausable"} if os.name == "posix" else set())),
     cli_command=None,
     env_prefix="DSH_",
     launch_header="DeepSeek Harness SDK (per-session subprocess)",

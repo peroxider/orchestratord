@@ -7,15 +7,18 @@
 
 from __future__ import annotations
 
+import os
+
 from orchestratord.spi.backend_descriptor import BackendDescriptor, BackendFamily
 
 CLAWCODEX_DEV_DESCRIPTOR = BackendDescriptor(
     name="clawcodex-dev",
     display_name="Claw Codex",
-    family=BackendFamily.IN_PROCESS,
+    family=BackendFamily.SDK_PROCESS,
     backend_package="orchestratord-clawcodex",
     capabilities=frozenset({
         "streaming_deltas",
+        "resumable",
         "approval_hooks",
         "cost_reporting",
         "tool_filtering",
@@ -28,9 +31,9 @@ CLAWCODEX_DEV_DESCRIPTOR = BackendDescriptor(
         # is unavailable (older clawcodex, broken install, etc.) — see
         # ClawcodexSession._probe_resume_via_storage.
         "resume_detection",
-    }),
+    } | ({"pausable"} if os.name == "posix" else set())),
     cli_command=None,
     env_prefix="CLAWCODEX_",
-    launch_header="Claw Codex agent (in-process SDK)",
+    launch_header="Claw Codex agent (isolated SDK worker)",
     model_discovery="probe",
 )

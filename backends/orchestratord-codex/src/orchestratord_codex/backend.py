@@ -166,6 +166,7 @@ class CodexBackend:
             takeover=False,
             # CLI backend has no cross-process probe path.
             resume_detection=False,
+            pausable=os.name == "posix",
         )
 
     def create_session(self, spec: SessionSpec) -> AgentSession:

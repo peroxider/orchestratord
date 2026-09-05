@@ -1498,7 +1498,7 @@ class GitSyncService:
             # Forward the per-tool audit log path so report_writer
             # can dual-write the NDJSON into the persistent layer.
             tool_events_path=getattr(session, "tool_events_path", None),
-            backend=getattr(session, "_snapshot_provider", None) or None,
+            backend=getattr(session, "_snapshot_backend", None) or None,
             model=getattr(session, "_snapshot_model", None) or None,
             started_at=getattr(session, "started_at", None),
             completed_at=getattr(session, "completed_at", None),
