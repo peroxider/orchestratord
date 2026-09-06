@@ -1,0 +1,175 @@
+/*
+ * Design tokens — docs/FEATURE_GAP_VS_MULTICA.md §5.3.1.
+ * Migrated from cli/dashboard.py's CSS variables (dark is the default theme).
+ */
+:root {
+  color-scheme: dark;
+
+  --bg-0: #0b0f17;
+  --bg-1: #11161f;
+  --bg-2: #161c26;
+  --bg-3: #1d2532;
+  --line: #232c3a;
+
+  --accent: #58a6ff;
+  --accent-2: #79c0ff;
+  --good: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --purple: #a371f7;
+  --vermillion: #db6d28;
+
+  --text-caption: #8b949e;
+  --text-body: #c9d1d9;
+  --text-title: #e6edf3;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-0: #ffffff;
+  --bg-1: #f6f8fa;
+  --bg-2: #eef1f4;
+  --bg-3: #e6e9ed;
+  --line: #d0d7de;
+
+  --accent: #0969da;
+  --accent-2: #1f6feb;
+  --good: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --purple: #8250df;
+  --vermillion: #bc4c00;
+
+  --text-caption: #6e7781;
+  --text-body: #1f2328;
+  --text-title: #0d1117;
+}
+
+/* ---- atomic component styles ---- */
+
+.ui-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  color: var(--text-body);
+  background: var(--bg-2);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.ui-button--md {
+  padding: 6px 12px;
+  font-size: 14px;
+}
+
+.ui-button--sm {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.ui-button--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b0f17;
+}
+
+.ui-button--secondary {
+  background: var(--bg-3);
+}
+
+.ui-button--ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+.ui-button--danger {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: #0b0f17;
+}
+
+.ui-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ui-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--text-caption);
+  white-space: nowrap;
+}
+
+.ui-badge--good {
+  color: var(--good);
+  border-color: var(--good);
+}
+
+.ui-badge--warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.ui-badge--bad {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.ui-badge--accent {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.ui-badge--purple {
+  color: var(--purple);
+  border-color: var(--purple);
+}
+
+.ui-card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.ui-card--interactive:hover {
+  border-color: var(--accent);
+}
+
+.ui-input,
+.ui-textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-body);
+  font: inherit;
+  padding: 6px 10px;
+}
+
+.ui-input {
+  height: 34px;
+}
+
+.ui-textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.ui-input:focus,
+.ui-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+}
