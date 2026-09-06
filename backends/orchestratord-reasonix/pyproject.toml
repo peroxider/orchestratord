@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-reasonix"
+version = "0.1.0"
+description = "Reasonix CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+reasonix = "orchestratord_reasonix:ReasonixBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+reasonix = "orchestratord_reasonix.descriptor:REASONIX_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
