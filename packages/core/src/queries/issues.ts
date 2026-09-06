@@ -1,0 +1,133 @@
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import type { ApiClient } from '../api/client'
+import type { Issue, IssueComment } from '../api/types'
+
+export interface IssueFilters {
+  status?: string
+  assignee_id?: string
+  label?: string
+}
+
+export function toQueryString(filters: IssueFilters): string {
+  const params = new URLSearchParams()
+  if (filters.status) params.set('status', filters.status)
+  if (filters.assignee_id) params.set('assignee_id', filters.assignee_id)
+  if (filters.label) params.set('label', filters.label)
+  const qs = params.toString()
+  return qs ? `?${qs}` : ''
+}
+
+export function useIssues(
+  client: ApiClient,
+  workspaceId: string,
+  filters?: IssueFilters,
+) {
+  return useQuery({
+    queryKey: ['issues', workspaceId, filters],
+    queryFn: () =>
+      client.request<Issue[]>(
+        `/api/workspaces/${workspaceId}/issues${toQueryString(filters ?? {})}`,
+      ),
+  })
+}
+
+export function useIssue(
+  client: ApiClient,
+  workspaceId: string,
+  issueId: string,
+) {
+  return useQuery({
+    queryKey: ['issues', workspaceId, issueId],
+    queryFn: () =>
+      client.request<Issue>(
+        `/api/workspaces/${workspaceId}/issues/${issueId}`,
+      ),
+  })
+}
+
+export interface CreateIssueInput {
+  title: string
+  description?: string
+  assignee_type?: string | null
+  assignee_id?: string | null
+  labels?: string[]
+}
+
+export function useCreateIssue(client: ApiClient, workspaceId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: CreateIssueInput) =>
+      client.request<Issue>(`/api/workspaces/${workspaceId}/issues`, {
+        method: 'POST',
+        body: JSON.stringify(input),
+      }),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ['issues', workspaceId] }),
+  })
+}
+
+export interface UpdateIssueInput {
+  status?: string
+  assignee_type?: string | null
+  assignee_id?: string | null
+  labels?: string[]
+}
+
+export function useUpdateIssue(
+  client: ApiClient,
+  workspaceId: string,
+  issueId: string,
+) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: UpdateIssueInput) =>
+      client.request<Issue>(
+        `/api/workspaces/${workspaceId}/issues/${issueId}`,
+        { method: 'PATCH', body: JSON.stringify(input) },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['issues', workspaceId] })
+      queryClient.invalidateQueries({
+        queryKey: ['issues', workspaceId, issueId],
+      })
+    },
+  })
+}
+
+export interface AddCommentInput {
+  body: string
+  author_type: string
+  author_id: string
+}
+
+export function useAddComment(
+  client: ApiClient,
+  workspaceId: string,
+  issueId: string,
+) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: AddCommentInput) =>
+      client.request<IssueComment>(
+        `/api/workspaces/${workspaceId}/issues/${issueId}/comments`,
+        { method: 'POST', body: JSON.stringify(input) },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ['issues', workspaceId, issueId],
+      }),
+  })
+}
+
+export function useMoveIssue(client: ApiClient, workspaceId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { issueId: string; status: string }) =>
+      client.request<Issue>(
+        `/api/workspaces/${workspaceId}/issues/${input.issueId}`,
+        { method: 'PATCH', body: JSON.stringify({ status: input.status }) },
+      ),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ['issues', workspaceId] }),
+  })
+}
