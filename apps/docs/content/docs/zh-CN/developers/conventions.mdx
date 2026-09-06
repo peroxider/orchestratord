@@ -1,0 +1,120 @@
+---
+title: 文案规范
+description: orchestratord Web 客户端使用的 EN/中文术语对照表。
+---
+
+本文档是 UI 文案的 **source of truth**。Web 客户端的 i18n 字典
+（`packages/views/src/i18n/locales/{en,zh-CN}.ts`）的键与译文均派生自下表。
+修改文案时，先改这里，再改字典。
+
+中文文案遵循 **动词优先**：使用"添加"、"分配"、"触发"，不使用"进行 XX 操作"。
+
+## Issue 状态
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `queued` | Queued | 排队中 |
+| `pending` | Pending | 待处理 |
+| `running` | Running | 运行中 |
+| `pending_review` | Pending review | 待评审 |
+| `completed` | Completed | 已完成 |
+| `failed` | Failed | 失败 |
+| `abandoned` | Abandoned | 已放弃 |
+| `verification_failed` | Verification failed | 验证失败 |
+
+## Inbox
+
+### 类型
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `approval_request` | Approval request | 审批请求 |
+| `clarification` | Clarification | 澄清 |
+| `failed` | Failed | 失败 |
+
+### 状态
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `open` | Open | 待处理 |
+| `assigned` | Assigned | 已分配 |
+| `resolved` | Resolved | 已解决 |
+| `dismissed` | Dismissed | 已忽略 |
+
+## 成员角色
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `owner` | Owner | 所有者 |
+| `admin` | Admin | 管理员 |
+| `member` | Member | 成员 |
+
+## Runtime 状态
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `online` | Online | 在线 |
+| `offline` | Offline | 离线 |
+| `disabled` | Disabled | 已禁用 |
+
+## 审计主体
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `member` | Member | 成员 |
+| `agent` | Agent | 智能体 |
+| `system` | System | 系统 |
+
+## Usage 维度
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `agent` | Agent | 智能体 |
+| `backend` | Backend | 后端 |
+| `issue` | Issue | 任务 |
+| `day` | Day | 日 |
+| `workspace` | Workspace | 工作区 |
+
+## 会话事件类型
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `text` | Text | 文本 |
+| `text_delta` | Text delta | 文本增量 |
+| `tool_call` | Tool call | 工具调用 |
+| `tool_result` | Tool result | 工具结果 |
+| `turn_complete` | Turn complete | 回合完成 |
+| `phase_complete` | Phase complete | 阶段完成 |
+| `session_complete` | Session complete | 会话完成 |
+| `error` | Error | 错误 |
+| `goal_set` | Goal set | 目标已设置 |
+| `goal_status` | Goal status | 目标状态 |
+| `goal_continue` | Goal continue | 目标继续 |
+| `goal_done` | Goal done | 目标完成 |
+| `goal_cleared` | Goal cleared | 目标已清除 |
+| `goal_paused` | Goal paused | 目标已暂停 |
+| `approval_request` | Approval request | 审批请求 |
+| `unknown` | Unknown | 未知 |
+
+## Agent 能力
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `streaming_deltas` | Streaming deltas | 流式增量 |
+| `resumable` | Resumable | 可恢复 |
+| `interrupt` | Interrupt | 可中断 |
+| `approval_hooks` | Approval hooks | 审批钩子 |
+| `parallel_sessions` | Parallel sessions | 并行会话 |
+| `cost_reporting` | Cost reporting | 成本报告 |
+| `tool_filtering` | Tool filtering | 工具过滤 |
+| `takeover` | Takeover | 接管 |
+| `goal_mode` | Goal mode | 目标模式 |
+| `resume_detection` | Resume detection | 恢复检测 |
+
+## Pull request 状态
+
+| Key | English | 中文 |
+| --- | --- | --- |
+| `open` | Open | 开启 |
+| `merged` | Merged | 已合并 |
+| `closed` | Closed | 已关闭 |

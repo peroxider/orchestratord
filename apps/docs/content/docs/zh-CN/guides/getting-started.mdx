@@ -1,0 +1,43 @@
+---
+title: 快速上手
+description: 安装、配置并启动你的第一个 runtime。
+---
+
+orchestratord 是一个编排一批 CLI 编码智能体的守护进程。本指南带你完成守护
+进程的安装、已装智能体后端的探测，以及 runtime 注册，从而让 Web 客户端驱动
+它们。
+
+## 前置条件
+
+- Python 3.11+（守护进程基于 FastAPI + 异步 SQLAlchemy）。
+- `PATH` 上有一个或多个受支持的智能体 CLI（如 `copilot`、`cursor`、
+  `kimi`、`qwen`）。
+- 可选：PostgreSQL 17 用于持久化（无数据库时可用内存模式）。
+
+## 安装
+
+```bash
+./install.sh
+```
+
+安装脚本会探测你环境中的受支持二进制，并报告它发现的后端及其能力矩阵。
+
+## 配置
+
+复制参考配置，将守护进程指向你的工作区：
+
+```bash
+export ORCHESTRATORD_DATABASE_URL=postgresql+asyncpg://multica:multica@127.0.0.1:5432/multica
+```
+
+当 `ORCHESTRATORD_DATABASE_URL` 未设置时，守护进程回退到内存存储 —— 便于本地
+实验。
+
+## 注册 runtime
+
+从 Web 客户端（Runtimes 页面）或 CLI 运行注册流程。注册成功后守护进程会返回
+一次性明文 token；请妥善保存 —— 它只持久化哈希，且不会再展示。
+
+## 下一步
+
+- [文案规范](/zh-CN/docs/developers/conventions) —— Web 客户端与本文档共享的术语。
