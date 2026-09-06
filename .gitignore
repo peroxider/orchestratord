@@ -24,6 +24,8 @@ AGENTS.md
 !.env.example
 /lib/
 /bin/
+.next/
+*.tsbuildinfo
 /node_modules/
 /node_modules/.pnpm/
 /apps/docs/node_modules/
