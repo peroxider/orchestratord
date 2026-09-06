@@ -1,0 +1,212 @@
+"""Issues REST API contract (§5.2.1).
+
+Pins the workspace-scoped issue board wire contract: create, patch
+status/assignee/labels, comment, and mention. Backed by the SQLAlchemy
+repository layer; tests run against the live ``orchestratord_test`` database
+(per-test truncation) and skip when Postgres is unreachable.
+
+Reference: docs/FEATURE_GAP_VS_MULTICA.md §5.2.1.
+"""
+from __future__ import annotations
+
+from uuid import uuid4
+
+import pytest
+
+pytestmark = pytest.mark.database
+
+
+async def _create(client, ws: str, **overrides) -> dict:
+    payload = {"title": "wire up dashboard"}
+    payload.update(overrides)
+    resp = await client.post(f"/api/workspaces/{ws}/issues", json=payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+class TestCreate:
+    async def test_create_returns_pending_issue(self, client) -> None:
+        ws = str(uuid4())
+        body = await _create(client, ws, title="triage backlog")
+        assert body["title"] == "triage backlog"
+        assert body["status"] == "pending"
+        assert body["workspace_id"] == ws
+        assert body["id"]
+
+    async def test_create_with_assignee_and_labels(self, client) -> None:
+        ws = str(uuid4())
+        aid = str(uuid4())
+        body = await _create(
+            client,
+            ws,
+            assignee_type="agent",
+            assignee_id=aid,
+            labels=["p0", "backend"],
+        )
+        assert body["assignee_type"] == "agent"
+        assert body["assignee_id"] == aid
+        assert body["labels"] == ["p0", "backend"]
+
+    async def test_create_with_invalid_assignee_rejected(self, client) -> None:
+        ws = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues",
+            json={"title": "x", "assignee_type": "team", "assignee_id": str(uuid4())},
+        )
+        assert resp.status_code == 422
+
+
+class TestList:
+    async def test_list_scoped_to_workspace(self, client) -> None:
+        ws_a, ws_b = str(uuid4()), str(uuid4())
+        await _create(client, ws_a, title="only in a")
+        resp = await client.get(f"/api/workspaces/{ws_b}/issues")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_list_filter_by_status(self, client) -> None:
+        ws = str(uuid4())
+        await _create(client, ws, title="done one")
+        issue = await _create(client, ws, title="running one")
+        await client.patch(
+            f"/api/workspaces/{ws}/issues/{issue['id']}",
+            json={"status": "running"},
+        )
+        resp = await client.get(
+            f"/api/workspaces/{ws}/issues", params={"status": "running"}
+        )
+        assert resp.status_code == 200
+        statuses = {i["status"] for i in resp.json()}
+        assert statuses == {"running"}
+
+    async def test_list_search_matches_title(self, client) -> None:
+        ws = str(uuid4())
+        await _create(client, ws, title="refactor auth")
+        await _create(client, ws, title="ship docs")
+        resp = await client.get(f"/api/workspaces/{ws}/issues", params={"q": "auth"})
+        assert [i["title"] for i in resp.json()] == ["refactor auth"]
+
+
+class TestDetail:
+    async def test_detail_includes_comments(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
+            json={
+                "body": "looks good",
+                "author_type": "member",
+                "author_id": str(uuid4()),
+            },
+        )
+        resp = await client.get(f"/api/workspaces/{ws}/issues/{issue['id']}")
+        assert resp.status_code == 200
+        assert [c["body"] for c in resp.json()["comments"]] == ["looks good"]
+
+    async def test_unknown_issue_404(self, client) -> None:
+        ws = str(uuid4())
+        resp = await client.get(f"/api/workspaces/{ws}/issues/{uuid4()}")
+        assert resp.status_code == 404
+
+
+class TestPatch:
+    async def test_patch_status(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.patch(
+            f"/api/workspaces/{ws}/issues/{issue['id']}", json={"status": "running"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "running"
+
+    async def test_patch_assignee_enforces_pair(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.patch(
+            f"/api/workspaces/{ws}/issues/{issue['id']}",
+            json={"assignee_type": "member"},
+        )
+        assert resp.status_code == 422
+
+    async def test_patch_can_clear_assignee(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws, assignee_type="agent", assignee_id=str(uuid4()))
+        resp = await client.patch(
+            f"/api/workspaces/{ws}/issues/{issue['id']}",
+            json={"assignee_type": None, "assignee_id": None},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["assignee_type"] is None
+        assert resp.json()["assignee_id"] is None
+
+
+class TestComment:
+    async def test_comment_round_trips(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
+            json={"body": "nice", "author_type": "agent", "author_id": str(uuid4())},
+        )
+        assert resp.status_code == 201
+        assert resp.json()["body"] == "nice"
+        assert resp.json()["issue_id"] == issue["id"]
+
+    async def test_comment_invalid_author_rejected(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
+            json={"body": "x", "author_type": "system", "author_id": str(uuid4())},
+        )
+        assert resp.status_code == 422
+
+    async def test_comment_detects_mentions(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
+            json={
+                "body": "cc @alice and @agent-name for review",
+                "author_type": "member",
+                "author_id": str(uuid4()),
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["mentions"] == ["alice", "agent-name"]
+
+
+class TestMention:
+    async def test_mention_agent(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        aid = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"agent_id": aid},
+        )
+        assert resp.status_code == 202
+        assert resp.json()["mentioned"] is True
+        assert resp.json()["agent_id"] == aid
+
+    async def test_mention_member(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        mid = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"member_id": mid},
+        )
+        assert resp.status_code == 202
+        assert resp.json()["member_id"] == mid
+
+    async def test_mention_requires_exactly_one_target(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        url = f"/api/workspaces/{ws}/issues/{issue['id']}/mention"
+        assert (await client.post(url, json={})).status_code == 422
+        assert (
+            await client.post(
+                url, json={"agent_id": str(uuid4()), "member_id": str(uuid4())}
+            )
+        ).status_code == 422
