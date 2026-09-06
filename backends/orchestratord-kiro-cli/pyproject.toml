@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-kiro-cli"
+version = "0.1.0"
+description = "AWS Kiro CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+kiro-cli = "orchestratord_kiro_cli:KiroBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+kiro-cli = "orchestratord_kiro_cli.descriptor:KIRO_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
