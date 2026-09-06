@@ -1,0 +1,18 @@
+[project]
+name = "orchestratord-zeroclaw"
+version = "0.1.0"
+description = "ZeroClaw CLI backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+zeroclaw = "orchestratord_zeroclaw:ZeroclawBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+zeroclaw = "orchestratord_zeroclaw.descriptor:ZEROCLAW_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
