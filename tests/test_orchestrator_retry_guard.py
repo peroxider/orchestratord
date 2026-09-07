@@ -220,3 +220,121 @@ async def test_retry_requeue_has_attempt_ceiling(tmp_path: Path) -> None:
         "超过重排上限后必须丢弃,不得无限循环"
     )
     assert record.next_retry_at is None, "丢弃时必须清理持久化的重试计划"
+
+
+# ---------------------------------------------------------------------------
+# Retry/close gating: a pending retry must NOT close the tracker issue
+# — GitCode cannot reopen, so the persisted retry plan used to be
+# dropped the moment the poller saw the closed state.
+# ---------------------------------------------------------------------------
+
+
+def _tracker_recorder() -> tuple[SimpleNamespace, list[tuple[str, str]]]:
+    calls: list[tuple[str, str]] = []
+
+    async def _sync(issue_id: str, state: str) -> bool:
+        calls.append((issue_id, state))
+        return True
+
+    return SimpleNamespace(update_issue_state=_sync), calls
+
+
+@pytest.mark.asyncio
+async def test_schedule_retry_returns_true_when_queued(tmp_path: Path) -> None:
+    orch = _orchestrator(tmp_path)
+    scheduled = await orch._schedule_retry(_session("total_timeout"))
+    assert scheduled is True
+    assert len(orch._state.retry_queue) == 1
+
+
+@pytest.mark.asyncio
+async def test_schedule_retry_returns_false_for_operator_stop(
+    tmp_path: Path,
+) -> None:
+    orch = _orchestrator(tmp_path)
+    scheduled = await orch._schedule_retry(_session("operator_stop"))
+    assert scheduled is False
+    assert orch._state.retry_queue == []
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_syncs_abandoned_not_failed(
+    tmp_path: Path,
+) -> None:
+    """When the retry limit is hit, the terminal ``abandoned`` state is
+    synced (closing the tracker issue) — and the caller's ``failed``
+    sync is skipped by the returned False.
+    """
+    orch = _orchestrator(tmp_path)
+    orch.workflow.agent.max_retry_attempts = 1
+    tracker, calls = _tracker_recorder()
+    orch.tracker = tracker
+    orch._state.retry_attempts["1"] = 1  # next attempt = 2 > max 1
+
+    scheduled = await orch._schedule_retry(_session("total_timeout"))
+
+    assert scheduled is False
+    assert orch._state.retry_queue == []
+    assert ("1", "abandoned") in calls
+    assert ("1", "failed") not in calls
+
+
+@pytest.mark.asyncio
+async def test_genuine_failure_keeps_tracker_issue_open_until_exhausted(
+    tmp_path: Path,
+) -> None:
+    """The caller-side gate: retry scheduled → no tracker state sync
+    (issue stays open+assigned); the close only lands when the retry
+    machinery gives up.
+    """
+    orch = _orchestrator(tmp_path)
+    tracker, calls = _tracker_recorder()
+    orch.tracker = tracker
+    session = _session("total_timeout")
+
+    retry_scheduled = await orch._schedule_retry(session)
+    if not retry_scheduled:
+        await orch._sync_tracker_issue_state(session.issue.id or "", "failed")
+
+    assert retry_scheduled is True
+    assert calls == [], "pending retry must not close the tracker issue"
+
+
+# ---------------------------------------------------------------------------
+# Run Summary root cause: the raw backend error must survive the
+# downstream guards that overwrite session_end_summary.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_summary_surfaces_backend_error_detail(
+    tmp_path: Path,
+) -> None:
+    orch = _orchestrator(tmp_path)
+    created: list[str] = []
+
+    async def _create(issue_id: str, body: str) -> int:
+        created.append(body)
+        return 42
+
+    orch.tracker = SimpleNamespace(create_comment=_create)
+
+    session = _session(None)
+    session.summary_comment_id = None
+    session.status = "failed"
+    session.session_end_reason = "no_changes_produced"
+    session.session_end_summary = (
+        "Agent did not produce any file modifications; no PR was created."
+    )
+    session.backend_error_detail = (
+        "opencode_unexpected_response: POST /v1/chat returned HTML"
+    )
+
+    await orch._update_issue_summary(session)
+
+    assert created, "summary comment must be created"
+    assert "no_changes_produced" in created[0]
+    assert "Backend error:" in created[0], (
+        "the raw backend error must reach the tracker summary"
+    )
+    assert "opencode_unexpected_response" in created[0]

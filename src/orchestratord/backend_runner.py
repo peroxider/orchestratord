@@ -471,10 +471,15 @@ class BackendRunner:
         if session.run_id is None:
             session.run_id = self._build_run_id(session)
 
-        # Backend identity and model provider are distinct. Publish both
-        # before the first diagnostics callback, including preflight failures.
+        # Backend identity and model provider are distinct. Publish all
+        # three before the first diagnostics callback, including preflight
+        # failures. Backends that do not consume ``agent.provider``
+        # (opencode, codex, …) fall back to the backend name so run
+        # reports show a meaningful Backend instead of ``n/a``.
         session._snapshot_backend = self.backend.name
-        session._snapshot_provider = self.agent_config.provider or ""
+        session._snapshot_provider = (
+            self.agent_config.provider or self.backend.name
+        )
         session._snapshot_model = self.agent_config.model or ""
 
         # Publish the run_id to the registry immediately so the dashboard
@@ -1327,6 +1332,14 @@ class BackendRunner:
                 session.status = "failed"
                 session.session_end_reason = "backend_error"
                 session.session_end_summary = backend_error_message
+                # Preserve the raw backend error on its own attribute:
+                # later failure paths (no-change guard, empty-branch
+                # guard) overwrite session_end_summary with their own
+                # generic text, which would mask the real root cause in
+                # the tracker Run Summary.
+                session.backend_error_detail = str(
+                    payload.get("code", "backend_error")
+                ) + ": " + backend_error_message
                 if progress_reporter is not None and hasattr(progress_reporter, "on_error"):
                     progress_reporter.on_error(error_msg)
 
@@ -1495,7 +1508,23 @@ class BackendRunner:
         event: EventEnvelope,
         session_context: dict[str, Any],
     ) -> None:
-        """Apply approval policy to a TOOL_CALL EventEnvelope."""
+        """Apply approval policy to a TOOL_CALL EventEnvelope.
+
+        For ``approval_hooks`` backends this evaluation is skipped: their
+        pre-execution APPROVAL_REQUEST gate is authoritative, and every
+        TOOL_CALL arrives **after** the tool already executed server-side
+        — a post-hoc "denied" line would be false (the tool did run) and
+        pure noise under the default ask policy.
+        """
+        try:
+            capabilities = self.backend.capabilities()
+        except Exception:  # noqa: BLE001 - policy guard: backend probe must not break the run
+            capabilities = None
+        if capabilities is not None and getattr(
+            capabilities, "approval_hooks", False
+        ):
+            return
+
         payload = event.payload
         policy_event = ToolCallEvent(
             tool_name=payload.get("name", "unknown"),
