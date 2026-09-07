@@ -11,3 +11,9 @@ kiro
 openclaw
 reasonix
 zeroclaw
+grok
+codebuddy
+qwenpaw
+qodercli
+qoderclicn
+deveco

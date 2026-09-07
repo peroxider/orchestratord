@@ -140,6 +140,8 @@ ${BOLD}Options:${RESET}
   --branch NAME           Git branch to checkout (default: main)
   --python PATH           Python interpreter to use (default: auto-detect)
   --no-venv               Install into current Python environment (no venv)
+  --with-db               Initialize/migrate the database schema after install
+  --with-web              Also build the Next.js Web client (apps/web)
   --dry-run               Show what would be done, don't execute
   --help                  Show this help message
 
@@ -634,6 +636,8 @@ parse_args() {
     NONINTERACTIVE=false
     DRY_RUN=false
     USE_VENV=true
+    WITH_WEB=false
+    WITH_DB=false
     USER_BACKENDS=""
     USER_PREFIX=""
     USER_PYTHON=""
@@ -701,6 +705,14 @@ parse_args() {
                 USE_VENV=false
                 shift
                 ;;
+            --with-web)
+                WITH_WEB=true
+                shift
+                ;;
+            --with-db)
+                WITH_DB=true
+                shift
+                ;;
             --dry-run)
                 DRY_RUN=true
                 shift
@@ -731,6 +743,58 @@ parse_args() {
     fi
 }
 
+# ── Database setup (--with-db, §3.5) ────────────────────────────────────────
+setup_database() {
+    local orch_cli=""
+    for candidate in \
+        "${VENV_DIR}/bin/orchestratord" \
+        "${VENV_DIR}/Scripts/orchestratord.exe"; do
+        if [[ -x "$candidate" ]]; then
+            orch_cli="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$orch_cli" ]]; then
+        orch_cli="$(command -v orchestratord || true)"
+    fi
+    if [[ -z "$orch_cli" ]]; then
+        warn "orchestratord CLI not found — skipping database setup"
+        return 1
+    fi
+
+    step "Setting up database schema"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [DRY RUN] ${orch_cli} db migrate  (fallback: db init)"
+        return 0
+    fi
+    # Alembic migrations are the canonical path; a fresh checkout that has
+    # not been baselined yet can fall back to create_all.
+    if ! "$orch_cli" db migrate; then
+        warn "db migrate failed — falling back to db init (create_all)"
+        "$orch_cli" db init
+    fi
+}
+
+# ── Web client build (--with-web, §3.5) ─────────────────────────────────────
+build_web_client() {
+    local web_dir="${ORCH_SRC}/apps/web"
+    if [[ ! -f "${web_dir}/package.json" ]]; then
+        warn "apps/web not found at ${web_dir} — skipping web client build"
+        return 1
+    fi
+    if ! command -v pnpm >/dev/null 2>&1; then
+        warn "pnpm not found on PATH — skipping web client build"
+        return 1
+    fi
+
+    step "Building Next.js web client (apps/web)"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [DRY RUN] (cd ${web_dir} && pnpm install && pnpm run build)"
+        return 0
+    fi
+    (cd "$web_dir" && pnpm install && pnpm run build)
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
@@ -752,6 +816,12 @@ main() {
     select_backends
     if [[ -n "${SELECTED_BACKENDS:-}" ]]; then
         install_backends
+    fi
+    if [[ "$WITH_DB" == "true" ]]; then
+        setup_database || true
+    fi
+    if [[ "$WITH_WEB" == "true" ]]; then
+        build_web_client || true
     fi
     verify_installation
     print_summary

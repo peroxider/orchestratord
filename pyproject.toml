@@ -11,6 +11,7 @@ dependencies = [
     # release instead of COMMIT and silently drop writes.  Pin to the last
     # known-good 0.29 line (SQLAlchemy issues #13241 and #13381).
     "asyncpg>=0.29.0,<0.30.0",
+    "croniter>=6.2.4",
     "fastapi>=0.110.0",
     "httpx>=0.28.1",
     "jinja2>=3.1.0",
@@ -74,6 +75,18 @@ pythonpath = [
     "src",
     "scripts",
     ".",
+]
+# §9.3 test chimney (multica ``agentintegration`` build tag analogue):
+# tests marked ``agentintegration`` exercise REAL user-installed agent
+# CLIs and are deselected by default — CI must never resolve/execute
+# them. Opt in explicitly with ``-m agentintegration`` (later ``-m``
+# wins over this addopts value) plus ``ORCHESTRATORD_SKIP_CLI_GUARD=1``
+# to lift the conftest PATH guard. The daemon's default CLI command
+# list is locked by ``scripts/agent-cli-command-names.txt`` via
+# ``tests/test_agent_cli_command_lock.py``.
+addopts = "-m 'not agentintegration'"
+markers = [
+    "agentintegration: smoke-tests a real user-installed agent CLI (deselected by default; opt in with -m agentintegration)",
 ]
 
 # Workspace source map: lets ``uv pip install -e .[backends]`` resolve

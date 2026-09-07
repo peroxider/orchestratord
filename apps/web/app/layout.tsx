@@ -2,6 +2,7 @@ import type { Metadata } from 'next'
 import type { ReactNode } from 'react'
 import '@orchestratord/ui/tokens.css'
 import './globals.css'
+import { WebProviders } from './web-providers'
 
 export const metadata: Metadata = {
   title: 'orchestratord',
@@ -10,8 +11,10 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" data-theme="dark">
-      <body>{children}</body>
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
+      <body>
+        <WebProviders>{children}</WebProviders>
+      </body>
     </html>
   )
 }
