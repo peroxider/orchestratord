@@ -1,10 +1,10 @@
 ---
 title: Conventions
-description: Canonical EN/中文 terminology used across the orchestratord UI.
+description: Canonical EN/中文/日本語 terminology used across the orchestratord UI.
 ---
 
 This document is the **source of truth** for UI copy. The Web client's i18n
-dictionaries (`packages/views/src/i18n/locales/{en,zh-CN}.ts`) derive their
+dictionaries (`packages/views/src/i18n/locales/{en,zh-CN,ja}.ts`) derive their
 keys and translations from the tables below. When a label changes, update it
 here first, then the dictionaries.
 
@@ -13,110 +13,137 @@ Chinese copy is **verb-first** (动词优先): "添加"、"分配"、"触发" �
 
 ## Issue status
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `queued` | Queued | 排队中 |
-| `pending` | Pending | 待处理 |
-| `running` | Running | 运行中 |
-| `pending_review` | Pending review | 待评审 |
-| `completed` | Completed | 已完成 |
-| `failed` | Failed | 失败 |
-| `abandoned` | Abandoned | 已放弃 |
-| `verification_failed` | Verification failed | 验证失败 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `queued` | Queued | 排队中 | キュー待ち |
+| `pending` | Pending | 待处理 | 未処理 |
+| `running` | Running | 运行中 | 実行中 |
+| `pending_review` | Pending review | 待评审 | レビュー待ち |
+| `completed` | Completed | 已完成 | 完了 |
+| `failed` | Failed | 失敗 | 失敗 |
+| `abandoned` | Abandoned | 已放弃 | 中止 |
+| `verification_failed` | Verification failed | 验证失败 | 検証失敗 |
 
 ## Inbox
 
 ### Kind
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `approval_request` | Approval request | 审批请求 |
-| `clarification` | Clarification | 澄清 |
-| `failed` | Failed | 失败 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `approval_request` | Approval request | 审批请求 | 承認リクエスト |
+| `clarification` | Clarification | 澄清 | 確認質問 |
+| `failed` | Failed | 失敗 | 失敗 |
 
 ### Status
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `open` | Open | 待处理 |
-| `assigned` | Assigned | 已分配 |
-| `resolved` | Resolved | 已解决 |
-| `dismissed` | Dismissed | 已忽略 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `open` | Open | 待处理 | 未対応 |
+| `assigned` | Assigned | 已分配 | 割り当て済み |
+| `resolved` | Resolved | 已解决 | 解決済み |
+| `dismissed` | Dismissed | 已忽略 | 却下 |
+
+### Actions (§7.4 kind views)
+
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `assign_me` | Assign to me | 分配给我 | 自分に割り当て |
+| `approve` | Approve | 批准 | 承認 |
+| `reject` | Reject | 拒绝 | 却下 |
+| `mark_answered` | Mark answered | 标记已回答 | 回答済みにする |
+| `mark_handled` | Mark handled | 标记已处理 | 処理済みにする |
+| `dismiss` | Dismiss | 忽略 | 却下 |
+
+### Hint copy
+
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `approval_request` | The agent is waiting for approval before it can continue. | 智能体正在等待批准后才能继续。 | エージェントが承認を待っており、続行できません。 |
+| `clarification` | The agent asked a clarifying question. | 智能体提出了一个澄清问题。 | エージェントが確認質問をしました。 |
+| `failed` | A session run failed and needs attention. | 一次会话运行失败，需要处理。 | セッションの実行が失敗しました。対応が必要です。 |
 
 ## Member roles
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `owner` | Owner | 所有者 |
-| `admin` | Admin | 管理员 |
-| `member` | Member | 成员 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `owner` | Owner | 所有者 | オーナー |
+| `admin` | Admin | 管理员 | 管理者 |
+| `member` | Member | 成员 | メンバー |
 
 ## Runtime status
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `online` | Online | 在线 |
-| `offline` | Offline | 离线 |
-| `disabled` | Disabled | 已禁用 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `online` | Online | 在线 | オンライン |
+| `offline` | Offline | 离线 | オフライン |
+| `disabled` | Disabled | 已禁用 | 無効 |
 
 ## Audit actors
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `member` | Member | 成员 |
-| `agent` | Agent | 智能体 |
-| `system` | System | 系统 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `member` | Member | 成员 | メンバー |
+| `agent` | Agent | 智能体 | エージェント |
+| `system` | System | 系统 | システム |
 
 ## Usage dimensions
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `agent` | Agent | 智能体 |
-| `backend` | Backend | 后端 |
-| `issue` | Issue | 任务 |
-| `day` | Day | 日 |
-| `workspace` | Workspace | 工作区 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `agent` | Agent | 智能体 | エージェント |
+| `backend` | Backend | 后端 | バックエンド |
+| `issue` | Issue | 任务 | Issue |
+| `day` | Day | 日 | 日 |
+| `workspace` | Workspace | 工作区 | ワークスペース |
+
+## Usage metrics
+
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `tokens_total` | Total tokens | 总 Tokens | 合計トークン |
+| `cost_usd` | Cost (USD) | 成本 (USD) | コスト (USD) |
+| `sessions` | Sessions | 会话数 | セッション数 |
 
 ## Session event kinds
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `text` | Text | 文本 |
-| `text_delta` | Text delta | 文本增量 |
-| `tool_call` | Tool call | 工具调用 |
-| `tool_result` | Tool result | 工具结果 |
-| `turn_complete` | Turn complete | 回合完成 |
-| `phase_complete` | Phase complete | 阶段完成 |
-| `session_complete` | Session complete | 会话完成 |
-| `error` | Error | 错误 |
-| `goal_set` | Goal set | 目标已设置 |
-| `goal_status` | Goal status | 目标状态 |
-| `goal_continue` | Goal continue | 目标继续 |
-| `goal_done` | Goal done | 目标完成 |
-| `goal_cleared` | Goal cleared | 目标已清除 |
-| `goal_paused` | Goal paused | 目标已暂停 |
-| `approval_request` | Approval request | 审批请求 |
-| `unknown` | Unknown | 未知 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `text` | Text | 文本 | テキスト |
+| `text_delta` | Text delta | 文本增量 | テキスト差分 |
+| `tool_call` | Tool call | 工具调用 | ツール呼び出し |
+| `tool_result` | Tool result | 工具结果 | ツール結果 |
+| `turn_complete` | Turn complete | 回合完成 | ターン完了 |
+| `phase_complete` | Phase complete | 阶段完成 | フェーズ完了 |
+| `session_complete` | Session complete | 会话完成 | セッション完了 |
+| `error` | Error | 错误 | エラー |
+| `goal_set` | Goal set | 目标已设置 | 目標設定済み |
+| `goal_status` | Goal status | 目标状态 | 目標ステータス |
+| `goal_continue` | Goal continue | 目标继续 | 目標継続 |
+| `goal_done` | Goal done | 目标完成 | 目標完了 |
+| `goal_cleared` | Goal cleared | 目标已清除 | 目標クリア |
+| `goal_paused` | Goal paused | 目标已暂停 | 目標一時停止 |
+| `approval_request` | Approval request | 审批请求 | 承認リクエスト |
+| `unknown` | Unknown | 未知 | 不明 |
 
 ## Agent capabilities
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `streaming_deltas` | Streaming deltas | 流式增量 |
-| `resumable` | Resumable | 可恢复 |
-| `interrupt` | Interrupt | 可中断 |
-| `approval_hooks` | Approval hooks | 审批钩子 |
-| `parallel_sessions` | Parallel sessions | 并行会话 |
-| `cost_reporting` | Cost reporting | 成本报告 |
-| `tool_filtering` | Tool filtering | 工具过滤 |
-| `takeover` | Takeover | 接管 |
-| `goal_mode` | Goal mode | 目标模式 |
-| `resume_detection` | Resume detection | 恢复检测 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `streaming_deltas` | Streaming deltas | 流式增量 | ストリーミング差分 |
+| `resumable` | Resumable | 可恢复 | 再開可能 |
+| `interrupt` | Interrupt | 可中断 | 割り込み可能 |
+| `approval_hooks` | Approval hooks | 审批钩子 | 承認フック |
+| `parallel_sessions` | Parallel sessions | 并行会话 | 並行セッション |
+| `cost_reporting` | Cost reporting | 成本报告 | コストレポート |
+| `tool_filtering` | Tool filtering | 工具过滤 | ツールフィルタ |
+| `takeover` | Takeover | 接管 | テイクオーバー |
+| `goal_mode` | Goal mode | 目标模式 | 目標モード |
+| `resume_detection` | Resume detection | 恢复检测 | 再開検出 |
 
 ## Pull request state
 
-| Key | English | 中文 |
-| --- | --- | --- |
-| `open` | Open | 开启 |
-| `merged` | Merged | 已合并 |
-| `closed` | Closed | 已关闭 |
+| Key | English | 中文 | 日本語 |
+| --- | --- | --- | --- |
+| `open` | Open | 开启 | オープン |
+| `merged` | Merged | 已合并 | マージ済み |
+| `closed` | Closed | 已关闭 | クローズ |
