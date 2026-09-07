@@ -116,6 +116,24 @@ def _resolve_implementation_class(package_name: str) -> type | None:
     return None
 
 
+def _derive_implementation_descriptor(
+    desc: BackendDescriptor,
+) -> BackendDescriptor | None:
+    """§8.2.2 — ``omp`` → ``pi`` 这类 builtin runtime 派生回落。
+
+    当 *desc* 自身的 ``backend_package`` 没有注册实现类时，按其
+    ``runtime_id``（其次 ``protocol_family`` 同名 descriptor）指向的源
+    runtime descriptor 找实现。返回源 descriptor；无法派生时返回 ``None``。
+    """
+    target = desc.runtime_id or desc.protocol_family
+    if not target or target == desc.name:
+        return None
+    source = discover_descriptors().get(target)
+    if source is None or source.name == desc.name:
+        return None
+    return source
+
+
 def _capabilities_to_set(caps: BackendCapabilities) -> set[str]:
     """从 :class:`BackendCapabilities` dataclass 实例提取真实位集合。
 
@@ -155,18 +173,40 @@ def resolve_backend(
         raise BackendNotFoundError(identifier)
 
     impl_cls = _resolve_implementation_class(desc.backend_package)
+    impl_desc = desc
     if impl_cls is None:
-        raise BackendNotFoundError(
-            f"{identifier!r} → backend package "
-            f"{desc.backend_package!r} 未注册 AgentBackend 实现"
-        )
+        # §8.2.2 builtin-runtime derivation: a derived runtime (omp → pi)
+        # falls back to the implementation registered by the runtime its
+        # ``runtime_id`` (then ``protocol_family``) points at.
+        derived = _derive_implementation_descriptor(desc)
+        if derived is not None:
+            source_cls = _resolve_implementation_class(derived.backend_package)
+            if source_cls is not None:
+                impl_desc = derived
+                impl_cls = source_cls
+                logger.info(
+                    "backend %r derives from runtime %r (protocol_family=%r)"
+                    " — resolving implementation from %r",
+                    identifier,
+                    derived.name,
+                    derived.protocol_family,
+                    derived.backend_package,
+                )
+        if impl_cls is None:
+            raise BackendNotFoundError(
+                f"{identifier!r} → backend package "
+                f"{desc.backend_package!r} 未注册 AgentBackend 实现"
+            )
 
     # Forward descriptor-declared constructor hints (e.g. codex's
     # ``prefer`` runtime override — DESIGN_backends_hardening.md §1.2).
     # The implementation class accepts the hint only when it opts in;
     # unknown hints are ignored so third-party backends keep working.
+    # A deriving runtime's own hint wins over the source runtime's.
     impl_kwargs: dict[str, object] = {}
     prefer = desc.extra_metadata.get("prefer")
+    if prefer is None and impl_desc is not desc:
+        prefer = impl_desc.extra_metadata.get("prefer")
     if prefer is not None:
         impl_kwargs["prefer"] = prefer
     try:
@@ -233,6 +273,8 @@ def list_backends() -> list[dict[str, str]]:
                 "display_name": d.display_name,
                 "family": d.family.value,
                 "backend_package": d.backend_package,
+                "protocol_family": d.protocol_family,
+                "runtime_id": d.runtime_id,
             }
             for d in descriptors.values()
         ],

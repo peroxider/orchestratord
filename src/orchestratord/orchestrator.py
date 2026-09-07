@@ -362,6 +362,7 @@ class Orchestrator:
             workspace_root=workspace_root,
             workflow_path=self._workflow_path,
             started_at=self._metadata_started_at,
+            **self._metadata_extras(),
         )
 
         # Clarification handling (three-channel flow)
@@ -1094,7 +1095,39 @@ class Orchestrator:
                 workspace_root=self._workspace_root,
                 workflow_path=self._workflow_path,
                 started_at=self._metadata_started_at,
+                **self._metadata_extras(),
             )
+
+    def _metadata_extras(self) -> dict:
+        """Launch-context fields persisted into metadata.json.
+
+        The heartbeat loop rewrites metadata every 30s, so extras must be
+        supplied on EVERY write — omitting them here would wipe the
+        backend/runtime fields within one heartbeat interval.
+        """
+        agent_cfg = getattr(self.workflow, "agent", None)
+        sandbox_cfg = getattr(self.workflow, "sandbox", None)
+        approval = getattr(sandbox_cfg, "approval_policy", None)
+        runtime = {
+            "provider": getattr(agent_cfg, "provider", None),
+            "model": getattr(agent_cfg, "model", None),
+            "permission_mode": getattr(agent_cfg, "permission_mode", None),
+            "max_concurrent_agents": getattr(
+                agent_cfg, "max_concurrent_agents", None
+            ),
+            "poll_interval_ms": getattr(
+                getattr(self.workflow, "polling", None), "interval_ms", None
+            ),
+            # A structured dict is the sandbox default; the resolved
+            # auto-approve/ask behavior is what approval_policy resolves to
+            # at run time — status only shows the configured form.
+            "approval_policy": "structured" if isinstance(approval, dict) else approval,
+        }
+        backend_name = (
+            getattr(self.agent_runner, "backend_name", None)
+            or getattr(self._backend, "name", None)
+        )
+        return {"backend_name": backend_name, "runtime": runtime}
 
     async def shutdown(self) -> None:
         """Signal graceful shutdown and clean up metadata."""
@@ -3867,6 +3900,17 @@ class Orchestrator:
                                 f"branch {sync_result.branch_name}"
                             )
                             session.status = "completed"
+                            # Persist the salvage reason now: the earlier
+                            # update_report already wrote the pre-salvage
+                            # failure reason, and the completed branch of
+                            # the terminal chain only calls mark_completed.
+                            # `orchestratord issue review --reject` detects
+                            # salvageable completions via this end reason.
+                            self._registry.update_report(
+                                session.issue.id or "",
+                                session_end_reason=session.session_end_reason,
+                                session_end_summary=session.session_end_summary,
+                            )
                 finally:
                     await self.workspace.run_after_run_hook(
                         session.workspace,
@@ -4006,6 +4050,38 @@ class Orchestrator:
                 # cancelled instead of silently dropping it.
                 # Also clean up the workspace immediately to avoid
                 # leaking worktrees on unexpected cancellation.
+                if self._shutdown_event.is_set():
+                    # Daemon shutdown (SIGTERM teardown cancels pending
+                    # tasks via asyncio.run) interrupted the run. The
+                    # issue did not fail on its own merits — release the
+                    # claim so the next daemon start re-dispatches it,
+                    # instead of leaving a FAILED record that permanently
+                    # blocks dispatch (terminal registry entries are
+                    # skipped by _poll_and_dispatch).
+                    logger.warning(
+                        "Agent run interrupted by daemon shutdown "
+                        "issue_id=%s — releasing claim for re-dispatch",
+                        session.issue.id,
+                    )
+                    session.status = "released"
+                    session.session_end_reason = "shutdown_released"
+                    session.session_end_summary = (
+                        "daemon shutdown interrupted the run; issue requeued"
+                    )
+                    session.verification_status = None
+                    session.verification_output = None
+                    self._registry.mark_pending(session.issue.id or "")
+                    try:
+                        await self._sync_tracker_issue_state(
+                            session.issue.id or "", "open"
+                        )
+                    except Exception:
+                        logger.debug(
+                            "tracker release sync failed issue_id=%s",
+                            session.issue.id,
+                            exc_info=True,
+                        )
+                    return
                 logger.warning(
                     "Agent run cancelled issue_id=%s — cleaning up workspace",
                     session.issue.id,
@@ -4103,7 +4179,9 @@ class Orchestrator:
                                     "overall_status": "completed",
                                 }
                             )
-                        elif _status:
+                        elif _status and _status != "released":
+                            # A shutdown-released run is not an error — the
+                            # issue was requeued, so no journal error event.
                             self._viz_journal.write_event(
                                 {
                                     "type": "error",
@@ -4276,6 +4354,19 @@ class Orchestrator:
                     self._registry.mark_failed(session.issue.id or "")
                     await self._sync_tracker_issue_state(session.issue.id or "", "failed")
                     # Do NOT schedule retry — operator explicitly cancelled.
+                elif session.status == "released":
+                    # Claim released by daemon shutdown (handled in the
+                    # CancelledError branch above): the registry record is
+                    # back to PENDING and the tracker re-opened. Falling
+                    # through to the generic-failure branch would clobber
+                    # mark_pending with mark_failed, re-sync the tracker to
+                    # 'failed', emit a spurious issue.failed event and
+                    # schedule a retry — i.e. reintroduce the exact bug the
+                    # release path exists to fix.
+                    logger.info(
+                        "Issue %s released by shutdown — left PENDING for re-dispatch",
+                        session.issue.id,
+                    )
                 else:
                     self.status_dashboard.on_session_failed(
                         session.issue.id or "",
@@ -4311,12 +4402,31 @@ class Orchestrator:
                         )
                     else:
                         self._registry.mark_failed(session.issue.id or "")
+                    # Persist the end reason / summary for EVERY failure
+                    # path, not only the operator_failure_detail one: a
+                    # bare mark_failed leaves session_end_reason unset in
+                    # the registry, which made fast-fail runs (e.g. backend
+                    # spawn errors) impossible to diagnose after the fact.
+                    self._registry.update_report(
+                        session.issue.id or "",
+                        session_end_reason=getattr(
+                            session, "session_end_reason", None
+                        ),
+                        session_end_summary=getattr(
+                            session, "session_end_summary", ""
+                        ),
+                    )
                     await self._sync_tracker_issue_state(session.issue.id or "", "failed")
                     # Schedule retry
                     await self._schedule_retry(session)
 
-                # Update summary comment for non-completed paths
-                if session.issue.id not in self._state.pending_review:
+                # Update summary comment for non-completed paths (a
+                # shutdown-released run posts no failure summary — the
+                # issue is requeued, not failed).
+                if (
+                    session.issue.id not in self._state.pending_review
+                    and session.status != "released"
+                ):
                     await self._update_issue_summary(session)
 
                 # Cleanup workspace based on preservation policy

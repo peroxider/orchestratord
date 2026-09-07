@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from orchestratord.backend_registry import resolve_backend
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
+from orchestratord.runtime import LiveSessionRegistry
 from orchestratord.spi.approval import ApprovalDecision
 from orchestratord.spi.backend import AgentBackend, SessionSpec
 from orchestratord.spi.events import EventEnvelope, EventKind
@@ -35,7 +36,7 @@ from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEvent
 from .approval_policy import (
     ApprovalPolicy,
     ToolCallEvent,
-    get_approval_policy,
+    resolve_approval_policy,
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
 from .control_socket import ControlSocket
@@ -264,12 +265,21 @@ class BackendRunner:
         self.backend_name = backend_name
         self.config = config or {}
         self.max_turns = agent_config.max_turns if agent_config is not None else 0
-        self._approval_policy: ApprovalPolicy = get_approval_policy(
-            (getattr(sandbox_config, "approval_policy", "never") or "never")
-            if sandbox_config is not None
-            else "never"
+        # resolve_approval_policy honors an explicit sandbox.approval_policy
+        # and otherwise bridges agent.permission_mode (e.g. bypassPermissions
+        # → auto-approve) instead of silently failing closed to 'ask'.
+        self._approval_policy: ApprovalPolicy = resolve_approval_policy(
+            sandbox_config, agent_config
         )
         self._sleep: Callable[..., Any] = asyncio.sleep
+        # In-process map of active AgentSession handles keyed by session id
+        # (§5.2.3). The API layer reaches running backends through this
+        # registry to forward approve / deny / pause / resume / stop. Stays
+        # empty unless callers explicitly ``registry.register(...)`` after
+        # the SPI session is started — the Phase A wiring leaves the CLI
+        # path that does so for §5.2.3 follow-up, but every runner gets
+        # one so tests and the API layer can reach it.
+        self.registry = LiveSessionRegistry()
 
     def get_task_registry(self) -> Any | None:
         """Return the optional registry supplied by the configured backend."""
