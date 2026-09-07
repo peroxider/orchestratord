@@ -212,18 +212,31 @@ def test_opencode_approval_request_is_persistable() -> None:
     from orchestratord.spi.backend import SessionSpec
 
     session = OpenCodeSession(SessionSpec(cwd="."))
-    session._ingest_sse(  # noqa: SLF001 - adapter contract seam
+    # Real opencode 1.18.x protocol: approvals arrive as
+    # ``permission.v2.asked`` frames on the global bus (the pre-rewrite
+    # ``_ingest_sse``/``approval.request`` seam no longer exists).
+    session._ingest_frame(  # noqa: SLF001 - adapter contract seam
         {
-            "event": "approval.request",
-            "request_id": "req-1",
-            "call_id": "call-1",
-            "tool_name": "Shell",
-            "arguments": {"command": "pwd"},
-            "message": "Allow command?",
-        }
+            "id": "evt-1",
+            "type": "permission.v2.asked",
+            "data": {
+                "sessionID": "ses_contract1",
+                "id": "req-1",
+                "action": "Shell",
+                "resources": ["pwd"],
+                "source": {
+                    "type": "tool",
+                    "messageID": "msg-1",
+                    "callID": "call-1",
+                },
+            },
+        },
+        "ses_contract1",
     )
 
-    events = list(session._events)  # noqa: SLF001 - adapter contract seam
+    events = []
+    while not session._queue.empty():  # noqa: SLF001 - adapter contract seam
+        events.append(session._queue.get_nowait())
     assert events[0].kind is EventKind.APPROVAL_REQUEST
     assert events[0].payload["request_id"] == "req-1"
 

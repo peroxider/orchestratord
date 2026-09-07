@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.session import ResumeStatus
 
-
 # ---------------------------------------------------------------------------
 # CodexAppServerSession — needs worker; tests stub ``_worker.session_load``
 # ---------------------------------------------------------------------------
@@ -203,12 +202,13 @@ class TestOpenCodeProbeResume:
     def test_resume_404_returns_rejected(self) -> None:
         from orchestratord_opencode.session import OpenCodeSession
 
-        spec = SessionSpec(cwd="/tmp", resume_session_id="sess-gone")
+        spec = SessionSpec(cwd="/tmp", resume_session_id="ses_gone")
         session = OpenCodeSession(spec)
         fake_client = AsyncMock()
         resp = AsyncMock()
         resp.status_code = 404
-        fake_client.post = AsyncMock(return_value=resp)
+        # Real protocol: probe is GET /api/session/{id} (404 = gone).
+        fake_client.get = AsyncMock(return_value=resp)
         fake_client.aclose = AsyncMock()
         session._client = fake_client
         try:
@@ -220,17 +220,34 @@ class TestOpenCodeProbeResume:
     def test_resume_500_returns_undetectable(self) -> None:
         from orchestratord_opencode.session import OpenCodeSession
 
-        spec = SessionSpec(cwd="/tmp", resume_session_id="sess-x")
+        spec = SessionSpec(cwd="/tmp", resume_session_id="ses_x")
         session = OpenCodeSession(spec)
         fake_client = AsyncMock()
         resp = AsyncMock()
         resp.status_code = 500
-        fake_client.post = AsyncMock(return_value=resp)
+        fake_client.get = AsyncMock(return_value=resp)
         fake_client.aclose = AsyncMock()
         session._client = fake_client
         try:
             status = asyncio.run(session.probe_resume())
             assert status is ResumeStatus.UNDETECTABLE
+        finally:
+            session.close_sync()
+
+    def test_resume_non_ses_id_is_undetectable(self) -> None:
+        """Run/stage ids are not opencode session ids — no HTTP probe,
+        honest UNDETECTABLE (never a misleading REJECTED terminal).
+        """
+        from orchestratord_opencode.session import OpenCodeSession
+
+        spec = SessionSpec(cwd="/tmp", resume_session_id="stage-01-abcdef")
+        session = OpenCodeSession(spec)
+        fake_client = AsyncMock()
+        session._client = fake_client
+        try:
+            status = asyncio.run(session.probe_resume())
+            assert status is ResumeStatus.UNDETECTABLE
+            fake_client.get.assert_not_called()
         finally:
             session.close_sync()
 

@@ -1,19 +1,20 @@
 """OpenCodeBackend — Protocol backend connecting to opencode serve.
 
 Family: Protocol
-Capabilities: streaming_deltas approval_hooks parallel_sessions goal_mode goal_mode
+Capabilities: streaming_deltas approval_hooks parallel_sessions resume_detection
 """
 
 from __future__ import annotations
 
-import importlib
+import logging
 import shutil
 
-from orchestratord.spi.backend import AgentBackend, SessionSpec
+from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.session import AgentSession
-
 from orchestratord_opencode.session import OpenCodeSession
+
+logger = logging.getLogger(__name__)
 
 
 class OpenCodeBackend:
@@ -29,7 +30,7 @@ class OpenCodeBackend:
     def __init__(self) -> None:
         self._sessions: list[OpenCodeSession] = []
 
-    def preflight(self, spec: SessionSpec) -> None:  # noqa: ARG002
+    def preflight(self, spec: SessionSpec) -> None:
         """Verify OpenCode and its HTTP transport are available locally."""
         if shutil.which("opencode") is None:
             raise RuntimeError(
@@ -53,8 +54,8 @@ class OpenCodeBackend:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # opencode serve exposes session/load HTTP probe
-            # (see session.py:probe_resume).
+            # opencode serve exposes GET /api/session/{id} as the
+            # resume probe (see session.py:probe_resume).
             resume_detection=True,
         )
 
@@ -68,5 +69,5 @@ class OpenCodeBackend:
             try:
                 s.close_sync()
             except Exception:
-                pass
+                logger.debug("opencode session teardown failed", exc_info=True)
         self._sessions.clear()
