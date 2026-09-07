@@ -15,11 +15,13 @@ Reference: docs/FEATURE_GAP_VS_MULTICA.md §5.2.4.
 """
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 
+from orchestratord.cost.estimator import reset_pricing_cache
 from orchestratord.domain.agent import CORE_CAPABILITY_BITS
 
 pytestmark = pytest.mark.database
@@ -180,3 +182,110 @@ class TestAgentUsage:
         body = (await client.get(f"/api/agents/{agent['id']}/usage")).json()
         assert body["totals"]["tokens_in"] == 10
         assert body["totals"]["sessions"] == 1
+
+
+class TestCostEstimation:
+    """§7.2 estimation through the ingestion path (DB-level).
+
+    ``record_usage`` estimates ``cost_usd`` only when the record arrives
+    with ``cost_usd == 0``; the estimated value must land in the
+    ``usage_aggregates`` bucket so GET totals reflect it. Pricing is
+    pinned via ``ORCHESTRATORD_PRICING_JSON`` so assertions are exact
+    regardless of the repo ``pricing.json`` contents.
+    """
+
+    TABLE = {
+        "default": {"input_per_mtok": 3.0, "output_per_mtok": 15.0},
+        "models": {
+            "test-model-exact": {"input_per_mtok": 1.0, "output_per_mtok": 2.0},
+            "test-model-prefixed-20260101": {
+                "input_per_mtok": 5.0,
+                "output_per_mtok": 5.0,
+            },
+        },
+    }
+
+    @pytest.fixture(autouse=True)
+    def _pricing(self, tmp_path, monkeypatch):
+        path = tmp_path / "pricing.json"
+        path.write_text(json.dumps(self.TABLE), encoding="utf-8")
+        monkeypatch.setenv("ORCHESTRATORD_PRICING_JSON", str(path))
+        reset_pricing_cache()
+        yield
+        # Later tests must reload the canonical table, not this tmp one.
+        reset_pricing_cache()
+
+    async def test_zero_cost_with_model_is_estimated_and_persisted(self, client) -> None:
+        ws = uuid4()
+        resp = await client.post(
+            f"/api/workspaces/{ws}/usage",
+            json={
+                "tokens_in": 1_000_000,
+                "tokens_out": 500_000,
+                "model": "test-model-exact",
+            },
+        )
+        assert resp.status_code == 201
+        # 1M * 1.0 + 0.5M * 2.0 = 2.0 USD
+        assert resp.json()["cost_usd"] == pytest.approx(2.0)
+        body = (await client.get(f"/api/workspaces/{ws}/usage")).json()
+        assert body["totals"]["cost_usd"] == pytest.approx(2.0)
+        assert body["totals"]["sessions"] == 1
+
+    async def test_prefix_match_wins_over_default(self, client) -> None:
+        ws = uuid4()
+        resp = await client.post(
+            f"/api/workspaces/{ws}/usage",
+            json={
+                "tokens_in": 1_000_000,
+                "tokens_out": 1_000_000,
+                "model": "test-model-prefixed-20260101",
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["cost_usd"] == pytest.approx(10.0)
+
+    async def test_unknown_model_falls_back_to_default(self, client) -> None:
+        ws = uuid4()
+        resp = await client.post(
+            f"/api/workspaces/{ws}/usage",
+            json={
+                "tokens_in": 1_000_000,
+                "tokens_out": 0,
+                "model": "never-seen-model",
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["cost_usd"] == pytest.approx(3.0)
+
+    async def test_explicit_cost_is_never_overwritten(self, client) -> None:
+        ws = uuid4()
+        resp = await client.post(
+            f"/api/workspaces/{ws}/usage",
+            json={
+                "tokens_in": 1_000_000,
+                "tokens_out": 0,
+                "cost_usd": 0.42,
+                "model": "test-model-exact",
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["cost_usd"] == pytest.approx(0.42)
+
+    async def test_unpriceable_record_stays_at_zero(self, client, tmp_path, monkeypatch) -> None:
+        # A table with no ``default`` and no matching model cannot price
+        # the record; ingestion must not fail — the record lands at 0.
+        path = tmp_path / "no_default.json"
+        path.write_text(json.dumps({"models": {}}), encoding="utf-8")
+        monkeypatch.setenv("ORCHESTRATORD_PRICING_JSON", str(path))
+        reset_pricing_cache()
+        try:
+            ws = uuid4()
+            resp = await client.post(
+                f"/api/workspaces/{ws}/usage",
+                json={"tokens_in": 10, "tokens_out": 5, "model": "unknown"},
+            )
+            assert resp.status_code == 201
+            assert resp.json()["cost_usd"] == 0.0
+        finally:
+            reset_pricing_cache()

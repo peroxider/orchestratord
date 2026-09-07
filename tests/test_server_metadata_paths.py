@@ -88,3 +88,195 @@ def test_status_matches_absolute_metadata(project: Path) -> None:
 
     assert found is not None
     assert found_path == md
+
+
+# ---------------------------------------------------------------------------
+# Launch-context disclosure (backend / runtime / issue counts)
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_writer_persists_backend_and_runtime(project: Path) -> None:
+    """backend_name / runtime kwargs land in metadata.json as top-level keys."""
+    md = write_orchestrator_metadata(
+        "ws_a",
+        backend_name="claude",
+        runtime={
+            "provider": "anthropic",
+            "model": "MiniMax-M3",
+            "permission_mode": "bypassPermissions",
+            "max_concurrent_agents": 1,
+            "poll_interval_ms": 5000,
+            "approval_policy": "structured",
+        },
+    )
+
+    data = json.loads(md.read_text(encoding="utf-8"))
+    assert data["backend"] == "claude"
+    assert data["runtime"]["model"] == "MiniMax-M3"
+    assert data["runtime"]["poll_interval_ms"] == 5000
+
+
+def test_metadata_writer_omits_extras_for_legacy_callers(project: Path) -> None:
+    """Callers that do not pass extras keep the legacy metadata shape."""
+    md = write_orchestrator_metadata("ws_b")
+
+    data = json.loads(md.read_text(encoding="utf-8"))
+    assert "backend" not in data
+    assert "runtime" not in data
+
+
+def test_runtime_lines_render_full_and_legacy(project: Path) -> None:
+    from orchestratord.cli.server import _runtime_lines
+
+    full = _runtime_lines(
+        {
+            "backend": "claude",
+            "runtime": {
+                "provider": "anthropic",
+                "model": "MiniMax-M3",
+                "permission_mode": "bypassPermissions",
+                "max_concurrent_agents": 2,
+                "poll_interval_ms": 5000,
+                "approval_policy": "never",
+            },
+        }
+    )
+    assert full[0] == "  Backend        : claude"
+    assert any("anthropic/MiniMax-M3" in line for line in full)
+    assert any("permission_mode=bypassPermissions" in line for line in full)
+    assert any("2 concurrent agent(s)" in line for line in full)
+    assert any("poll every 5000ms" in line for line in full)
+
+    # Legacy metadata: no backend / runtime → no extra lines at all.
+    assert _runtime_lines({"workspace_root": "/tmp/x"}) == []
+
+
+def test_registry_counts_line_orders_and_tolerates_garbage(
+    project: Path, tmp_path: Path
+) -> None:
+    from orchestratord.cli.server import _registry_counts_line
+
+    ws = project / "workspace"
+    registry = ws / ".orchestratord_issue_registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "i1": {"status": "pending"},
+                "i2": {"status": "running"},
+                "i3": {"status": "completed"},
+                "i4": {"status": "failed"},
+                "i5": {"status": "weird_state"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    line = _registry_counts_line(str(ws))
+    assert line == (
+        "pending=1 · running=1 · completed=1 · failed=1 · weird_state=1"
+    )
+
+    # No file / unknown root → None.
+    assert _registry_counts_line(str(tmp_path / "nope")) is None
+    assert _registry_counts_line(None) is None
+    assert _registry_counts_line("unknown") is None
+
+    # Unreadable garbage → None, never an exception.
+    bad = project / "bad"
+    bad.mkdir()
+    (bad / ".orchestratord_issue_registry.json").write_text("{oops", encoding="utf-8")
+    assert _registry_counts_line(str(bad)) is None
+
+    # Empty registry is reported, not hidden.
+    empty = project / "empty"
+    empty.mkdir()
+    (empty / ".orchestratord_issue_registry.json").write_text("{}", encoding="utf-8")
+    assert _registry_counts_line(str(empty)) == "none registered"
+
+
+def _make_daemon_alive(ws: Path) -> None:
+    """Rewrite the just-written metadata so its PID is a live process."""
+    import os
+    import time
+
+    import orchestratord.workspace_locator as locator
+
+    slug = locator._slug_from_workspace(str(ws))
+    md = locator.ORCHESTRATORD_ORCHESTRATOR_DIR / slug / "metadata.json"
+    meta = json.loads(md.read_text(encoding="utf-8"))
+    meta["pid"] = os.getpid()
+    meta["started_at"] = time.time()
+    md.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_status_output_discloses_backend_and_issues(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`server status` shows backend, agent summary and live issue counts."""
+    import time
+
+    from orchestratord.cli.server import _run_status
+
+    ws = project / "workspace"
+    write_orchestrator_metadata(
+        ws,
+        started_at=time.time(),
+        backend_name="claude",
+        runtime={
+            "provider": "anthropic",
+            "model": "MiniMax-M3",
+            "permission_mode": "bypassPermissions",
+            "max_concurrent_agents": 1,
+            "poll_interval_ms": 5000,
+            "approval_policy": "structured",
+        },
+    )
+    (ws / ".orchestratord_issue_registry.json").write_text(
+        json.dumps(
+            {
+                "a": {"status": "pending"},
+                "b": {"status": "running"},
+                "c": {"status": "completed"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _make_daemon_alive(ws)
+
+    args = SimpleNamespace(
+        workspace=str(ws), workflow=None, server_subcommand="status"
+    )
+    rc = _run_status(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Orchestrator daemon: RUNNING" in out
+    assert "Backend        : claude" in out
+    assert "Agent          : anthropic/MiniMax-M3" in out
+    assert "Concurrency    : 1 concurrent agent(s) · poll every 5000ms" in out
+    assert "Issues         : pending=1 · running=1 · completed=1" in out
+
+
+def test_status_output_omits_new_lines_for_legacy_metadata(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Old daemons' metadata renders exactly as before (no new lines)."""
+    import time
+
+    from orchestratord.cli.server import _run_status
+
+    ws = project / "workspace"
+    write_orchestrator_metadata(ws, started_at=time.time())
+    _make_daemon_alive(ws)
+
+    args = SimpleNamespace(
+        workspace=str(ws), workflow=None, server_subcommand="status"
+    )
+    rc = _run_status(args)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "Orchestrator daemon: RUNNING" in out
+    assert "Backend" not in out
+    assert "Agent          :" not in out
+    assert "Issues         :" not in out
+    assert "Uptime" in out

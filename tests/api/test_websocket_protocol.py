@@ -5,7 +5,7 @@ protocol carries real-time events from daemon → server → browser, and
 routes ``session.approve`` calls back the other way. Tests fail today;
 they pin the wire contract.
 
-Reference: docs/FEATURE_GAP_VS_MULTICA.md §5.4.1, §6.4.
+Reference: docs/FEATURE_GAP_VS_MULTICA.md §5.1, §5.4.1, §5.7, §6.4.
 """
 from __future__ import annotations
 
@@ -123,3 +123,64 @@ class TestHeartbeat:
             ws.receive_json()  # hello
             ping = ws.receive_json()
             assert ping["type"] in ("ping", "pong")
+
+
+class TestBrokerFanOut:
+    """§5.7 acceptance: the broker fans daemon events out to every WS
+    client whose topic set intersects the published topic."""
+
+    def test_published_frame_fans_out_to_two_clients(
+        self, ws_factory,
+    ) -> None:
+        import asyncio
+
+        from orchestratord.api.realtime import get_broker
+
+        with ws_factory() as ws_a, ws_factory() as ws_b:
+            ws_a.receive_json()  # hello
+            ws_b.receive_json()
+            ws_a.send_json({"type": "subscribe", "topics": ["session.42"]})
+            ws_b.send_json({"type": "subscribe", "topics": ["session.42"]})
+            ws_a.receive_json()  # subscribed ack
+            ws_b.receive_json()
+
+            # Daemon publishes 1 event via the in-process broker — both
+            # clients must see it on the wire. ``asyncio.run`` spins up a
+            # short-lived loop on the main thread; the queues owned by
+            # the TestClient loop are still ``put_nowait``-able because
+            # the operation is synchronous (no awaits on the queue side).
+            delivered = asyncio.run(
+                get_broker().publish("session.42", {"delta": "hello"})
+            )
+            assert delivered == 2
+
+            frame_a = ws_a.receive_json()
+            frame_b = ws_b.receive_json()
+            for frame in (frame_a, frame_b):
+                assert frame["type"] == "event"
+                assert frame["topic"] == "session.42"
+                assert frame["payload"] == {"delta": "hello"}
+
+    def test_unsubscribe_stops_fan_out_live(self, ws_factory) -> None:
+        """Live topic mutation: after ``unsubscribe``, the broker no
+        longer delivers to this client for that topic."""
+        import asyncio
+
+        from orchestratord.api.realtime import get_broker
+
+        broker = get_broker()
+        with ws_factory() as ws:
+            ws.receive_json()  # hello
+            ws.send_json({"type": "subscribe", "topics": ["session.42"]})
+            ws.receive_json()  # subscribed ack
+
+            assert asyncio.run(broker.publish("session.42", {"i": 1})) == 1
+            assert ws.receive_json()["payload"] == {"i": 1}
+
+            ws.send_json({"type": "unsubscribe", "topics": ["session.42"]})
+            ws.receive_json()  # unsubscribed ack
+
+            assert asyncio.run(broker.publish("session.42", {"i": 2})) == 0
+            # No ``event`` frame follows — the next frame the client
+            # sees is the heartbeat ping (or close).
+

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import builtins
 from pathlib import Path
+
+import pytest
 
 
 def test_templates_are_packaged_and_discoverable():
@@ -27,6 +30,267 @@ def test_workflow_init_local_infers_tracker_kind(tmp_path: Path):
     assert run(args) == 0
     config, _ = WorkflowLoader.load(output)
     assert config.tracker.kind == "local"
+
+
+def test_workflow_init_local_kind_on_default_template_autoswitches(tmp_path: Path, capsys):
+    from orchestratord.cli.workflow import add_workflow_parser, run
+    from orchestratord.workflow import WorkflowLoader
+
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="top", required=True)
+    add_workflow_parser(subs)
+    output = tmp_path / "WORKFLOW.md"
+    args = parser.parse_args([
+        "workflow", "init", "--kind", "local",
+        "--non-interactive", "--output", str(output),
+    ])
+    # Default template is `workflow`; picking `local` must auto-switch to
+    # workflow-local instead of failing.
+    assert run(args) == 0
+    assert "using 'workflow-local'" in capsys.readouterr().out
+    config, _ = WorkflowLoader.load(output)
+    assert config.tracker.kind == "local"
+
+
+def test_workflow_init_remote_kind_on_local_template_autoswitches(tmp_path: Path):
+    from orchestratord.cli.workflow import add_workflow_parser, run
+
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="top", required=True)
+    add_workflow_parser(subs)
+    output = tmp_path / "WORKFLOW.md"
+    args = parser.parse_args([
+        "workflow", "init", "--template", "workflow-local", "--kind", "github",
+        "--owner", "o", "--repo", "r",
+        "--non-interactive", "--output", str(output),
+    ])
+    assert run(args) == 0  # auto-switches to the `workflow` remote template
+    text = output.read_text(encoding="utf-8")
+    assert "https://github.com/o/r.git" in text  # clone domain from TrackerKindInfo
+    assert "GITHUB_TOKEN" in text  # token env from TrackerKindInfo
+
+
+def test_workflow_init_rejects_unknown_kind(tmp_path: Path):
+    from orchestratord.cli.workflow import add_workflow_parser, run
+
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="top", required=True)
+    add_workflow_parser(subs)
+    output = tmp_path / "WORKFLOW.md"
+    args = parser.parse_args([
+        "workflow", "init", "--kind", "nonsense",
+        "--non-interactive", "--output", str(output),
+    ])
+    assert run(args) == 1
+    assert not output.exists()
+
+
+def test_workflow_init_interactive_offers_all_kinds_and_autoswitches(tmp_path: Path, monkeypatch, capsys):
+    from orchestratord.cli import workflow as wf
+    from orchestratord.workflow import WorkflowLoader
+
+    monkeypatch.setattr(wf.sys.stdin, "isatty", lambda: True)
+    asked: list[str] = []
+
+    def fake_prompt(label, default="", secret=False):
+        asked.append(label)
+        return "local" if label.startswith("Tracker kind") else ""
+
+    monkeypatch.setattr(wf, "_prompt", fake_prompt)
+
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="top", required=True)
+    wf.add_workflow_parser(subs)
+    output = tmp_path / "WORKFLOW.md"
+    args = parser.parse_args(["workflow", "init", "--output", str(output)])
+    assert wf.run(args) == 0
+
+    out = capsys.readouterr().out
+    # Unified prompt offers every registry kind (local last, registry order)
+    assert asked[0] == "Tracker kind (gitcode/gitee/github/linear/local)"
+    assert "using 'workflow-local'" in out
+    # The local flow never asks repository-hosting questions
+    assert not any("Upstream repository owner" in label for label in asked)
+    assert any("Issues path (local tracker)" in label for label in asked)
+    config, _ = WorkflowLoader.load(output)
+    assert config.tracker.kind == "local"
+
+
+def test_workflow_init_ctrl_c_aborts_interactive_prompt(tmp_path: Path, monkeypatch):
+    from orchestratord.cli import workflow as wf
+
+    monkeypatch.setattr(wf.sys.stdin, "isatty", lambda: True)
+
+    def interrupt(prompt=""):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(builtins, "input", interrupt)
+    parser = argparse.ArgumentParser()
+    subs = parser.add_subparsers(dest="top", required=True)
+    wf.add_workflow_parser(subs)
+    output = tmp_path / "WORKFLOW.md"
+    args = parser.parse_args(["workflow", "init", "--output", str(output)])
+    with pytest.raises(KeyboardInterrupt):
+        wf.run(args)
+    assert not output.exists()
+
+
+def test_workflow_init_ctrl_d_falls_back_to_default(tmp_path: Path):
+    from orchestratord.cli import workflow as wf
+
+    wf.sys.stdin.isatty = lambda: True
+
+    def eof(prompt=""):
+        raise EOFError()
+
+    saved_input = builtins.input
+    builtins.input = eof
+    try:
+        parser = argparse.ArgumentParser()
+        subs = parser.add_subparsers(dest="top", required=True)
+        wf.add_workflow_parser(subs)
+        output = tmp_path / "WORKFLOW.md"
+        args = parser.parse_args(["workflow", "init", "--output", str(output)])
+        assert wf.run(args) == 0
+        assert 'kind: "github"' in output.read_text(encoding="utf-8")
+    finally:
+        builtins.input = saved_input
+
+
+def test_cli_app_converts_keyboard_interrupt_to_exit_130(tmp_path: Path, monkeypatch, capsys):
+    from orchestratord.cli import main as cli_main
+    import orchestratord.cli.workflow as wf_mod
+
+    def interrupted(args):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(wf_mod, "run", interrupted)
+    monkeypatch.setattr(
+        cli_main.sys, "argv",
+        ["orchestratord", "workflow", "init", "--output", str(tmp_path / "w.md")],
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main.app()
+    assert excinfo.value.code == 130
+    assert "Interrupted" in capsys.readouterr().err
+
+
+def _write_fake_transcript(run_dir: Path) -> None:
+    import json
+
+    events = [
+        {"role": "assistant", "content": [{"type": "text", "text": "hello backlog"}],
+         "timestamp": "2026-09-07T10:00:00"},
+        {"role": "assistant",
+         "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                      "input": {"command": "pytest -q"}}],
+         "timestamp": "2026-09-07T10:00:01"},
+        {"role": "user",
+         "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "1 passed"}],
+         "timestamp": "2026-09-07T10:00:02"},
+    ]
+    run_dir.mkdir(parents=True)
+    (run_dir / "transcript.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8"
+    )
+
+
+def test_issue_tail_renders_backlog_before_following(tmp_path: Path, monkeypatch, capsys):
+    import time as time_mod
+
+    from orchestratord.cli import issue as issue_mod
+
+    _write_fake_transcript(tmp_path / "run-1")
+    monkeypatch.setattr(issue_mod, "SESSIONS_DIR", tmp_path)
+
+    def stop_waiting(seconds):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(time_mod, "sleep", stop_waiting)
+
+    args = argparse.Namespace(id=None, run="run-1", workspace=None, lines=2, turn=None)
+    assert issue_mod._run_tail(None, args) == 0
+    out = capsys.readouterr().out
+    assert "shown last 2 of 3" in out
+    assert "pytest -q" in out  # backlog tool call rendered
+    assert "hello backlog" not in out  # older entry not selected
+    assert "[tail] stopped" in out
+
+
+def test_issue_tail_lines_zero_keeps_follow_only_behavior(tmp_path: Path, monkeypatch, capsys):
+    import time as time_mod
+
+    from orchestratord.cli import issue as issue_mod
+
+    _write_fake_transcript(tmp_path / "run-1")
+    monkeypatch.setattr(issue_mod, "SESSIONS_DIR", tmp_path)
+
+    def stop_waiting(seconds):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(time_mod, "sleep", stop_waiting)
+
+    args = argparse.Namespace(id=None, run="run-1", workspace=None, lines=0, turn=None)
+    assert issue_mod._run_tail(None, args) == 0
+    out = capsys.readouterr().out
+    assert "pytest -q" not in out
+    assert "shown last" not in out
+    assert "[tail] stopped" in out
+
+
+def test_format_ts_accepts_epoch_floats_and_iso_strings():
+    from datetime import datetime
+
+    from orchestratord.cli.issue import _format_ts
+
+    epoch = 1000000000.0  # 2001-09-09, safely in the past
+    expected = datetime.fromtimestamp(epoch).strftime("%H:%M:%S")
+    assert _format_ts(epoch) == expected
+    assert _format_ts(str(epoch)) == expected  # epoch serialized as a string
+    assert _format_ts("2026-09-07T10:00:00") == "10:00:00"
+    assert _format_ts(None) == datetime.now().strftime("%H:%M:%S")
+
+
+def test_issue_tail_backlog_shows_original_event_timestamps(tmp_path: Path, monkeypatch, capsys):
+    """Replayed backlog lines must carry the event's own timestamp.
+
+    SessionStorage schema v2 writes Unix epoch floats; a regression here
+    silently re-stamped every replayed line with render time, so
+    re-running tail changed all timestamps while content stayed fixed.
+    """
+    import json
+    import time as time_mod
+    from datetime import datetime
+
+    from orchestratord.cli import issue as issue_mod
+
+    epoch_call = 1000000000.0
+    run_dir = tmp_path / "run-1"
+    run_dir.mkdir(parents=True)
+    events = [
+        {"role": "assistant",
+         "content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+                      "input": {"command": "pytest -q"}}],
+         "timestamp": epoch_call},
+        {"role": "user",
+         "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "1 passed"}],
+         "timestamp": epoch_call + 2},
+    ]
+    (run_dir / "transcript.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(issue_mod, "SESSIONS_DIR", tmp_path)
+
+    def stop_waiting(seconds):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(time_mod, "sleep", stop_waiting)
+
+    args = argparse.Namespace(id=None, run="run-1", workspace=None, lines=2, turn=None)
+    assert issue_mod._run_tail(None, args) == 0
+    out = capsys.readouterr().out
+    call_ts = datetime.fromtimestamp(epoch_call).strftime("%H:%M:%S")
+    assert f"{call_ts}  ◐ Bash pytest -q · 1 passed" in out
 
 
 def test_generic_cli_resources_parse():

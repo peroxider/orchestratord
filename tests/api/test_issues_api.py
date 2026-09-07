@@ -200,6 +200,65 @@ class TestMention:
         assert resp.status_code == 202
         assert resp.json()["member_id"] == mid
 
+    async def test_mention_agent_starts_session(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        aid = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"agent_id": aid, "text": "please review @agent for the API"},
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        session_id = body["session_id"]
+        assert body["session_status"] == "pending"
+        assert body["message"] is not None
+        assert body["message"]["role"] == "user"
+        assert "please review" in body["message"]["content"]
+
+        detail = await client.get(f"/api/sessions/{session_id}")
+        assert detail.status_code == 200
+        assert detail.json()["issue_id"] == issue["id"]
+        assert detail.json()["agent_id"] == aid
+        assert detail.json()["status"] == "pending"
+
+    async def test_mention_member_starts_session_without_agent(
+        self, client
+    ) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        mid = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"member_id": mid},
+        )
+        assert resp.status_code == 202
+        body = resp.json()
+        session_id = body["session_id"]
+        # Single-user mode (D9): member mention = self-mention, no agent bind
+        assert body["message"] is None
+
+        detail = await client.get(f"/api/sessions/{session_id}")
+        assert detail.status_code == 200
+        assert detail.json()["issue_id"] == issue["id"]
+        assert detail.json()["agent_id"] is None
+
+    async def test_mention_text_lands_on_chat_timeline(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        aid = str(uuid4())
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"agent_id": aid, "text": "run the linter"},
+        )
+        session_id = resp.json()["session_id"]
+        msgs = await client.get(f"/api/sessions/{session_id}/messages")
+        assert msgs.status_code == 200
+        messages = msgs.json()["messages"]
+        assert len(messages) == 1
+        assert messages[0]["seq"] == 0
+        assert messages[0]["content"] == "run the linter"
+
     async def test_mention_requires_exactly_one_target(self, client) -> None:
         ws = str(uuid4())
         issue = await _create(client, ws)
