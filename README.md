@@ -102,10 +102,16 @@ The script:
    | `codex`     | `codex` on `PATH`                                               | `npm i -g @openai/codex`                                                               |
    | `dsh`       | `deepseek-harness-sdk>=0.1.2rc1,<0.2` with its bundled runtime | install the `orchestratord-dsh` adapter (global `dsh` is not required) |
    | `hermes`    | `hermes` on `PATH`                                              | upstream repository                                                                    |
+   | `opencode`  | `opencode` on `PATH`                                            | `npm i -g opencode`                                                                    |
    | `cursor`    | `cursor-agent` on `PATH`                                        | see https://cursor.com/cli — event stream shape not yet exercised, buffered as TEXT    |
    | `copilot`   | `copilot` on `PATH`                                             | `gh extension install github/gh-copilot` — event stream needs experimentation         |
    | `kimi`      | `kimi` on `PATH`                                                | https://platform.moonshot.cn — Chinese-language prompts are first-class                 |
    | `qwen`      | `qwen` on `PATH` (stream-json via `qwen -p --output-format stream-json`) | https://help.aliyun.com/zh/dashscope — only P1 backend with `streaming_deltas=True` |
+   | `kiro-cli`  | `kiro` on `PATH`                                                | AWS Kiro CLI — event stream shape not yet exercised, output buffered as a single TEXT event |
+   | `openclaw`  | `openclaw` on `PATH`                                            | OpenClaw CLI — §8.1 HTTP/Gateway path deferred, output buffered as TEXT |
+   | `reasonix`  | `reasonix` on `PATH`                                            | Reasonix CLI — event stream shape not yet exercised |
+   | `zeroclaw`  | `zeroclaw` on `PATH`                                            | ZeroClaw CLI — event stream shape not yet exercised |
+   | `acp`       | any of `grok` / `codebuddy` / `qwenpaw` / `qodercli` / `qoderclicn` / `deveco` on `PATH` | generic stdio ACP backend (six vendor runtimes share `orchestratord-acp`) |
 
    > **Migration note (provider default):** `agent.provider` no longer
    > defaults to `"anthropic"` — the default is now empty and each backend
@@ -113,7 +119,6 @@ The script:
    > adapter). **clawcodex workflows MUST declare `agent.provider`
    > explicitly**; an unset provider fails preflight with
    > `agent.provider must be configured for clawcodex.`
-   | `opencode`  | `opencode` on `PATH`                                            | `npm i -g opencode`                                                                    |
 
    If a runtime is missing, the script prints the install hint and (in interactive mode) asks whether to install the wrapper package anyway.
 
@@ -158,9 +163,14 @@ pip install orchestratord orchestratord-cursor        # Cursor CLI (cursor-agent
 pip install orchestratord orchestratord-copilot       # GitHub Copilot CLI
 pip install orchestratord orchestratord-kimi          # Kimi CLI (Moonshot AI)
 pip install orchestratord orchestratord-qwen          # Qwen / DashScope CLI (stream-json)
+pip install orchestratord orchestratord-kiro-cli      # AWS Kiro CLI
+pip install orchestratord orchestratord-openclaw      # OpenClaw CLI
+pip install orchestratord orchestratord-reasonix      # Reasonix CLI
+pip install orchestratord orchestratord-zeroclaw      # ZeroClaw CLI
+pip install orchestratord orchestratord-acp           # generic ACP stdio backend (grok / codebuddy / qwenpaw / qodercli / qoderclicn / deveco)
 ```
 
-> The core package now ships `backends` as an extra that pulls in all five PyPI plugins, plus `dev` includes them as well so `pip install -e .[dev]` is enough to run the drift detector (`pyproject.toml:33`). Users who want a single backend still install it explicitly as shown above.
+> The core package now ships `backends` as an extra that pulls in all six PyPI plugins, plus `dev` includes them as well so `pip install -e .[dev]` is enough to run the drift detector (`pyproject.toml:33`). Users who want a single backend still install it explicitly as shown above.
 
 ## Architecture
 
@@ -191,18 +201,18 @@ The session SPI exposes only an async event iterator (`events()`) plus a `send()
 
 Each backend advertises a `BackendCapabilities` dataclass. A checkmark means the backend supports that capability; the orchestration core handles the corresponding degradation path when the bit is off.
 
-| Capability bit        | clawcodex | codex (Cli / As)¹ | dsh | hermes | opencode | cursor | copilot | kimi | qwen |
-| --------------------- | :-------: | :---------------: | :-: | :----: | :------: | :----: | :-----: | :--: | :--: |
-| Family                | SdkProcess |   Cli / SdkProcess | Cli²|  Cli   | Protocol |  Cli   |   Cli   | Cli  | Cli  |
-| `streaming_deltas`    |     ✓     |      ✓ / ✓        |  ✓  |        |    ✓     |        |         |      |  ✓   |
-| `resumable`           |     ✓     |      ✓ /          |     |   ✓    |          |        |         |      |      |
-| `interrupt`           |           |        / ✓        |     |        |          |        |         |      |      |
-| `approval_hooks`      |     ✓     |        / ✓        |     |        |    ✓     |        |         |      |      |
-| `parallel_sessions`   |           |      ✓ / ✓        |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |
-| `cost_reporting`      |     ✓     |                   |  ✓³ |        |          |        |         |      |      |
-| `tool_filtering`      |     ✓     |                   |     |        |          |        |         |      |      |
-| `takeover`            |     ✓     |                   |     |        |          |        |         |      |      |
-| **Score**             |  **6/8**  |   **2/8** / **4/8** |**3/8**|**2/8**|  **3/8** |**1/8** | **1/8** |**1/8**|**2/8**|
+| Capability bit        | clawcodex | codex (Cli / As)¹ | dsh | hermes | opencode | cursor | copilot | kimi | qwen | kiro-cli | openclaw | reasonix | zeroclaw | acp |
+| --------------------- | :-------: | :---------------: | :-: | :----: | :------: | :----: | :-----: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| Family                | SdkProcess |   Cli / SdkProcess | Cli²|  Cli   | Protocol |  Cli   |   Cli   | Cli  | Cli  | Cli | Cli | Cli | Cli | Protocol |
+| `streaming_deltas`    |     ✓     |      ✓ / ✓        |  ✓  |        |    ✓     |        |         |      |  ✓   |      |      |      |      |  ✓   |
+| `resumable`           |     ✓     |      ✓ /          |     |   ✓    |          |        |         |      |      |      |      |      |      |      |
+| `interrupt`           |           |        / ✓        |     |        |          |        |         |      |      |      |      |      |      |  ✓   |
+| `approval_hooks`      |     ✓     |        / ✓        |     |        |    ✓     |        |         |      |      |      |      |      |      |  ✓   |
+| `parallel_sessions`   |           |      ✓ / ✓        |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |
+| `cost_reporting`      |     ✓     |                   |  ✓³ |        |          |        |         |      |      |      |      |      |      |      |
+| `tool_filtering`      |     ✓     |                   |     |        |          |        |         |      |      |      |      |      |      |      |
+| `takeover`            |     ✓     |                   |     |        |          |        |         |      |      |      |      |      |      |      |
+| **Score**             |  **6/8**  |   **2/8** / **4/8** |**3/8**|**2/8**|  **3/8** |**1/8** | **1/8** |**1/8**|**2/8**| **1/8** | **1/8** | **1/8** | **1/8** | **4/8** |
 
 ¹ `codex` advertises two runtime modes. At construction time the backend probes `codex app-server --help`: a 0 exit means the AppServer JSON-RPC path is available and the backend lights up `streaming_deltas + interrupt + approval_hooks` (SdkProcess, 4/8). If the probe fails (older `codex` binaries, missing `codex` on PATH, or `--yolo`-style Cli-only installs), the backend falls back to `codex exec --json` and reports the historical 2/8 Cli bits. `backend_registry._classify_family()` returns `SdkProcess` in the first case and `Cli` in the second.
 
@@ -227,17 +237,17 @@ Each backend advertises a `BackendCapabilities` dataclass. A checkmark means the
 
 The session SPI exposes a single async iterator of `EventEnvelope` events. Backends translate their native streams into this normalized form (`src/orchestratord/spi/events.py:14-23`). The table below records which `EventKind` values each backend actually emits today — declared capability bits and emitted events are not the same thing.
 
-| EventKind         | clawcodex | codex (Cli / As) | dsh | hermes | opencode | cursor | copilot | kimi | qwen |
-| ----------------- | :-------: | :-------------: | :-: | :----: | :------: | :----: | :-----: | :--: | :--: |
-| `TEXT_DELTA`      |     ✓     |       / ✓       |  ✓  |        |    ✓     |        |         |      |  ✓   |
-| `TEXT`            |           |       ✓         |  ✓  |   ✓    |    ✓ (fallback) |  ✓ |    ✓    |  ✓   |  ✓   |
-| `TOOL_CALL`       |     ✓     |                 |  ✓  |        |    ✓     |        |         |      |      |
-| `TOOL_RESULT`     |     ✓     |                 |  ✓  |        |    ✓     |        |         |      |      |
-| `APPROVAL_REQUEST`|     ✓     |       / ✓       |     |        |    ✓     |        |         |      |      |
-| `TURN_COMPLETE`   |     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |
-| `PHASE_COMPLETE`  |     ✓     |                 |     |        |          |        |         |      |      |
-| `SESSION_COMPLETE`|     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |
-| `ERROR`           |     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |
+| EventKind         | clawcodex | codex (Cli / As) | dsh | hermes | opencode | cursor | copilot | kimi | qwen | kiro-cli | openclaw | reasonix | zeroclaw | acp |
+| ----------------- | :-------: | :-------------: | :-: | :----: | :------: | :----: | :-----: | :--: | :--: | :--: | :--: | :--: | :--: | :--: |
+| `TEXT_DELTA`      |     ✓     |       / ✓       |  ✓  |        |    ✓     |        |         |      |  ✓   |      |      |      |      |  ✓   |
+| `TEXT`            |           |       ✓         |  ✓  |   ✓    |    ✓ (fallback) |  ✓ |    ✓    |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |      |
+| `TOOL_CALL`       |     ✓     |                 |  ✓  |        |    ✓     |        |         |      |      |      |      |      |      |  ✓   |
+| `TOOL_RESULT`     |     ✓     |                 |  ✓  |        |    ✓     |        |         |      |      |      |      |      |      |  ✓   |
+| `APPROVAL_REQUEST`|     ✓     |       / ✓       |     |        |    ✓     |        |         |      |      |      |      |      |      |  ✓   |
+| `TURN_COMPLETE`   |     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |
+| `PHASE_COMPLETE`  |     ✓     |                 |     |        |          |        |         |      |      |      |      |      |      |      |
+| `SESSION_COMPLETE`|     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |
+| `ERROR`           |     ✓     |       ✓         |  ✓  |   ✓    |    ✓     |   ✓    |    ✓    |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |  ✓   |
 
 Observations from reading the session modules:
 
@@ -339,7 +349,7 @@ ORCHESTRATORD_SKIP_CLI_GUARD=1 pytest
 pytest tests/manual_e2e_opencode_sse.py -v -s
 ```
 
-The nine guarded binaries today:
+The thirteen guarded binaries today:
 
 | Binary | Backend package | Notes |
 | --- | --- | --- |
@@ -352,6 +362,10 @@ The nine guarded binaries today:
 | `copilot` | `orchestratord-copilot` | spawn-per-turn Cli; 事件流需实验 |
 | `kimi` | `orchestratord-kimi` | spawn-per-turn Cli; 中文 prompt 友好 |
 | `qwen` | `orchestratord-qwen` | spawn-per-turn Cli; `qwen -p --output-format stream-json` 真正流式 |
+| `kiro` | `orchestratord-kiro-cli` | spawn-per-turn Cli; event stream shape not yet exercised |
+| `openclaw` | `orchestratord-openclaw` | spawn-per-turn Cli; §8.1 HTTP/Gateway path deferred |
+| `reasonix` | `orchestratord-reasonix` | spawn-per-turn Cli; event stream shape not yet exercised |
+| `zeroclaw` | `orchestratord-zeroclaw` | spawn-per-turn Cli; event stream shape not yet exercised |
 
 New to the project? Start with [`ONBOARDING.md`](ONBOARDING.md) for the project layout, the `d` suffix rationale, the SPI contract, and where to make your first change.
 

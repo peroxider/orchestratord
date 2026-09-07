@@ -96,7 +96,32 @@ BACKEND_RUNTIME_TYPE[qwen]="binary"
 BACKEND_CHECK_CMD[qwen]='_check_binary qwen'
 BACKEND_INSTALL_HINT[qwen]="Install Qwen CLI (DashScope) with --output-format stream-json support: see https://help.aliyun.com/zh/dashscope — only P1 backend that genuinely claims streaming_deltas=True"
 
-ALL_BACKENDS="clawcodex claude codex dsh hermes opencode cursor copilot kimi qwen"
+BACKEND_DISPLAY_NAME[kiro-cli]="AWS Kiro (Cli)"
+BACKEND_RUNTIME_TYPE[kiro-cli]="binary"
+BACKEND_CHECK_CMD[kiro-cli]='_check_binary kiro'
+BACKEND_INSTALL_HINT[kiro-cli]="Install AWS Kiro CLI (kiro binary) — event stream shape not yet exercised, output buffered as a single TEXT event"
+
+BACKEND_DISPLAY_NAME[openclaw]="OpenClaw (Cli)"
+BACKEND_RUNTIME_TYPE[openclaw]="binary"
+BACKEND_CHECK_CMD[openclaw]='_check_binary openclaw'
+BACKEND_INSTALL_HINT[openclaw]="Install OpenClaw CLI (openclaw binary) — §8.1 HTTP/Gateway path deferred, output buffered as TEXT"
+
+BACKEND_DISPLAY_NAME[reasonix]="Reasonix (Cli)"
+BACKEND_RUNTIME_TYPE[reasonix]="binary"
+BACKEND_CHECK_CMD[reasonix]='_check_binary reasonix'
+BACKEND_INSTALL_HINT[reasonix]="Install Reasonix CLI (reasonix binary) — event stream shape not yet exercised"
+
+BACKEND_DISPLAY_NAME[zeroclaw]="ZeroClaw (Cli)"
+BACKEND_RUNTIME_TYPE[zeroclaw]="binary"
+BACKEND_CHECK_CMD[zeroclaw]='_check_binary zeroclaw'
+BACKEND_INSTALL_HINT[zeroclaw]="Install ZeroClaw CLI (zeroclaw binary) — event stream shape not yet exercised"
+
+BACKEND_DISPLAY_NAME[acp]="ACP (Agent Client Protocol)"
+BACKEND_RUNTIME_TYPE[acp]="binary"
+BACKEND_CHECK_CMD[acp]='_check_binary grok codebuddy qwenpaw qodercli qoderclicn deveco'
+BACKEND_INSTALL_HINT[acp]="Install an ACP vendor runtime (grok, codebuddy, qwenpaw, qodercli, qoderclicn, or deveco) — generic stdio ACP backend"
+
+ALL_BACKENDS="clawcodex claude codex dsh hermes opencode cursor copilot kimi qwen kiro-cli openclaw reasonix zeroclaw acp"
 
 # ── Help ─────────────────────────────────────────────────────────────────────
 show_help() {
