@@ -9,7 +9,24 @@ Reference: docs/FEATURE_GAP_VS_MULTICA.md §5.1, §5.4.1, §5.7, §6.4.
 """
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
+from uuid import uuid4
+
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
+from orchestratord.api.app import create_app
+from orchestratord.api.db import get_repositories
+from orchestratord.db import models as orm
+from orchestratord.db.engine import build_session_factory
+from orchestratord.domain.auth_token import hash_api_token
+
+# Imported at module scope (collection time) on purpose: a setup-time
+# ``from tests.api.conftest import …`` breaks in full-suite runs once an
+# earlier test has mutated ``sys.path``/``sys.modules``.
+from tests.api.conftest import _TEST_DSN, _repo_override
 
 
 def _ws_url(token: str = "test-token", workspace_id: str = "ws_test") -> str:
@@ -17,16 +34,51 @@ def _ws_url(token: str = "test-token", workspace_id: str = "ws_test") -> str:
 
 
 @pytest.fixture
-def ws_factory():
-    """Yield a callable that opens a WebSocket connection through TestClient."""
+def ws_factory(db_engine, client):
+    """Yield an opener bound to a fresh app whose repos hit the test DB.
+
+    The token gate now verifies the query-param plaintext against
+    ``auth_tokens`` (sha256 + expiry), so this fixture seeds the exact
+    plaintexts the tests present ("valid", "test-token").  Depends on
+    ``client`` so the per-test ``TRUNCATE`` runs before seeding.
+    """
     from fastapi.testclient import TestClient
 
-    from orchestratord.api.app import app
+    # A dedicated NullPool engine: asyncpg connections are loop-affine, and
+    # the TestClient portal runs the app on its own loop (different from
+    # both the pytest-asyncio loop and this fixture's ``asyncio.run``).
+    # NullPool opens a fresh connection per checkout, so no pooled
+    # connection ever crosses a loop boundary.
+    ws_engine = create_async_engine(_TEST_DSN, poolclass=NullPool)
 
-    client = TestClient(app)
+    async def _seed() -> None:
+        async with build_session_factory(ws_engine)() as session:
+            for name in ("valid", "test-token"):
+                session.add(
+                    orm.AuthToken(
+                        id=uuid4(),
+                        workspace_id=uuid4(),
+                        name=f"ws-{name}",
+                        token_hash=hash_api_token(name),
+                        scopes=[],
+                        expires_at=None,
+                        created_at=datetime.now(UTC),
+                    )
+                )
+            await session.commit()
+
+    asyncio.run(_seed())
+
+    app = create_app()
+    app.dependency_overrides[get_repositories] = _repo_override(
+        build_session_factory(ws_engine)
+    )
+    test_client = TestClient(app)
 
     def _open(token: str = "test-token", workspace_id: str = "ws_test"):
-        return client.websocket_connect(_ws_url(token=token, workspace_id=workspace_id))
+        return test_client.websocket_connect(
+            _ws_url(token=token, workspace_id=workspace_id)
+        )
 
     return _open
 

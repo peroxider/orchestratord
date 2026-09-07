@@ -10,12 +10,14 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from orchestratord.api.deps import require_auth
 from orchestratord.api.routers import (
     agents,
     audit,
+    auth,
     autopilots,
     channels,
     dashboard,
@@ -114,24 +116,32 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    application.include_router(skills.router)
-    application.include_router(dashboard.router)
+    # Every HTTP router sits behind the bearer-token gate.  The WebSocket
+    # router is excluded: FastAPI does not inject ``Request``-annotated
+    # dependency params on websocket routes, and ``/ws`` authenticates via
+    # its own ``token`` query parameter (realtime.py).  Public REST paths
+    # (health, /api/auth/verify, docs) are allowlisted inside
+    # ``require_auth`` itself.
+    _auth = [Depends(require_auth)]
+    application.include_router(skills.router, dependencies=_auth)
+    application.include_router(dashboard.router, dependencies=_auth)
     application.include_router(realtime.router)
-    application.include_router(issues.router)
-    application.include_router(agents.router)
-    application.include_router(sessions.router)
-    application.include_router(squads.router)
-    application.include_router(projects.router)
-    application.include_router(autopilots.router)
-    application.include_router(runtimes.router)
-    application.include_router(usage.router)
-    application.include_router(inbox.router)
-    application.include_router(channels.router)
-    application.include_router(integrations.router)
-    application.include_router(tokens.router)
-    application.include_router(members.router)
-    application.include_router(audit.router)
-    application.include_router(vcs.router)
+    application.include_router(auth.router, dependencies=_auth)
+    application.include_router(issues.router, dependencies=_auth)
+    application.include_router(agents.router, dependencies=_auth)
+    application.include_router(sessions.router, dependencies=_auth)
+    application.include_router(squads.router, dependencies=_auth)
+    application.include_router(projects.router, dependencies=_auth)
+    application.include_router(autopilots.router, dependencies=_auth)
+    application.include_router(runtimes.router, dependencies=_auth)
+    application.include_router(usage.router, dependencies=_auth)
+    application.include_router(inbox.router, dependencies=_auth)
+    application.include_router(channels.router, dependencies=_auth)
+    application.include_router(integrations.router, dependencies=_auth)
+    application.include_router(tokens.router, dependencies=_auth)
+    application.include_router(members.router, dependencies=_auth)
+    application.include_router(audit.router, dependencies=_auth)
+    application.include_router(vcs.router, dependencies=_auth)
     return application
 
 

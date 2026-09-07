@@ -212,6 +212,7 @@ def write_orchestrator_metadata(
     started_at: float | None = None,
     backend_name: str | None = None,
     runtime: dict | None = None,
+    api_port: int | None = None,
 ) -> Path:
     """Write orchestrator metadata for later CLI discovery.
 
@@ -224,6 +225,8 @@ def write_orchestrator_metadata(
             BackendRunner name) so ``server status`` can show what runs issues
         runtime: Optional display summary of the agent/polling/sandbox config
             (provider, model, permission_mode, concurrency, approval policy)
+        api_port: Optional port of the API server embedded in the daemon
+            (``--serve-api``), disclosed by ``server status``
 
     Returns:
         Path to the metadata file written
@@ -282,6 +285,8 @@ def write_orchestrator_metadata(
         data["backend"] = backend_name
     if runtime:
         data["runtime"] = runtime
+    if api_port is not None:
+        data["api_port"] = api_port
 
     metadata_file.write_text(
         json.dumps(data, indent=2, ensure_ascii=False),

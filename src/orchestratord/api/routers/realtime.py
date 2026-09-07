@@ -10,9 +10,11 @@ set via :meth:`update_topics` on subscribe/unsubscribe frames, and runs a
 concurrent broadcast loop that pulls frames from the broker's async
 iterator. Message shapes mirror multica ``server/internal/realtime``.
 
-This is still a Phase-1 protocol skeleton: the token gate is a stub (real
-auth is §5.7.4), and ``session.approve`` acknowledges but does not yet
-route to the BackendRunner (that lands in Phase A.2 §5.2.3).
+This is still a Phase-1 protocol skeleton: ``session.approve`` acknowledges
+but does not yet route to the BackendRunner (that lands in Phase A.2 §5.2.3).
+The token gate validates the query-param plaintext against the
+``auth_tokens`` table (only its SHA-256 is persisted; §5.4.1's 4001
+close-code contract covers rejects).
 """
 
 from __future__ import annotations
@@ -20,9 +22,13 @@ from __future__ import annotations
 import asyncio
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
+from orchestratord.api.db import get_repositories
+from orchestratord.api.deps import _is_expired
 from orchestratord.api.realtime import get_broker
+from orchestratord.db.repository import Repositories
+from orchestratord.domain.auth_token import hash_api_token
 
 router = APIRouter(tags=["realtime"])
 
@@ -34,15 +40,16 @@ _HEARTBEAT_SECONDS = 30.0
 _LIVENESS_PROBE_SECONDS = 0.5
 
 
-def _ws_token_valid(token: str) -> bool:
-    """Phase-1 token gate.
+async def _ws_token_valid(repos: Repositories, token: str) -> bool:
+    """Token gate: the plaintext must hash to a persisted, unexpired row.
 
-    Real auth — cookie-based session, the ``auth_tokens`` table, and daemon
-    runtime tokens (§5.7.4) — lands in Phase 2. Until then the gate rejects
-    empty tokens and the reserved ``bogus`` sentinel so the 4001 close-code
-    contract (§5.4.1) is exercisable; everything else is accepted.
+    Mirrors the REST ``require_auth`` contract — the query-param plaintext's
+    SHA-256 must match an ``auth_tokens`` row that has not expired.
     """
-    return bool(token) and token != "bogus"
+    if not token:
+        return False
+    record = await repos.auth_tokens.by_token_hash(hash_api_token(token))
+    return record is not None and not _is_expired(record.expires_at)
 
 
 def _coerce_topics(raw: object) -> list[str]:
@@ -58,9 +65,12 @@ def _coerce_topics(raw: object) -> list[str]:
 
 
 @router.websocket("/ws")
-async def websocket_realtime(websocket: WebSocket) -> None:
+async def websocket_realtime(
+    websocket: WebSocket,
+    repos: Repositories = Depends(get_repositories),
+) -> None:
     token = websocket.query_params.get("token", "")
-    if not _ws_token_valid(token):
+    if not await _ws_token_valid(repos, token):
         await websocket.close(code=4001)
         return
 

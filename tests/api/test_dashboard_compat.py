@@ -13,17 +13,38 @@ from __future__ import annotations
 
 import pytest
 
-
-def _lazy_app():
-    from orchestratord.api.app import app  # noqa: WPS433
-
-    return app
+from tests.api.conftest import _repo_override
 
 
 def _client():
+    """A fresh app with the token gate lifted (route-shape contract only).
+
+    These tests pin the legacy ``DashboardHandler`` surface — routes, verbs,
+    payload shapes — not authentication; the gate itself is exercised in
+    ``tests/api/test_auth.py``.  Repos are overridden to the dedicated test
+    database (a fresh ``create_app()`` would otherwise fall through to the
+    real ``get_repositories`` and its default DSN — the shared ``multica``
+    instance).  ``NullPool`` keeps connections from crossing the TestClient
+    portal loop and the pytest-asyncio loop.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
     from fastapi.testclient import TestClient
 
-    return TestClient(_lazy_app())
+    from orchestratord.api.app import create_app
+    from orchestratord.api.db import get_repositories
+    from orchestratord.api.deps import require_auth
+    from orchestratord.db.engine import build_session_factory
+    from tests.api.conftest import _TEST_DSN
+
+    ws_engine = create_async_engine(_TEST_DSN, poolclass=NullPool)
+    application = create_app()
+    application.dependency_overrides[get_repositories] = _repo_override(
+        build_session_factory(ws_engine)
+    )
+    application.dependency_overrides[require_auth] = lambda: None
+    return TestClient(application)
 
 
 class TestLiveViewHtmlSurface:

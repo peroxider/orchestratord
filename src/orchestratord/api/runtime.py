@@ -49,3 +49,28 @@ def set_backend_runner(runner: BackendRunner | None) -> None:
 def reset_backend_runner() -> None:
     """Drop the process-wide :class:`BackendRunner` (test helper)."""
     set_backend_runner(None)
+
+
+# ---------------------------------------------------------------------------
+# Embedded API port disclosure
+# ---------------------------------------------------------------------------
+
+_api_port: int | None = None
+
+
+def get_api_port() -> int | None:
+    """Return the port of the API server embedded in this process, or ``None``.
+
+    Set only by ``server start --serve-api`` (same-process daemon + API);
+    standalone ``orchestratord serve`` runs in its own process and never
+    sets it. The orchestrator reads it in ``_metadata_extras`` so the
+    heartbeat-persisted metadata discloses the HTTP surface to
+    ``server status``.
+    """
+    return _api_port
+
+
+def set_api_port(port: int | None) -> None:
+    """Record the embedded API port (``None`` to clear — test helper)."""
+    global _api_port
+    _api_port = port

@@ -1,9 +1,9 @@
 """Authorization principal helpers for the API layer.
 
-The Phase 0 API has no full authentication layer yet — that lands with the
-cookie-session + API-token work in Phase 2 (``docs/FEATURE_GAP_VS_MULTICA.md``
-§5.7.4).  Until then the only admin gate is the process-local override below,
-which tests and the single-user developer mode use to reach admin-only
+The global ``require_auth`` dependency puts every workspace-scoped path
+behind an ``auth_tokens`` bearer token; the only credential is the token
+itself (no passwords).  The admin gate remains the process-local override
+below, used by tests and single-user developer mode for admin-only
 endpoints such as ``POST /api/skills/refresh-hashes``.
 """
 
@@ -11,8 +11,63 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException, Request
+
+from orchestratord.api.db import get_repositories
+from orchestratord.db.repository import Repositories
+from orchestratord.domain.auth_token import AuthToken, hash_api_token
+
+# Paths reachable without a bearer token: the login handshake itself,
+# liveness, the WebSocket (which authenticates via its own ``token`` query
+# parameter), and the OpenAPI docs.
+PUBLIC_PATHS = frozenset(
+    {
+        "/api/health",
+        "/ws",
+        "/openapi.json",
+        "/docs",
+        "/redoc",
+        "/docs/oauth2-redirect",
+    }
+)
+
+
+def _is_expired(expires_at: datetime | None) -> bool:
+    """Expiry check for an ORM ``auth_tokens`` row (no dataclass helper)."""
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) >= expires_at
+
+
+async def require_auth(
+    request: Request,
+    repos: Repositories = Depends(get_repositories),
+) -> AuthToken | None:
+    """FastAPI dependency: reject any non-public path without a valid token.
+
+    The bearer token's SHA-256 must match a persisted ``auth_tokens`` row
+    that has not expired.  Returns the matched token so routes that need
+    the principal (e.g. ``GET /api/auth/me``) can inject it via the same
+    dependency (FastAPI caches the result per request).
+    """
+    path = request.url.path
+    if path in PUBLIC_PATHS or path == "/api/auth/verify":
+        return None
+    header = request.headers.get("authorization", "")
+    if not header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    plaintext = header[len("Bearer ") :].strip()
+    if not plaintext:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    record = await repos.auth_tokens.by_token_hash(hash_api_token(plaintext))
+    if record is None or _is_expired(record.expires_at):
+        raise HTTPException(status_code=401, detail="invalid or expired token")
+    return record
+
 
 # Process-local admin override.  Deliberately a plain module global rather
 # than a ContextVar: ``fastapi.testclient.TestClient`` dispatches requests

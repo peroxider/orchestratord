@@ -77,9 +77,12 @@ async def db_engine():
         await engine.dispose()
 
 
-@pytest.fixture
-async def client(db_engine):
-    factory = build_session_factory(db_engine)
+def _repo_override(factory):
+    """Build a ``get_repositories`` override bound to *factory*.
+
+    Shared by the HTTP ``client`` fixture and the WebSocket tests (which
+    need the same test-DB binding on a fresh ``create_app()``).
+    """
 
     async def override_get_repositories() -> AsyncIterator[Repositories]:
         async with factory() as session:
@@ -91,12 +94,25 @@ async def client(db_engine):
                 await session.rollback()
                 raise
 
+    return override_get_repositories
+
+
+@pytest.fixture
+async def client(db_engine):
+    factory = build_session_factory(db_engine)
+
     async with factory() as session:
         await _truncate_all(session)
         await session.commit()
 
     app = create_app()
-    app.dependency_overrides[get_repositories] = override_get_repositories
+    app.dependency_overrides[get_repositories] = _repo_override(factory)
+    # The shared contract tests exercise the routers unauthenticated; the
+    # global token gate is lifted here and exercised for real in
+    # tests/api/test_auth.py (fresh app, no override).
+    from orchestratord.api.deps import require_auth
+
+    app.dependency_overrides[require_auth] = lambda: None
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac

@@ -8,6 +8,7 @@ import {
   useWorkspaceStore,
 } from '@orchestratord/core'
 import { I18nProvider, LocaleSwitcher } from '@orchestratord/views'
+import { getToken } from '@/lib/auth'
 import { realtimeUrl } from '@/lib/realtime'
 
 export function DashboardGuard({
@@ -41,9 +42,13 @@ function WorkspaceShell({
     setCurrentWorkspace(slug, slug)
   }, [slug, setCurrentWorkspace])
 
-  // 'dev' is a Phase-1 token stub — the realtime gate accepts any non-empty
-  // token until cookie-based auth lands (§5.7.4).
-  useRealtimeBridge({ url: realtimeUrl, workspaceId: slug, token: 'dev' })
+  // The realtime gate now validates this token against ``auth_tokens`` — it
+  // is the same credential the REST console sends as ``Authorization: Bearer``.
+  useRealtimeBridge({
+    url: realtimeUrl,
+    workspaceId: slug,
+    token: getToken() ?? '',
+  })
 
   return (
     <div className="workspace-shell">

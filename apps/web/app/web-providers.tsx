@@ -10,6 +10,8 @@ import {
   type ReactNode,
 } from 'react'
 import { I18nProvider } from '@orchestratord/views'
+import { usePathname, useRouter } from 'next/navigation'
+import { getToken } from '@/lib/auth'
 
 /* -------------------------------------------------------------------------- */
 /*  ThemeProvider — root-level data-theme controller                          */
@@ -95,15 +97,32 @@ export function useTheme(): ThemeContextValue {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  AuthGate — pass-through placeholder for §5.7.4 cookie auth                 */
+/*  AuthGate — redirect-to-login boundary for the workspace tree              */
 /* -------------------------------------------------------------------------- */
 
 /**
- * Phase-1 placeholder. The realtime bridge still uses the literal ``dev``
- * token until cookie-based auth lands (§5.7.4). When that lands, this gate
- * becomes the redirect-on-401 boundary for the entire workspace tree.
+ * The console is token-gated: every route outside the public paths requires
+ * a stored session token (``apps/web/lib/auth.ts``). The gate is the
+ * outermost provider so an unauthenticated visit is bounced to ``/login``
+ * before any child provider runs its effects. The check runs in an effect
+ * (not during render) so SSR markup stays hydration-safe; the login page
+ * itself performs the server-side verification and stores the token.
  */
+const PUBLIC_PATHS = new Set(['/', '/login'])
+
 export function AuthGate({ children }: { children: ReactNode }) {
+  const pathname = usePathname()
+  const router = useRouter()
+
+  useEffect(() => {
+    if (PUBLIC_PATHS.has(pathname)) {
+      return
+    }
+    if (getToken() == null) {
+      router.replace('/login')
+    }
+  }, [pathname, router])
+
   return <>{children}</>
 }
 

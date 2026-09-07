@@ -1127,7 +1127,14 @@ class Orchestrator:
             getattr(self.agent_runner, "backend_name", None)
             or getattr(self._backend, "name", None)
         )
-        return {"backend_name": backend_name, "runtime": runtime}
+        extras: dict = {"backend_name": backend_name, "runtime": runtime}
+        # Local import: the API layer is optional in daemon-free tooling.
+        from .api.runtime import get_api_port
+
+        api_port = get_api_port()
+        if api_port is not None:
+            extras["api_port"] = api_port
+        return extras
 
     async def shutdown(self) -> None:
         """Signal graceful shutdown and clean up metadata."""

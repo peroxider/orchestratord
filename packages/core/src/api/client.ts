@@ -1,6 +1,12 @@
 export interface ApiClientOptions {
   baseUrl: string
   fetchFn?: typeof fetch
+  /**
+   * Returns the bearer token to attach as ``Authorization`` on every
+   * request, or ``null`` when unauthenticated (the login page itself).
+   * Called per request so a login/logout is picked up immediately.
+   */
+  getAccessToken?: () => string | null
 }
 
 export class ApiError extends Error {
@@ -16,10 +22,12 @@ export class ApiError extends Error {
 export class ApiClient {
   private readonly baseUrl: string
   private readonly fetchFn: typeof fetch
+  private readonly getAccessToken?: () => string | null
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
     this.fetchFn = options.fetchFn ?? fetch
+    this.getAccessToken = options.getAccessToken
   }
 
   async request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -27,6 +35,10 @@ export class ApiClient {
     const headers = new Headers(init?.headers)
     if (init?.body != null && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
+    }
+    const token = this.getAccessToken?.()
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${token}`)
     }
     const res = await this.fetchFn(url, { ...init, headers })
     if (!res.ok) {
