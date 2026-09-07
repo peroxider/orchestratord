@@ -15,6 +15,7 @@ import {
   formatUsd,
   toUsageCsv,
 } from './usage-labels'
+import { UsageCharts } from './usage-charts'
 
 export interface UsagePageProps {
   client: ApiClient
@@ -91,6 +92,8 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
             <Stat label="Cost" value={formatUsd(data?.totals.cost_usd ?? 0)} />
             <Stat label="Sessions" value={formatTokens(data?.totals.sessions ?? 0)} />
           </div>
+
+          <UsageCharts groups={data?.groups ?? []} dimension={dimension} />
 
           {data && data.groups.length === 0 ? (
             <p className="usage-page__empty">No usage recorded.</p>

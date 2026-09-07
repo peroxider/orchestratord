@@ -23,6 +23,17 @@ export const zhCN: Record<TranslationKey, string> = {
   'inbox.status.resolved': '已解决',
   'inbox.status.dismissed': '已忽略',
 
+  'inbox.action.assign_me': '分配给我',
+  'inbox.action.approve': '批准',
+  'inbox.action.reject': '拒绝',
+  'inbox.action.mark_answered': '标记已回答',
+  'inbox.action.mark_handled': '标记已处理',
+  'inbox.action.dismiss': '忽略',
+
+  'inbox.hint.approval_request': '智能体正在等待批准后才能继续。',
+  'inbox.hint.clarification': '智能体提出了一个澄清问题。',
+  'inbox.hint.failed': '一次会话运行失败，需要处理。',
+
   'members.role.owner': '所有者',
   'members.role.admin': '管理员',
   'members.role.member': '成员',
@@ -40,6 +51,10 @@ export const zhCN: Record<TranslationKey, string> = {
   'usage.dimension.issue': '任务',
   'usage.dimension.day': '日',
   'usage.dimension.workspace': '工作区',
+
+  'usage.metric.tokens_total': '总 Tokens',
+  'usage.metric.cost_usd': '成本 (USD)',
+  'usage.metric.sessions': '会话数',
 
   'events.kind.text': '文本',
   'events.kind.text_delta': '文本增量',

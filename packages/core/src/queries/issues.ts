@@ -127,7 +127,39 @@ export function useMoveIssue(client: ApiClient, workspaceId: string) {
         `/api/workspaces/${workspaceId}/issues/${input.issueId}`,
         { method: 'PATCH', body: JSON.stringify({ status: input.status }) },
       ),
-    onSuccess: () =>
+    // Phase A.3 (§5.3): optimistic update — move the card in the cache
+    // *before* the PATCH resolves so the column snaps immediately. The
+    // snapshot is restored on error so a failed move rolls the card
+    // back to its origin column without a refetch round-trip. A
+    // concurrent WS-driven status change (§5.4.3) also lands in the
+    // same cache, so the optimistic move and the authoritative move
+    // share one source of truth.
+    onMutate: async (input) => {
+      await queryClient.cancelQueries({ queryKey: ['issues', workspaceId] })
+      const previous = queryClient.getQueriesData<Issue[]>({
+        queryKey: ['issues', workspaceId],
+      })
+      queryClient.setQueriesData<Issue[]>(
+        { queryKey: ['issues', workspaceId] },
+        (current) =>
+          (current ?? []).map((issue) =>
+            issue.id === input.issueId
+              ? { ...issue, status: input.status as Issue['status'] }
+              : issue,
+          ),
+      )
+      return { previous }
+    },
+    onError: (_err, _input, context) => {
+      const snapshot = context as
+        | { previous: Array<[readonly unknown[], Issue[] | undefined]> }
+        | undefined
+      if (!snapshot) return
+      for (const [key, value] of snapshot.previous) {
+        queryClient.setQueryData<Issue[]>(key as readonly unknown[], value)
+      }
+    },
+    onSettled: () =>
       queryClient.invalidateQueries({ queryKey: ['issues', workspaceId] }),
   })
 }

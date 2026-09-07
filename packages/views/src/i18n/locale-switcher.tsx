@@ -6,6 +6,7 @@ import type { Locale } from './types'
 const OPTIONS: Array<{ value: Locale; label: string }> = [
   { value: 'en', label: 'EN' },
   { value: 'zh-CN', label: '中文' },
+  { value: 'ja', label: '日本語' },
 ]
 
 export function LocaleSwitcher() {

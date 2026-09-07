@@ -2,6 +2,7 @@ import type { Locale } from './types'
 import { en } from './locales/en'
 import type { TranslationKey } from './locales/en'
 import { zhCN } from './locales/zh-CN'
+import { ja } from './locales/ja'
 
 export type { Locale } from './types'
 export type { TranslationKey } from './locales/en'
@@ -9,6 +10,7 @@ export type { TranslationKey } from './locales/en'
 export const DICTIONARIES: Record<Locale, Record<TranslationKey, string>> = {
   en,
   'zh-CN': zhCN,
+  ja,
 }
 
 /**

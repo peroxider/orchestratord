@@ -264,3 +264,29 @@ export interface PullRequest {
 export interface PullRequestsResponse {
   pull_requests: PullRequest[]
 }
+
+export type ChatRole = 'user' | 'assistant' | 'system' | 'tool'
+
+export interface ChatMessage {
+  id: string
+  session_id: string
+  seq: number
+  role: ChatRole
+  content: string
+  agent_id: string | null
+  author_label: string | null
+  created_at: string
+}
+
+export interface ChatSessionMessages {
+  session_id: string
+  workspace_id: string
+  messages: ChatMessage[]
+}
+
+export interface ChatSessionStart {
+  session_id: string
+  workspace_id: string
+  status: string
+  message: ChatMessage | null
+}

@@ -37,6 +37,10 @@ export type {
   PullRequest,
   PullRequestState,
   PullRequestsResponse,
+  ChatRole,
+  ChatMessage,
+  ChatSessionMessages,
+  ChatSessionStart,
 } from './api/types'
 export { useIssues, useIssue, useCreateIssue, useUpdateIssue, useAddComment, useMoveIssue } from './queries/issues'
 export type {
@@ -52,6 +56,15 @@ export {
   useSessionDecision,
   useSessionControl,
 } from './queries/sessions'
+export {
+  useSessionMessages,
+  useStartChatSession,
+  useSendChatMessage,
+} from './queries/chat'
+export type {
+  StartChatSessionInput,
+  SendChatMessageInput,
+} from './queries/chat'
 export { useAgents } from './queries/agents'
 export { useSkills, useSkill, useVerifySkill } from './queries/skills'
 export type { SkillVerifyResult } from './queries/skills'

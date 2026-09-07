@@ -9,7 +9,7 @@ import {
 import type { ApiClient } from '@orchestratord/core'
 import { Badge, Button } from '@orchestratord/ui'
 import type { BadgeTone } from '@orchestratord/ui'
-import { EventTimeline } from './event-timeline'
+import { ModeRenderer } from './mode-renderer'
 
 export interface SessionDetailProps {
   client: ApiClient
@@ -105,7 +105,7 @@ export function SessionDetail({ client, sessionId }: SessionDetailProps) {
         </div>
       )}
 
-      <EventTimeline events={eventList} />
+      <ModeRenderer mode={data.mode} events={eventList} />
     </div>
   )
 }

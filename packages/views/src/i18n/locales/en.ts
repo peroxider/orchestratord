@@ -24,6 +24,17 @@ export const en = {
   'inbox.status.resolved': 'Resolved',
   'inbox.status.dismissed': 'Dismissed',
 
+  'inbox.action.assign_me': 'Assign to me',
+  'inbox.action.approve': 'Approve',
+  'inbox.action.reject': 'Reject',
+  'inbox.action.mark_answered': 'Mark answered',
+  'inbox.action.mark_handled': 'Mark handled',
+  'inbox.action.dismiss': 'Dismiss',
+
+  'inbox.hint.approval_request': 'The agent is waiting for approval before it can continue.',
+  'inbox.hint.clarification': 'The agent asked a clarifying question.',
+  'inbox.hint.failed': 'A session run failed and needs attention.',
+
   'members.role.owner': 'Owner',
   'members.role.admin': 'Admin',
   'members.role.member': 'Member',
@@ -41,6 +52,10 @@ export const en = {
   'usage.dimension.issue': 'Issue',
   'usage.dimension.day': 'Day',
   'usage.dimension.workspace': 'Workspace',
+
+  'usage.metric.tokens_total': 'Total tokens',
+  'usage.metric.cost_usd': 'Cost (USD)',
+  'usage.metric.sessions': 'Sessions',
 
   'events.kind.text': 'Text',
   'events.kind.text_delta': 'Text delta',
