@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from orchestratord.channels.authorization import authorized_recipients
 from orchestratord.ipc.models import (
     FEISHU_DM_ALL_ORIGIN,
     IM_DIRECT_ALL_ORIGIN,
@@ -12,6 +13,35 @@ from orchestratord.ipc.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def is_concrete_im_origin(origin: str) -> bool:
+    parts = origin.split(":")
+    return (
+        len(parts) == 4
+        and parts[:2] in (["wechat", "direct"], ["feishu", "dm"])
+        and all(part and part != "*" for part in parts[2:])
+    )
+
+
+def is_authorized_origin(origin: str, gateway: Any) -> bool:
+    """Validate the concrete sender against the current channel account."""
+    if not is_concrete_im_origin(origin):
+        return False
+    kind, _, account, user = origin.split(":")
+    adapter = adapter_by_channel_type(gateway, kind)
+    if adapter is None or user not in authorized_recipients(adapter):
+        return False
+    runtime_account = getattr(adapter, "origin_account_id", None)
+    if runtime_account is not None:
+        return account == runtime_account
+    config = getattr(adapter, "config", None) or getattr(adapter, "_config", None)
+    extra = getattr(config, "extra", None) or {}
+    if kind == "wechat":
+        return account == str(extra.get("account_id") or "default")
+    from orchestratord.channels.feishu_settings import FeishuAppSettings
+
+    return account == FeishuAppSettings.from_config(config).app_id
 
 
 def resolve_origin(origin: str, gateway=None) -> tuple[str | None, str | None]:
@@ -238,6 +268,8 @@ __all__ = [
     "adapter_by_channel_type",
     "configured_channel_by_type",
     "configured_wechat_channel",
+    "is_authorized_origin",
+    "is_concrete_im_origin",
     "is_concrete_wechat_direct_origin",
     "resolve_last_known_im_sender",
     "resolve_origin",

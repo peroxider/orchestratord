@@ -1011,6 +1011,10 @@ class _FakeWeChatAdapter(ChannelAdapter):
         )
         self.sends: list[tuple[ChannelMessage, str | None]] = []
         self._last_sender: str | None = None
+        self.allowed_users: list[str] = []
+
+    def authorized_recipients(self) -> list[str]:
+        return self.allowed_users
 
     @property
     def channel_id(self) -> str:
@@ -1053,6 +1057,7 @@ def _gateway_with_wechat(
     """Build a real gateway with a fake WeChat adapter that has a known sender."""
     adapter = _FakeWeChatAdapter("wechat")
     adapter._last_sender = sender
+    adapter.allowed_users = [sender] if sender else []
     reg = ChannelAdapterRegistry()
     reg.register(adapter)
     cfg = GatewayConfig(state_dir=str(tmp_path))
@@ -1311,6 +1316,7 @@ async def test_notify_concrete_origin(tmp_path) -> None:
 async def test_notify_terminate_matching_sends_for_each(tmp_path) -> None:
     """terminate_matching sends '已断开' for each removed binding."""
     gw, adapter = _gateway_with_wechat(tmp_path)
+    adapter.allowed_users = ["user_a"]
 
     gw.binding.bind(
         "wechat:direct:default:user_a",
@@ -1352,6 +1358,10 @@ class _FakeFeishuAdapter(ChannelAdapter):
         )
         self.sends: list[tuple[ChannelMessage, str | None]] = []
         self._last_sender: str | None = last_sender
+        self.allowed_users: list[str] = []
+
+    def authorized_recipients(self) -> list[str]:
+        return self.allowed_users
 
     @property
     def channel_id(self) -> str:
@@ -1394,6 +1404,7 @@ def _gateway_with_feishu(
     """Build a real gateway with only a fake Feishu adapter (no WeChat)."""
     adapter = _FakeFeishuAdapter("feishu")
     adapter._last_sender = sender
+    adapter.allowed_users = [sender] if sender else []
     reg = ChannelAdapterRegistry()
     reg.register(adapter)
     cfg = GatewayConfig(state_dir=str(tmp_path))
@@ -1485,8 +1496,10 @@ async def test_notify_broadcasts_to_all_connected_channels(tmp_path) -> None:
     """REPL connect notification broadcasts to WeChat AND Feishu."""
     wechat = _FakeWeChatAdapter("wechat")
     wechat._last_sender = "user_wx"
+    wechat.allowed_users = ["user_wx"]
     feishu = _FakeFeishuAdapter("feishu")
     feishu._last_sender = "ou_feishu_user"
+    feishu.allowed_users = ["ou_feishu_user"]
     reg = ChannelAdapterRegistry()
     reg.register(wechat)
     reg.register(feishu)

@@ -518,6 +518,18 @@ Slash commands recognized for the orchestrator host:
 Commands outside the allowlist are not pushed to the orchestrator; the sender
 gets a bounded notice instead.
 
+Every issue command except `list` requires an explicit `--id`. The gateway
+validates the concrete channel account and sender before forwarding, and the
+orchestrator checks that attestation and the supported command surface again.
+Structured chat semantics and legacy `/agent` or direct `/pause` commands
+cannot bypass these checks. `command_allowlists` can restrict the supported
+commands; adding a name does not implement a new client command.
+
+Commands execute sequentially on a bounded worker queue, so slow commands do
+not block heartbeat or outbound ACK reads. CLI errors and timeouts complete
+processing as failures; delivering an error reply does not turn them into
+successes. Disconnecting cancels active delivery and drops queued commands.
+
 Outbound event reports use the configured `report_targets` when present, with
 one send per destination. Per-channel wildcard targets only resolve when that
 channel has exactly one authorized user; zero or multiple authorized users are
@@ -525,6 +537,18 @@ rejected rather than guessed. With no `report_targets`, `im:direct:*:*` keeps
 the compatibility behavior of selecting the first uniquely authorized IM
 channel (WeChat before Feishu). Command replies do not use this wildcard: they
 return to the concrete channel and user that issued the command.
+
+The current recipient allowlist is checked before every private-message send,
+including retries and persisted outbox replay. Revoked recipients produce a
+nonretryable authorization failure. Feishu replies address the authorized
+open ID directly, so a stale chat context cannot redirect them.
+
+`gateway restart <channel>` validates and starts the replacement before
+swapping it into service. Invalid credentials, startup errors, or readiness
+timeouts retain the previous adapter and configuration and return a NACK.
+Startup and health waiting share a 60-second budget; the reload client waits
+65 seconds for its final result while ordinary ACK requests keep their own timeout.
+Only exact connected/login-ready states count as ready; `disconnected` does not.
 
 ### Configuration reference
 

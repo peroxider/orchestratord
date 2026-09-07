@@ -336,14 +336,14 @@ async def test_orchestrator_uses_channels_yaml_command_allowlist(tmp_path) -> No
         tmp_path,
         command_allowlists=CommandAllowlistConfig(
             repl=(),
-            orchestrator=("/issue takeover",),
+            orchestrator=("/issue show",),
         ),
     )
 
     allowed_receipt = await dispatcher.process(
         _make_message(
             "wechat:acct:user2",
-            "/issue takeover --id AGENTSDK-15",
+            "/issue show --id AGENTSDK-15",
             message_id="orch-custom-allowed",
         )
     )
@@ -355,7 +355,7 @@ async def test_orchestrator_uses_channels_yaml_command_allowlist(tmp_path) -> No
         )
     )
 
-    assert [message.text for message in pushed] == ["/issue takeover --id AGENTSDK-15"]
+    assert [message.text for message in pushed] == ["/issue show --id AGENTSDK-15"]
     assert allowed_receipt.layer is AckLayer.ENQUEUED
     assert blocked_receipt.notify_user is True
 

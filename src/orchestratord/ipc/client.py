@@ -9,12 +9,9 @@ Two directions:
 * request/response (register/heartbeat/control): ``_send`` writes a frame
   and awaits the matching reply, routed by a future keyed on the
   request's ``message_id`` and ``delivery_id``.
-* server-pushed DELIVER frames: a single background ``_read_loop`` owns
-  ``readline()``, routes reply frames to pending requests, and
-  normalizes DELIVER frames into :class:`InboundMessage` before invoking
-  ``on_deliver`` sequentially (the normal orchestrator integration
-  dispatches a message and writes its processed acknowledgement before
-  accepting the next delivery).
+* server-pushed DELIVER frames: the background reader normalizes messages
+  into a bounded queue. A separate worker invokes ``on_deliver`` in order,
+  leaving the reader free to consume heartbeat and outbound replies.
 
 ``send_outbound`` carries a reply back to the gateway and waits for the
 server's ACK/NACK so reliability semantics are observable by callers.
@@ -30,7 +27,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Self
 
 from .models import InboundMessage
-from .protocol import FrameType, GatewayFrame
+from .protocol import CHANNEL_RELOAD_TIMEOUT_SECONDS, FrameType, GatewayFrame
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +68,8 @@ class GatewayIpcClient:
         self._writer: asyncio.StreamWriter | None = None
         self._running = False
         self._read_task: asyncio.Task[None] | None = None
+        self._deliver_task: asyncio.Task[None] | None = None
+        self._deliver_queue: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=128)
         self._pending: dict[str, asyncio.Future[GatewayFrame]] = {}
         self._write_lock: asyncio.Lock | None = None  # created in connect()
 
@@ -99,6 +98,7 @@ class GatewayIpcClient:
             read_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await read_task
+        await self._stop_deliveries()
         if self._writer is not None:
             try:
                 self._writer.close()
@@ -139,6 +139,32 @@ class GatewayIpcClient:
                 logger.debug("gateway ipc: dropping undecodable frame")
                 continue
             await self._dispatch_incoming(frame)
+        await self._stop_deliveries()
+
+    async def _stop_deliveries(self) -> None:
+        task = self._deliver_task
+        self._deliver_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        while not self._deliver_queue.empty():
+            self._deliver_queue.get_nowait()
+            self._deliver_queue.task_done()
+
+    async def _deliver_loop(self) -> None:
+        """Execute commands in order without holding up ACK/heartbeat reads."""
+        while True:
+            message = await self._deliver_queue.get()
+            try:
+                if self.on_deliver is not None:
+                    result = self.on_deliver(message)
+                    if inspect.isawaitable(result):
+                        await result
+            except Exception:
+                logger.exception("gateway ipc: on_deliver callback failed")
+            finally:
+                self._deliver_queue.task_done()
 
     async def _dispatch_incoming(self, frame: GatewayFrame) -> None:
         """Route an incoming frame to a pending request or ``on_deliver``."""
@@ -168,13 +194,19 @@ class GatewayIpcClient:
                 metadata=frame.metadata or {},
             )
             try:
-                result = self.on_deliver(msg)
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                logger.exception("gateway ipc: on_deliver callback failed")
+                self._deliver_queue.put_nowait(msg)
+            except asyncio.QueueFull:
+                logger.warning("gateway ipc: inbound command queue full; rejecting delivery")
+                await self.complete_processing(
+                    message_id=msg.message_id, outcome="failure", reason="command queue full"
+                )
+                return
+            if self._deliver_task is None or self._deliver_task.done():
+                self._deliver_task = asyncio.create_task(self._deliver_loop())
 
-    async def _send(self, frame: GatewayFrame) -> GatewayFrame | None:
+    async def _send(
+        self, frame: GatewayFrame, *, reply_timeout: float | None = None
+    ) -> GatewayFrame | None:
         """Write a frame and await its reply (routed by the read loop).
 
         The server echoes the reply id in either ``delivery_id`` or
@@ -208,7 +240,9 @@ class GatewayIpcClient:
         if not keys:
             return None  # fire-and-forget frame (no reply expected)
         try:
-            return await asyncio.wait_for(fut, timeout=self._reply_timeout)
+            return await asyncio.wait_for(
+                fut, timeout=self._reply_timeout if reply_timeout is None else reply_timeout
+            )
         except TimeoutError:
             for k in keys:
                 self._pending.pop(k, None)
@@ -369,7 +403,8 @@ class GatewayIpcClient:
     async def reload_channel(self, name: str) -> GatewayFrame | None:
         """Ask the gateway to reload/restart one channel."""
         return await self._send(
-            GatewayFrame.event(event_type="control.reload", payload={"channel": name})
+            GatewayFrame.event(event_type="control.reload", payload={"channel": name}),
+            reply_timeout=max(self._reply_timeout, CHANNEL_RELOAD_TIMEOUT_SECONDS + 5.0),
         )
 
     async def unbind_origin(self, origin: str) -> GatewayFrame | None:

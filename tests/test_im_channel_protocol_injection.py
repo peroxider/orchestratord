@@ -266,7 +266,7 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
         _noop_handlers(),
         origin="im:direct:test:*",
     )
-    client.dispatch = AsyncMock(return_value="followup_queued")  # type: ignore[method-assign]
+    client.dispatch = AsyncMock(return_value="orchestrator_cli_issue_list")  # type: ignore[method-assign]
 
     ipc = AsyncMock()
     ipc_client = MagicMock()
@@ -290,7 +290,7 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
     ipc.complete_processing.assert_awaited_once_with(
         message_id="DEL-123",
         outcome="success",
-        reason="followup_queued",
+        reason="orchestrator_cli_issue_list",
     )
 
 
@@ -299,9 +299,11 @@ async def test_ipc_client_awaits_async_delivery_handler() -> None:
     """The normalized IPC delivery reaches an async orchestrator callback."""
     client = GatewayIpcClient("unused.sock", "test-instance")
     delivered: list[InboundMessage] = []
+    handled = asyncio.Event()
 
     async def on_deliver(message: InboundMessage) -> None:
         delivered.append(message)
+        handled.set()
 
     class Reader:
         def __init__(self) -> None:
@@ -317,7 +319,10 @@ async def test_ipc_client_awaits_async_delivery_handler() -> None:
             ))
 
         async def readline(self) -> bytes:
-            return next(self._lines)
+            line = next(self._lines)
+            if not line:
+                await asyncio.wait_for(handled.wait(), timeout=1)
+            return line
 
     client._reader = Reader()  # type: ignore[assignment]
     client._running = True

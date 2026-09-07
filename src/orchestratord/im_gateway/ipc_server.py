@@ -21,6 +21,7 @@ from typing import Any
 from orchestratord.channels.capabilities import ProcessingOutcome
 from orchestratord.ipc.protocol import FrameType, GatewayFrame
 
+from .origin_utils import is_authorized_origin
 from .origin_utils import resolve_report_targets as _resolve_report_targets
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,13 @@ class GatewayIpcServer:
             semantic=semantic,
             context_token=context_token,
         )
+        # This marker is produced by the local gateway, never copied from an
+        # incoming frame. Clients also check that it matches a concrete origin.
+        if is_authorized_origin(origin, self.gateway):
+            frame.metadata = {"authenticated_origin": origin}
+        elif entry.target.host_type == "orchestrator":
+            logger.warning("gateway ipc: rejected unauthenticated command origin")
+            return False
         await self._send(info["writer"], frame)
         logger.info(
             "gateway ipc: pushed DELIVER origin=%s session=%s delivery_id=%s",
@@ -640,7 +648,7 @@ class GatewayIpcServer:
             except Exception as exc:
                 logger.exception("gateway ipc: reload channel %r failed", name)
                 return GatewayFrame(
-                    type=FrameType.ACK,
+                    type=FrameType.NACK,
                     delivery_id=frame.message_id,
                     ack_layer="nack",
                     reason=f"reload {name}: {exc}",
@@ -649,10 +657,15 @@ class GatewayIpcServer:
                         "peers": self.peers_snapshot(),
                     },
                 )
+            if not ok:
+                return GatewayFrame.nack(
+                    delivery_id=frame.message_id,
+                    reason=f"reload {name}: failed; previous channel retained",
+                )
             return GatewayFrame.ack(
                 delivery_id=frame.message_id,
-                layer="accepted" if ok else "nack",
-                message=f"reload {name}: {'ok' if ok else 'not found'}",
+                layer="accepted",
+                message=f"reload {name}: ok",
             )
         if etype == "control.status":
             health = await self.gateway.health()
@@ -698,6 +711,11 @@ class GatewayIpcServer:
             return False
         entry, authorized = self._processing_entry_for_peer(message_id, peer_session)
         if entry is None or not authorized:
+            return False
+        binding = self.gateway.binding.get(entry.origin)
+        if binding is not None and binding.target.host_type == "orchestrator":
+            # Reply delivery is not command execution. The orchestrator's
+            # explicit processing.complete frame owns its terminal outcome.
             return False
         return await self.gateway.processing_status.complete(
             message_id,

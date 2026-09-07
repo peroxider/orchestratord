@@ -201,8 +201,9 @@ def startup_health_wait_seconds(paths: DaemonPaths) -> float:
 
 
 def _channel_status_ready(status: object) -> bool:
-    text = str(status)
-    return any(marker in text for marker in ("connected", "logged_in"))
+    from orchestratord.channels.health import channel_status_ready
+
+    return channel_status_ready(status)
 
 
 def _channel_status_retrying(status: object) -> bool:

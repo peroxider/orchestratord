@@ -21,12 +21,14 @@ from dataclasses import replace
 from pathlib import Path
 
 from orchestratord.channels.capabilities import ChannelAdapter, ChannelCapability
+from orchestratord.channels.health import channel_health_ready
 from orchestratord.channels.registry import (
     ChannelAdapterRegistry,
     build_default_registry,
 )
 from orchestratord.channels.results import SendStatus
 from orchestratord.ipc.models import AckReceipt, InboundMessage, OutboundMessage
+from orchestratord.ipc.protocol import CHANNEL_RELOAD_TIMEOUT_SECONDS
 
 from .binding import BindingEntry, BindingPolicy
 from .capability_gate import CapabilityGate
@@ -273,13 +275,12 @@ class MessageGateway:
                     health = await adapter.health_check()
                     status = str(getattr(health, "account_status", "") or "")
                 except Exception as exc:  # noqa: BLE001
+                    health = None
                     status = f"health_error:{exc!s}"
                 result[cid] = status
                 # "connected"/"logged_in" = ready; anything else (reconnecting,
                 # credentials_missing, etc.) keeps waiting.
-                if not any(
-                    marker in status for marker in ("connected", "logged_in", "websocket:connected")
-                ):
+                if not channel_health_ready(health):
                     all_ready = False
             if all_ready or asyncio.get_running_loop().time() >= deadline:
                 return result
@@ -308,7 +309,9 @@ class MessageGateway:
         return await self.outbound.broadcast(message, channels=channels)
 
     # -- channel management ---------------------------------------------
-    async def reload_channel(self, name: str, *, ready_timeout: float = 15.0) -> bool:
+    async def reload_channel(
+        self, name: str, *, ready_timeout: float = CHANNEL_RELOAD_TIMEOUT_SECONDS
+    ) -> bool:
         """Rebuild one channel from the on-disk config as an async transaction.
 
         Steps (P4 live reload, transactional):
@@ -321,12 +324,10 @@ class MessageGateway:
         2. Build the new adapter via ``_build_adapter`` without mutating the
            live registry. A failed build keeps the old adapter and the
            in-memory config as-is.
-        3. If the gateway is running, start the new adapter and wait for it
-           to report a connected/healthy state (bounded by ``ready_timeout``;
-           a timeout is treated as degraded-but-usable, mirroring the
-           daemon's startup health semantics — the adapter keeps retrying in
-           the background). An exception from ``start()`` aborts the reload:
-           the half-started replacement is stopped, the old adapter stays.
+        3. Validate the replacement and, if running, start it and wait for
+           healthy readiness within ``ready_timeout``. Invalid configuration,
+           startup failure or timeout stops the replacement and keeps the old
+           adapter and configuration.
         4. Only after a successful build+start, atomically swap in the new
            adapter (registry entry, inbound list, and the gateway's config
            object) and stop the old adapter asynchronously — a slow stop
@@ -363,17 +364,16 @@ class MessageGateway:
             self.store.audit("channel_reload_failed", channel=name, reason="adapter_build_failed")
             return False
         try:
+            validation = new_adapter.validate_config()
+            if not validation.ok:
+                raise ValueError("replacement channel configuration is invalid")
             if self._running and hasattr(new_adapter, "start"):
-                await new_adapter.start()
-                ready = await self._wait_adapter_ready(new_adapter, ready_timeout)
-                if not ready:
-                    logger.warning(
-                        "gateway reload: channel %s not ready after %.1fs — "
-                        "degraded but usable (keeps retrying in background)",
-                        name,
-                        ready_timeout,
-                    )
-        except Exception as exc:  # noqa: BLE001 — start failure aborts the swap
+                async with asyncio.timeout(ready_timeout):
+                    await new_adapter.start()
+                    ready = await self._wait_adapter_ready(new_adapter, ready_timeout)
+                    if not ready:
+                        raise RuntimeError("replacement channel did not become healthy")
+        except (Exception, asyncio.CancelledError) as exc:
             logger.warning("gateway reload: new adapter start failed for %r: %s", name, exc)
             stop = getattr(new_adapter, "stop", None)
             if callable(stop):
@@ -385,6 +385,8 @@ class MessageGateway:
             self.store.audit(
                 "channel_reload_failed", channel=name, reason=f"adapter_start_error: {exc}"
             )
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return False
 
         # -- commit: atomic replacement ----------------------------------
@@ -409,15 +411,10 @@ class MessageGateway:
     async def _wait_adapter_ready(self, adapter, timeout: float) -> bool:
         """Wait until ``adapter`` reports a connected/healthy state.
 
-        Mirrors :meth:`wait_channels_ready`: account statuses containing
-        ``connected``/``logged_in`` are ready. A healthy adapter without an
-        account status (simple outbound/webhook adapters and test fakes)
-        counts as ready immediately. Anything else is polled until
-        ``timeout`` elapses; the caller then treats the channel as degraded
-        but usable, matching the daemon's startup health semantics.
+        Requires a healthy adapter and an exact ready account status. Healthy
+        webhook adapters without an account status are ready immediately.
+        Terminal credential failures and timeouts return False.
         """
-        if timeout <= 0:
-            return False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
@@ -430,11 +427,12 @@ class MessageGateway:
                     exc,
                 )
                 health = None
-            status = str(getattr(health, "account_status", "") or "")
-            if getattr(health, "healthy", False) and not status:
+            if channel_health_ready(health):
                 return True
-            if any(marker in status for marker in ("connected", "logged_in")):
-                return True
+            if getattr(health, "account_status", None) in {
+                "credentials_missing", "session_expired", "not_logged_in",
+            }:
+                return False
             if loop.time() >= deadline:
                 return False
             await asyncio.sleep(0.2)

@@ -210,6 +210,10 @@ class FeishuAppChannelAdapter(ChannelAdapter):
         open_id = self._settings.allowed_user_open_id
         return [open_id] if open_id else []
 
+    @property
+    def origin_account_id(self) -> str:
+        return self._settings.app_id
+
     # -- lifecycle -------------------------------------------------------
 
     async def start(self) -> None:

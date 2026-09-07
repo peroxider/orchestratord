@@ -1,8 +1,7 @@
 """Phase 4: orchestrator runtime alignment for the IM message gateway.
 
 Covers the SPEC im-gateway migration Phase 4 behaviors:
-  * FOLLOW_UP semantics reach the real follow-up control path
-    (``.operator_hints.md`` + ``_handle_followup_control``).
+  * FOLLOW_UP and legacy command entry points cannot execute over IM.
   * COMMAND verbs land on the daemon's existing issue control handlers.
   * Blocked slash commands are ACKed to the user by the gateway
     (notify_user) instead of being pushed to the orchestrator.
@@ -117,9 +116,8 @@ async def _drain(tasks: set) -> None:
 
 
 @pytest.mark.asyncio
-async def test_followup_message_reaches_followup_control_path(tmp_path) -> None:
-    """A followUp DELIVER writes operator hints and re-queues the issue via
-    the existing _handle_followup_control handler."""
+async def test_followup_message_cannot_reach_followup_control_path(tmp_path) -> None:
+    """A followUp DELIVER cannot write hints or re-queue the issue."""
     orch = _partial_orchestrator(tmp_path)
     ipc = _RecordingIpc()
     client = OrchestratorGatewayClient(
@@ -129,7 +127,8 @@ async def test_followup_message_reaches_followup_control_path(tmp_path) -> None:
     )
 
     message = InboundMessage(
-        origin="im:direct:acct:user",
+        origin="feishu:dm:acct:user",
+        metadata={"authenticated_origin": "feishu:dm:acct:user"},
         text="please also add tests",
         message_id="d-fu-1",
         channel_type="gateway",
@@ -139,18 +138,13 @@ async def test_followup_message_reaches_followup_control_path(tmp_path) -> None:
     await client._on_pushed_deliver(message)
     await _drain(orch._tasks)
 
-    orch._handle_followup_control.assert_awaited_once_with(
-        "AGENTSDK-15", "please also add tests"
-    )
-    # The follow-up prompt text is recorded in the issue workspace's
-    # .operator_hints.md (read by prompt_builder at launch time).
-    hints = orch._registry.get("AGENTSDK-15").workspace_path
+    orch._handle_followup_control.assert_not_awaited()
     from pathlib import Path
 
-    hints_file = Path(hints) / ".operator_hints.md"
-    assert "please also add tests" in hints_file.read_text(encoding="utf-8")
-    # The delivery was still processed reliably.
-    assert ipc.complete_calls and ipc.complete_calls[0][0] == "d-fu-1"
+    hints = Path(orch._registry.get("AGENTSDK-15").workspace_path) / ".operator_hints.md"
+    assert not hints.exists()
+    assert ipc.complete_calls[0][1] == "failure"
+
 
 
 @pytest.mark.asyncio
@@ -169,8 +163,8 @@ async def test_followup_without_issue_id_records_hints_only(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_review_command_reaches_review_approve_control(tmp_path) -> None:
-    """/review --approve maps onto _handle_review_approve_control."""
+async def test_legacy_review_command_is_rejected(tmp_path) -> None:
+    """/review is rejected; IM requires the explicit /issue review command."""
     orch = _partial_orchestrator(tmp_path)
     client = OrchestratorGatewayClient(
         _noop_handlers(issue_cli=orch._apply_im_issue_cli),
@@ -179,7 +173,8 @@ async def test_review_command_reaches_review_approve_control(tmp_path) -> None:
     )
 
     message = InboundMessage(
-        origin="im:direct:acct:user",
+        origin="feishu:dm:acct:user",
+        metadata={"authenticated_origin": "feishu:dm:acct:user"},
         text="/review AGENTSDK-15 --approve --comment LGTM",
         message_id="d-rv-1",
         channel_type="gateway",
@@ -188,7 +183,7 @@ async def test_review_command_reaches_review_approve_control(tmp_path) -> None:
     await client._on_pushed_deliver(message)
     await _drain(orch._tasks)
 
-    orch._handle_review_approve_control.assert_awaited_once_with("AGENTSDK-15", "LGTM")
+    orch._handle_review_approve_control.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -538,7 +533,8 @@ async def test_deliver_triggered_outbound_does_not_block_read_loop() -> None:
     frame = GatewayFrame.deliver(
         delivery_id="d-block-1",
         session_id="orch",
-        origin="im:direct:acct:user",
+        origin="feishu:dm:acct:user",
+        metadata={"authenticated_origin": "feishu:dm:acct:user"},
         text="hello",
         semantic="followUp",
     )
@@ -547,7 +543,7 @@ async def test_deliver_triggered_outbound_does_not_block_read_loop() -> None:
     await asyncio.wait_for(client._on_pushed_deliver(frame), timeout=1.0)
 
     # The delivery completes reliably even while the flush is in flight…
-    assert ipc.complete_calls == [("d-block-1", "success", "followup_queued")]
+    assert ipc.complete_calls == [("d-block-1", "failure", "command_rejected")]
     # …and the flush send started but holds no callback hostage.
     assert ipc.sent == ["queued reply"]
     assert list(client._pending_outbound) == ["queued reply"]
@@ -572,7 +568,8 @@ async def test_deliver_flush_serializes_consecutive_deliveries() -> None:
             GatewayFrame.deliver(
                 delivery_id=delivery_id,
                 session_id="orch",
-                origin="im:direct:acct:user",
+                origin="feishu:dm:acct:user",
+                metadata={"authenticated_origin": "feishu:dm:acct:user"},
                 text="hello",
             )
         )
@@ -639,14 +636,15 @@ async def test_command_reply_threads_in_reply_to_delivery_id() -> None:
         GatewayFrame.deliver(
             delivery_id="d-cmd-1",
             session_id="orch",
-            origin="im:direct:acct:user",
+            origin="feishu:dm:acct:user",
+            metadata={"authenticated_origin": "feishu:dm:acct:user"},
             text="/issue list",
             semantic="command",
         )
     )
 
     assert len(ipc.sent) == 1
-    assert ipc.sent[0]["origin"] == "im:direct:acct:user"
+    assert ipc.sent[0]["origin"] == "feishu:dm:acct:user"
     assert ipc.sent[0]["in_reply_to"] == "d-cmd-1"
     assert "命令已执行" in ipc.sent[0]["text"]
     assert "ISSUE-1 done" in ipc.sent[0]["text"]

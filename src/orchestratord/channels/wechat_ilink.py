@@ -971,6 +971,10 @@ class WeChatIlinkChannelAdapter(ChannelAdapter):
         """
         return sorted(self._allowed_users)
 
+    @property
+    def origin_account_id(self) -> str:
+        return self._account_id
+
     async def start(self) -> None:
         if self._poll_task is not None:
             return

@@ -9,10 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestratord.sinks.channel import (
-    ChannelProgressSink,
-    build_gateway_deliver,
-)
 from orchestratord.events import (
     EventLevel,
     OrchestratorEvent,
@@ -20,6 +16,10 @@ from orchestratord.events import (
     format_event,
 )
 from orchestratord.ipc import IM_DIRECT_ALL_ORIGIN
+from orchestratord.sinks.channel import (
+    ChannelProgressSink,
+    build_gateway_deliver,
+)
 
 
 def _session(issue_id="AGENTSDK-15", reason="success", pr=None):
@@ -409,7 +409,6 @@ def test_run_orchestrator_starts_im_heartbeat_inside_runtime_loop(monkeypatch, t
         def create_task(self, coro):
             events.append("old_loop_task")
             coro.close()
-            return None
 
     class _FakeWorkflowLoader:
         @staticmethod
@@ -426,7 +425,7 @@ def test_run_orchestrator_starts_im_heartbeat_inside_runtime_loop(monkeypatch, t
 
     class _FakeSubsystem:
         def __init__(self, _config, **_kwargs):
-            self.status_dashboard = SimpleNamespace(state=lambda: {})
+            self.status_dashboard = SimpleNamespace(state=dict)
 
         async def run(self):
             events.append("subsystem_run")
@@ -939,7 +938,7 @@ def test_mount_gateway_reconnects_when_heartbeat_is_not_accepted(monkeypatch) ->
             nonlocal heartbeat_calls
             heartbeat_calls += 1
             if heartbeat_calls <= 2:
-                return None
+                return
             raise asyncio.CancelledError()
 
     class _FakeClient:
@@ -1179,10 +1178,8 @@ def test_mount_gateway_flushes_pending_outbound_after_accepted_heartbeat(monkeyp
 @pytest.mark.asyncio
 async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
     """A server-pushed DELIVER frame dispatches to the bound handlers."""
-    from orchestratord.sinks.channel import build_ipc_deliver
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
-        OrchestratorHandlers,
     )
     from orchestratord.ipc import GatewayFrame
 
@@ -1206,7 +1203,8 @@ async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
         delivery_id="d1",
         session_id="orch",
         origin="wechat:direct:a:u",
-        text="/pause AGENTSDK-15",
+        metadata={"authenticated_origin": "wechat:direct:a:u"},
+        text="/issue pause --id AGENTSDK-15",
         semantic="command",
     )
     await client._on_pushed_deliver(frame)
@@ -1274,6 +1272,7 @@ async def test_orchestrator_on_pushed_deliver_dispatches_lifecycle_issue_cli(
             delivery_id="d1",
             session_id="orch",
             origin="wechat:direct:a:u",
+            metadata={"authenticated_origin": "wechat:direct:a:u"},
             text=text,
             semantic="command",
         )
@@ -1293,7 +1292,6 @@ async def test_orchestrator_all_private_binding_sends_wildcard_after_inbound() -
     origin; it reuses the single OUTBOUND channel."""
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
-        OrchestratorHandlers,
     )
     from orchestratord.ipc import GatewayFrame
 
@@ -1369,8 +1367,8 @@ async def test_orchestrator_all_private_binding_sends_to_wildcard_then_wildcard(
 @pytest.mark.asyncio
 async def test_orchestrator_pending_outbound_stays_queued_when_flush_is_rejected() -> None:
     """A gateway NACK during flush must not silently drop queued events."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1433,7 +1431,6 @@ async def test_orchestrator_outbound_timeout_does_not_queue_retry() -> None:
 
         async def send_outbound(self, *, origin, text):
             self.sent.append((origin, text))
-            return None
 
     ipc = _TimeoutIpc()
     client = OrchestratorGatewayClient(_handlers(), ipc_client=ipc, origin="im:direct:*:*")
@@ -1460,7 +1457,6 @@ async def test_orchestrator_pending_outbound_timeout_is_dropped_not_retried() ->
 
         async def send_outbound(self, *, origin, text):
             self.sent.append((origin, text))
-            return None
 
     ipc = _TimeoutIpc()
     client = OrchestratorGatewayClient(_handlers(), ipc_client=ipc, origin="im:direct:*:*")
@@ -1547,8 +1543,8 @@ async def test_orchestrator_pending_outbound_dedupes_identical_text() -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_pending_duplicate_does_not_send_while_queued() -> None:
     """A duplicate event already pending must not bypass the queue and send now."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1581,8 +1577,8 @@ async def test_orchestrator_pending_duplicate_does_not_send_while_queued() -> No
 @pytest.mark.asyncio
 async def test_orchestrator_inbound_flush_bypasses_pending_retry_cooldown() -> None:
     """A new inbound WeChat message can refresh context and should trigger a flush."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1637,8 +1633,8 @@ async def test_orchestrator_pending_outbound_concurrent_flush_no_index_error() -
     self._pending_outbound[0] before an await, then both try popleft(),
     causing IndexError: pop from an empty deque.
     """
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     class _SlowIpc:
         """IPC that yields control during send_outbound to simulate concurrency."""
@@ -1791,8 +1787,8 @@ def test_orchestrator_control_stop_emits_im_event() -> None:
 
 @pytest.mark.asyncio
 async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path) -> None:
-    from orchestratord.issue_clarifier.queue import ClarificationQueue
     from orchestratord.cli.issue import _run_review
+    from orchestratord.issue_clarifier.queue import ClarificationQueue
     from orchestratord.issue_registry import IssueRegistry, IssueStatus
     from orchestratord.orchestrator import Orchestrator
     from orchestratord.tracker import Intent

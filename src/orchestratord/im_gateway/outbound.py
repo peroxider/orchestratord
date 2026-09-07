@@ -17,9 +17,12 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import cast
 
-from orchestratord.channels.capabilities import ChannelCapability, OutboundCapability
+from orchestratord.channels.authorization import permits_target
+from orchestratord.channels.capabilities import (
+    CapabilityNotDeclaredError,
+    ChannelCapability,
+)
 from orchestratord.channels.models import ChannelMessage
 from orchestratord.channels.results import ChannelSendResult, ErrorCategory, SendStatus
 from orchestratord.ipc.models import OutboundMessage
@@ -110,7 +113,6 @@ class OutboundDispatcher:
             logger.warning("outbound send: capability gate rejected channel=%s: %s", channel, exc)
             return ChannelSendResult.unsupported(channel, message=str(exc))
 
-        sender = cast(OutboundCapability, adapter)
         chunks, stripped = self._prepare_text(channel, message.text)
         last_result: ChannelSendResult | None = None
         for idx, chunk in enumerate(chunks):
@@ -140,7 +142,6 @@ class OutboundDispatcher:
                 }
             )
             last_result = await self._send_chunk_with_retry(
-                sender,
                 chunk,
                 message,
                 chunk_idem,
@@ -162,7 +163,6 @@ class OutboundDispatcher:
 
     async def _send_chunk_with_retry(
         self,
-        sender: OutboundCapability,
         chunk: str,
         message: OutboundMessage,
         chunk_idem: str,
@@ -182,25 +182,18 @@ class OutboundDispatcher:
             metadata=message.metadata,
         )
         while True:
-            result = await sender.send(
-                payload,
-                target=message.target,
-                context_token=message.context_token,
-            )
+            result = await self._send_authorized(channel, payload, message)
             # Platform rejected the stripped text — retry once as plain text.
             if (
                 not result.ok
                 and stripped
                 and result.status is SendStatus.NONRETRYABLE_ERROR
+                and result.error_category is not ErrorCategory.AUTH
                 and attempt == 1
             ):
                 plain = strip_markdown(chunk) if chunk != strip_markdown(chunk) else chunk
                 payload = ChannelMessage(text=plain, markdown=False, metadata=message.metadata)
-                result = await sender.send(
-                    payload,
-                    target=message.target,
-                    context_token=message.context_token,
-                )
+                result = await self._send_authorized(channel, payload, message)
             if result.ok:
                 self._store.append_outbox(
                     {
@@ -291,6 +284,34 @@ class OutboundDispatcher:
             )
             await self._sleep(delay)
             attempt += 1
+
+    async def _send_authorized(
+        self, channel: str, payload: ChannelMessage, message: OutboundMessage
+    ) -> ChannelSendResult:
+        # Refresh on every attempt/chunk: a reload may revoke the recipient
+        # while a prior send is waiting on provider I/O or retry backoff.
+        try:
+            adapter = self._gate.require_outbound(channel)
+        except (KeyError, CapabilityNotDeclaredError):
+            return ChannelSendResult.unsupported(channel, message="channel unavailable")
+        if not permits_target(adapter, message.target):
+            self._store.audit("outbound_recipient_rejected", channel=channel)
+            return ChannelSendResult.nonretryable_error(
+                channel, message="recipient is not authorized", category=ErrorCategory.AUTH
+            )
+        context_token = message.context_token
+        config = getattr(adapter, "config", None)
+        if (
+            getattr(getattr(config, "type", None), "value", None) == "feishu"
+            and callable(getattr(adapter, "authorized_recipients", None))
+        ):
+            # Feishu's context token is a chat id and overrides an open_id.
+            # Address the authorized recipient directly instead of allowing
+            # stale/arbitrary context to redirect a queued private report.
+            context_token = None
+        return await adapter.send(
+            payload, target=message.target, context_token=context_token
+        )
 
     def _adapter_retry_policy(self, channel: str):
         adapter = self._registry.get(channel)

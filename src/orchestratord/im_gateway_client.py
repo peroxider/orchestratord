@@ -12,10 +12,9 @@ gateway surface is commands + event reports only:
     the wildcard origin (``im:direct:*:*`` by default), which the gateway
     resolves to the authorized recipient(s).
 
-The follow-up / context-only / interrupt / agent-intent branches below
-are protocol-compatibility shims kept for the wire contract only — the
-gateway's dispatcher rejects plain text before it ever reaches this
-client, so they do not make semantic chat a supported capability.
+Both the gateway and this client reject semantic chat and non-whitelisted
+commands. The client requires a concrete origin authenticated by the gateway.
+Legacy semantic enums remain available for wire compatibility only.
 
 The client is a pure dispatcher with injectable handlers so it is
 unit-testable without a live orchestrator. The daemon wiring binds the
@@ -38,6 +37,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from orchestratord.im_gateway.origin_utils import is_concrete_im_origin
+from orchestratord.im_gateway.repl_command_gate import check_orchestrator_command
 from orchestratord.im_gateway.semantics import (
     CommandRouter,
     ControlBridge,
@@ -126,7 +127,7 @@ class OrchestratorGatewayClient:
         # previously invoked this private callback directly.
         if not isinstance(message, InboundMessage):
             message = InboundMessage(
-                origin=getattr(message, "origin", "") or self._origin,
+                origin=getattr(message, "origin", "") or "",
                 text=getattr(message, "text", "") or "",
                 message_id=getattr(message, "delivery_id", "") or "",
                 channel_type="gateway",
@@ -136,14 +137,15 @@ class OrchestratorGatewayClient:
                 metadata=dict(getattr(message, "metadata", {}) or {}),
             )
         semantic = None
-        if message.semantic:
-            with contextlib.suppress(ValueError):
+        if message.semantic is not None:
+            try:
                 semantic = MessageSemantics(message.semantic)
+            except ValueError:
+                await self._complete_processing(message.message_id, "failure", "invalid semantic")
+                return
         # Keep the normalized message supplied by GatewayIpcClient.  Its
         # metadata/context token are part of the routing contract and must not
         # be discarded while crossing the IPC boundary.
-        if not message.origin:
-            message.origin = self._origin
         if semantic is None:
             message.semantic = self._classify(message)
             semantic = message.semantic
@@ -152,19 +154,18 @@ class OrchestratorGatewayClient:
         self._current_delivery_id = message.message_id
         try:
             status = await self.dispatch(message, semantic)
-            # Flush DELIVER-triggered outbound replies OFF the read-loop
-            # chain: the IPC read loop awaits on_deliver sequentially, and
-            # awaiting the flush here would wait for an OUTBOUND ACK that
-            # only that same read loop can read — a deadlock until
-            # reply_timeout. Fire-and-forget instead; complete_processing
-            # (fire-and-forget itself) still goes out reliably.
+            # Drain replies independently so provider latency does not delay
+            # the next command. Command completion records execution outcome;
+            # delivery success is reported separately by OUTBOUND ACK/NACK.
             self._schedule_deliver_flush()
             # Yield once so the scheduled flush starts before this delivery
             # callback returns.
             await asyncio.sleep(0)
             await self._complete_processing(
                 message.message_id,
-                "failure" if status in {"not_dispatched", "command_unroutable"} else "success",
+                "success" if status.startswith("orchestrator_cli_") and status not in {
+                    "orchestrator_cli_invalid", "orchestrator_cli_failed",
+                } else "failure",
                 status,
             )
             logger.info(
@@ -172,6 +173,9 @@ class OrchestratorGatewayClient:
                 message.message_id[:16],
                 status,
             )
+        except asyncio.CancelledError:
+            await self._complete_processing(message.message_id, "cancelled", "connection closed")
+            raise
         except Exception:
             await self._complete_processing(
                 message.message_id,
@@ -462,56 +466,30 @@ class OrchestratorGatewayClient:
                 self._pending_outbound_extras.popleft()
 
     async def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
-        """Route ``message`` to the right existing orchestrator entry.
-
-        Returns a short status string describing the dispatch (for ack).
-        In the orchestratord gateway scope only ``command`` traffic reaches
-        this client (the gateway dispatcher rejects plain text upstream);
-        the follow-up / context-only / interrupt branches are
-        wire-protocol compatibility, not a supported chat surface.
-        """
-        issue_id = self._issue_id(message)
-        if semantic is MessageSemantics.FOLLOW_UP:
-            self._h.queue_pending_message(issue_id, message.text)
-            return "followup_queued"
-        if semantic is MessageSemantics.CONTEXT_ONLY:
-            self._h.operator_hints(issue_id, message.text)
-            return "context_only_recorded"
-        if semantic is MessageSemantics.INTERRUPT:
-            # interrupt maps to control verbs via the bridge
-            ctrl = self._control.resolve(MessageSemantics.INTERRUPT, None)
-            if ctrl is not None:
-                self._h.bridge_interrupt(issue_id, ctrl.payload)
-            return "interrupt_dispatched"
-        if semantic is MessageSemantics.COMMAND:
-            route = self._commands.route(message)
-            if route is None:
-                return "command_unroutable"
-            if route.kind == "orchestrator_cli":
-                return await self._dispatch_orchestrator_cli(
-                    route,
-                    reply_origin=message.origin,
-                    in_reply_to=message.message_id,
-                )
-            if route.kind == "agent_intent":
-                self._h.agent_intent(route.verb, route.issue_hint or issue_id)
-                return f"agent_{route.verb}"
-            # control_verb
-            ctrl = self._control.resolve(semantic, route)
-            if ctrl is None:
-                return "command_unroutable"
-            if ctrl.surface == "control_socket":
-                self._h.control_verb(ctrl.verb, ctrl.issue_hint or issue_id)
-                return f"control_{ctrl.verb}"
-            if ctrl.surface == "issue_inject":
-                self._h.issue_inject(ctrl.issue_hint or issue_id, route.payload)
-                return "inject_delivered"
-            if ctrl.surface == "issue_cli":
-                self._h.issue_cli(ctrl.verb, ctrl.issue_hint or issue_id, ctrl.payload)
-                return f"issue_cli_{ctrl.verb}"
-            return f"issue_cli_{ctrl.verb}"
-        # newPrompt / approval → leave to the host agent / approval binding
-        return "not_dispatched"
+        """Execute only an authenticated, explicitly allowed IM command."""
+        if (
+            not is_concrete_im_origin(message.origin)
+            or (message.metadata or {}).get("authenticated_origin") != message.origin
+        ):
+            return "origin_unauthenticated"
+        allowed, _ = check_orchestrator_command(message.text)
+        if semantic is not MessageSemantics.COMMAND or not allowed:
+            return "command_rejected"
+        route = self._commands.route(message)
+        if route is None or route.kind != "orchestrator_cli":
+            return "command_unroutable"
+        # The CLI requires explicit --id too; enforce it here for direct
+        # lifecycle handlers and bounded /issue tail replies as well.
+        argv = list(route.argv)
+        if argv[0] == "issue" and argv[1] != "list" and not self._arg_value(argv, "--id"):
+            self._queue_command_reply(
+                route.payload, 2, "", "error: --id is required",
+                origin=message.origin, in_reply_to=message.message_id,
+            )
+            return "orchestrator_cli_invalid"
+        return await self._dispatch_orchestrator_cli(
+            route, reply_origin=message.origin, in_reply_to=message.message_id
+        )
 
     async def _dispatch_orchestrator_cli(
         self,
@@ -544,7 +522,7 @@ class OrchestratorGatewayClient:
                     origin=reply_origin,
                     in_reply_to=in_reply_to,
                 )
-                return f"orchestrator_cli_issue_{verb}"
+                return "orchestrator_cli_invalid"
             self._h.control_verb(verb, issue_id)
             self._queue_command_reply(
                 route.payload,
@@ -576,7 +554,7 @@ class OrchestratorGatewayClient:
             origin=reply_origin,
             in_reply_to=in_reply_to,
         )
-        return f"orchestrator_cli_{noun}_{verb}"
+        return f"orchestrator_cli_{noun}_{verb}" if rc == 0 else "orchestrator_cli_failed"
 
     async def _run_cli_isolated(self, argv: list[str]) -> tuple[int, str, str]:
         """Run one CLI command serially with a real execution timeout.

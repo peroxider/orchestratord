@@ -182,6 +182,8 @@ class InboundDispatcher:
                 message.text or "",
                 allowed_commands=self._orchestrator_allowed_commands,
             )
+            if allowed and message.semantic is not MessageSemantics.COMMAND:
+                allowed, reason = False, PLAIN_TEXT_NOTICE
             if not allowed:
                 self._store.audit(
                     "orchestrator_command_blocked",

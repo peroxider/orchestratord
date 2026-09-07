@@ -729,7 +729,7 @@ async def test_ipc_control_reload_live(tmp_path) -> None:
             resp = await client.reload_channel("wechat")
             assert resp is not None and resp.ack_layer == "accepted"
             missing = await client.reload_channel("missing")
-            assert missing is not None and missing.ack_layer == "nack"
+            assert missing is not None and missing.type is FrameType.NACK
         assert gw.reloaded == ["wechat", "missing"]
     finally:
         await server.close()
@@ -794,6 +794,7 @@ async def test_ipc_control_reload_exception_returns_nack_with_peers(tmp_path) ->
 
         assert resp is not None
         assert resp.ack_layer == "nack"
+        assert resp.type is FrameType.NACK
         assert "adapter busy" in (resp.reason or "")
         assert resp.payload is not None
         assert resp.payload["peers"][0]["pid"] == 4321
