@@ -29,9 +29,13 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from orchestratord.api.db import get_repositories
+from orchestratord.api.routers.integrations import _sign_state, _verify_state
+from orchestratord.integrations import OAuthError
+from orchestratord.integrations.github_app import GitHubAppOAuth, github_app_from_env
 from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 
@@ -194,3 +198,113 @@ async def github_webhook(
     # sync — see the module docstring.
 
     return {"ok": True, "event": event}
+
+
+# ---------------------------------------------------------------------------
+# GitHub App handshake (§6.5, isomorphic to §6.3)
+# ---------------------------------------------------------------------------
+
+
+def get_github_app_oauth() -> GitHubAppOAuth | None:
+    """Dependency seam: env-built client; tests override with MockTransport."""
+    return github_app_from_env()
+
+
+@router.get("/api/workspaces/{workspace_id}/vcs/github/authorize")
+async def github_authorize(
+    workspace_id: UUID,
+    repos: Repositories = Depends(get_repositories),
+    oauth: GitHubAppOAuth | None = Depends(get_github_app_oauth),
+) -> object:
+    """Redirect to the GitHub App install page with a signed ``state`` (§6.5)."""
+    workspace = await repos.workspaces.get(workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if oauth is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GitHub App not configured (set ORCHESTRATORD_GITHUB_APP_SLUG)",
+        )
+    return RedirectResponse(oauth.authorize_url(_sign_state(workspace_id)), 302)
+
+
+@router.get("/api/workspaces/{workspace_id}/vcs/github/callback")
+async def github_callback(
+    workspace_id: UUID,
+    state: str,
+    code: str | None = None,
+    installation_id: int | None = None,
+    account_login: str | None = None,
+    repos: Repositories = Depends(get_repositories),
+    oauth: GitHubAppOAuth | None = Depends(get_github_app_oauth),
+) -> dict:
+    """Complete the GitHub App handshake and register the installation (§6.5).
+
+    Manifest flow: ``code`` → ``/app-manifests/{code}/conversions`` yields the
+    installation id and account login. Pre-existing app flow: GitHub's
+    callback carries ``installation_id`` directly; the account login must be
+    supplied (it is not part of GitHub's callback query).
+    """
+    if _verify_state(state) != workspace_id:
+        raise HTTPException(status_code=403, detail="invalid oauth state")
+    if code:
+        if oauth is None:
+            raise HTTPException(
+                status_code=503,
+                detail="GitHub App not configured (set ORCHESTRATORD_GITHUB_APP_SLUG)",
+            )
+        try:
+            conversion = await oauth.exchange_code(code)
+            details = oauth.installation_from_conversion(conversion)
+        except OAuthError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+    elif installation_id is not None and account_login:
+        details = {
+            "installation_id": installation_id,
+            "account_login": account_login,
+        }
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="callback requires either code or installation_id+account_login",
+        )
+
+    existing = await repos.installations.by_installation_id(
+        details["installation_id"]
+    )
+    if existing is not None:
+        if existing.workspace_id != workspace_id:
+            raise HTTPException(
+                status_code=409,
+                detail="installation already registered for another workspace",
+            )
+        existing.account_login = details["account_login"]
+        installation = existing
+    else:
+        installation = await repos.installations.add(
+            orm.GitHubInstallation(
+                id=uuid4(),
+                workspace_id=workspace_id,
+                installation_id=details["installation_id"],
+                account_login=details["account_login"],
+                created_at=datetime.now(UTC),
+            )
+        )
+    try:
+        from orchestratord.api.realtime import get_broker
+
+        await get_broker().publish(
+            f"workspace.{workspace_id}",
+            {
+                "event": "installation_registered",
+                "installation_id": details["installation_id"],
+            },
+        )
+    except Exception:  # noqa: BLE001 — broker is a notification channel
+        pass
+    return {
+        "registered": True,
+        "workspace_id": str(workspace_id),
+        "installation_id": details["installation_id"],
+        "account_login": details["account_login"],
+    }

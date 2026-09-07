@@ -10,12 +10,14 @@ consumes, so it is pinned by tests regardless of the backing store.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from orchestratord.api.db import get_repositories
+from orchestratord.api.realtime import get_broker
 from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.issue import Issue, IssueComment
@@ -88,6 +90,7 @@ class _CommentCreate(BaseModel):
 class _MentionCreate(BaseModel):
     agent_id: UUID | None = None
     member_id: UUID | None = None
+    text: str = ""
 
 
 @router.get("")
@@ -242,7 +245,17 @@ async def mention(
     body: _MentionCreate,
     repos: Repositories = Depends(get_repositories),
 ) -> dict:
-    await _issue_or_404(repos, workspace_id, issue_id)
+    """Dispatch an ``@agent`` / ``@member`` mention on an issue (§6.2).
+
+    Starts a session for the issue: ``agent_id`` mentions bind the session to
+    that agent; ``member_id`` mentions are self-mentions in single-user mode
+    (D9) and leave ``agent_id=None`` so the runner picks the workspace
+    default. BackendRunner triggering is NOT done here — the created session
+    has ``status="pending"`` and is picked up by the chat/mention daemon
+    (Phase B §6.1d). Non-empty ``text`` is recorded as the initial user
+    message on the session's chat timeline.
+    """
+    issue = await _issue_or_404(repos, workspace_id, issue_id)
     if (body.agent_id is None) == (body.member_id is None):
         raise HTTPException(
             status_code=422,
@@ -253,5 +266,58 @@ async def mention(
         if body.agent_id is not None
         else {"member_id": str(body.member_id)}
     )
-    # Phase 5 routes mention to the notification channel (§7.5); Phase 1 acks.
-    return {"mentioned": True, "issue_id": str(issue_id), **target}
+
+    session_id = uuid4()
+    session = orm.Session(
+        id=session_id,
+        workspace_id=workspace_id,
+        issue_id=issue.id,
+        agent_id=body.agent_id,
+        run_id=None,
+        mode="single",
+        status="pending",
+        created_at=datetime.now(UTC),
+    )
+    await repos.sessions.add(session)
+
+    message_payload: dict | None = None
+    if body.text.strip():
+        message = orm.Message(
+            id=uuid4(),
+            session_id=session_id,
+            workspace_id=workspace_id,
+            seq=0,  # sentinel — repository auto-assigns the next seq
+            role="user",
+            content=body.text,
+            agent_id=None,
+            author_label="me",
+            created_at=datetime.now(UTC),
+        )
+        await repos.messages.append(message)
+        message_payload = {
+            "id": str(message.id),
+            "seq": message.seq,
+            "role": message.role,
+            "content": message.content,
+        }
+
+    try:
+        await get_broker().publish(
+            f"session.{session_id}",
+            {
+                "event": "mention_dispatched",
+                "issue_id": str(issue_id),
+                **target,
+            },
+        )
+    except Exception:  # noqa: BLE001 — broker is a notification channel
+        pass
+
+    return {
+        "mentioned": True,
+        "issue_id": str(issue_id),
+        "session_id": str(session_id),
+        "session_status": session.status,
+        "message": message_payload,
+        **target,
+    }

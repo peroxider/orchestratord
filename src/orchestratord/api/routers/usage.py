@@ -64,6 +64,7 @@ class _UsageCreate(BaseModel):
     agent_id: UUID | None = None
     issue_id: UUID | None = None
     backend: str = ""
+    model: str = ""
     recorded_at: datetime | None = None
 
 
@@ -73,12 +74,22 @@ async def record_usage(
     body: _UsageCreate,
     repos: Repositories = Depends(get_repositories),
 ) -> dict:
+    cost_usd = body.cost_usd
+    if cost_usd == 0.0:
+        # Backends without cost reporting (§7.2): estimate from tokens +
+        # model. Unresolvable pricing leaves the record at 0 rather than
+        # failing ingestion.
+        from orchestratord.cost.estimator import estimate_cost_usd
+
+        estimated = estimate_cost_usd(body.model, body.tokens_in, body.tokens_out)
+        if estimated is not None:
+            cost_usd = estimated
     try:
         record = UsageRecord(
             workspace_id=workspace_id,
             tokens_in=body.tokens_in,
             tokens_out=body.tokens_out,
-            cost_usd=body.cost_usd,
+            cost_usd=cost_usd,
             agent_id=body.agent_id,
             issue_id=body.issue_id,
             backend=body.backend,

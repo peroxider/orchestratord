@@ -77,6 +77,44 @@ def _mention_text(text: str) -> str:
     return stripped
 
 
+async def dispatch_mention(
+    repos: Repositories, channel: orm.Channel, text: str
+) -> dict:
+    """Shared ``@orchestratord <text>`` dispatch (link or create an issue).
+
+    Raises ``LookupError`` when a trailing UUID names a missing or
+    cross-workspace issue; callers map that to their transport (HTTP 404 for
+    the REST trigger, ``handled: false`` for the inbound webhook §6.4).
+    """
+    issue_id = _parse_issue_mention(text)
+    if issue_id is not None:
+        issue = await repos.issues.get(issue_id)
+        if issue is None or issue.workspace_id != channel.workspace_id:
+            raise LookupError("issue not found")
+        return {"issue_id": str(issue_id), "created": False}
+    title = _mention_text(text)
+    issue = Issue(
+        id=uuid4(),
+        workspace_id=channel.workspace_id,
+        title=title,
+        description=title,
+        status="pending",
+    )
+    await repos.issues.add(
+        orm.Issue(
+            id=issue.id,
+            workspace_id=issue.workspace_id,
+            title=issue.title,
+            description=issue.description,
+            status=issue.status,
+            assignee_type=None,
+            assignee_id=None,
+            created_at=issue.created_at,
+        )
+    )
+    return {"issue_id": str(issue.id), "created": True}
+
+
 class _ChannelCreate(BaseModel):
     provider: str
     name: str
@@ -155,43 +193,11 @@ async def trigger(
     repos: Repositories = Depends(get_repositories),
 ) -> dict:
     channel = await _channel_by_id_or_404(repos, channel_id)
-    issue_id = _parse_issue_mention(body.text)
-    if issue_id is not None:
-        issue = await repos.issues.get(issue_id)
-        if issue is None or issue.workspace_id != channel.workspace_id:
-            raise HTTPException(status_code=404, detail="issue not found")
-        return {
-            "dispatched": True,
-            "channel_id": str(channel_id),
-            "issue_id": str(issue_id),
-            "created": False,
-        }
-    title = _mention_text(body.text)
-    issue = Issue(
-        id=uuid4(),
-        workspace_id=channel.workspace_id,
-        title=title,
-        description=title,
-        status="pending",
-    )
-    await repos.issues.add(
-        orm.Issue(
-            id=issue.id,
-            workspace_id=issue.workspace_id,
-            title=issue.title,
-            description=issue.description,
-            status=issue.status,
-            assignee_type=None,
-            assignee_id=None,
-            created_at=issue.created_at,
-        )
-    )
-    return {
-        "dispatched": True,
-        "channel_id": str(channel_id),
-        "issue_id": str(issue.id),
-        "created": True,
-    }
+    try:
+        result = await dispatch_mention(repos, channel, body.text)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"dispatched": True, "channel_id": str(channel_id), **result}
 
 
 @router.post("/api/channels/{channel_id}/push", status_code=202)
