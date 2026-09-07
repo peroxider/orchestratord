@@ -88,6 +88,7 @@ def test_descriptor_has_required_fields() -> None:
         "backend_package",
         "capabilities",
         "protocol_family",
+        "runtime_id",
         "cli_command",
         "cli_args_probe",
         "env_prefix",

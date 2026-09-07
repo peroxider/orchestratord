@@ -6,10 +6,10 @@ import shutil
 from dataclasses import fields
 
 import pytest
-
-from orchestratord.spi.backend import SessionSpec
 from orchestratord_zeroclaw.backend import ZeroclawBackend
 from orchestratord_zeroclaw.descriptor import ZEROCLAW_DESCRIPTOR
+
+from orchestratord.spi.backend import SessionSpec
 
 
 def test_descriptor_capabilities_match_backend() -> None:

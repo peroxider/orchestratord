@@ -89,7 +89,7 @@ def test_create_tables_has_no_indexes() -> None:
 
 
 def test_each_concurrently_index_in_own_file() -> None:
-    assert len(_index_files()) == 39
+    assert len(_index_files()) == 40
     for path in _index_files():
         text = path.read_text(encoding="utf-8")
         statements = text.count("op.create_index(") + text.count(

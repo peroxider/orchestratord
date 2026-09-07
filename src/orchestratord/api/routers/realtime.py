@@ -1,12 +1,18 @@
-"""Realtime WebSocket protocol (``docs/FEATURE_GAP_VS_MULTICA.md`` §5.4.1,
-§6.4).
+"""Realtime WebSocket protocol (``docs/FEATURE_GAP_VS_MULTICA.md`` §5.1,
+§5.4.1, §6.4).
 
 Implements the ``/ws`` endpoint introduced by the FastAPI split. The wire
 contract carries realtime events (daemon → server → browser) and routes
-``session.approve`` back the other way. This is the protocol skeleton: the
-token gate is a Phase-1 stub (real auth is §5.7.4) and the topic pub/sub
-backbone (§6.4) is wired when the runtime-token + reverse-heartbeat work
-lands. Message shapes mirror multica ``server/internal/realtime``.
+``session.approve`` back the other way. The topic pub/sub backbone (§5.1)
+is the process-wide :class:`orchestratord.api.realtime.RealtimeBroker`
+singleton — the WebSocket handler subscribes to a topic set, mutates that
+set via :meth:`update_topics` on subscribe/unsubscribe frames, and runs a
+concurrent broadcast loop that pulls frames from the broker's async
+iterator. Message shapes mirror multica ``server/internal/realtime``.
+
+This is still a Phase-1 protocol skeleton: the token gate is a stub (real
+auth is §5.7.4), and ``session.approve`` acknowledges but does not yet
+route to the BackendRunner (that lands in Phase A.2 §5.2.3).
 """
 
 from __future__ import annotations
@@ -15,6 +21,8 @@ import asyncio
 import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+
+from orchestratord.api.realtime import get_broker
 
 router = APIRouter(tags=["realtime"])
 
@@ -60,43 +68,80 @@ async def websocket_realtime(websocket: WebSocket) -> None:
     await websocket.accept()
     await websocket.send_json({"type": "hello", "workspace_id": workspace_id})
 
+    broker = get_broker()
     topics: set[str] = set()
-    first_idle = True
+    sub_id, frame_iter = await broker.subscribe(topics)
+    # Mutable flag shared by the broadcast loop so the 0.5s liveness probe
+    # fires only once; subsequent idle intervals use the 30s heartbeat.
+    state = {"first_idle": True}
 
-    while True:
-        timeout = _LIVENESS_PROBE_SECONDS if first_idle else _HEARTBEAT_SECONDS
-        try:
-            message = await asyncio.wait_for(
-                websocket.receive_json(), timeout=timeout
-            )
-        except TimeoutError:
-            await websocket.send_json({"type": "ping", "ts": time.time()})
-            first_idle = False
-            continue
-        except WebSocketDisconnect:
-            break
-        first_idle = False
+    async def _receive_loop() -> None:
+        """Process client frames: subscribe/unsubscribe/session.approve.
 
-        if not isinstance(message, dict):
-            continue
-        msg_type: str = message.get("type", "")
+        Runs until the socket disconnects, at which point ``receive_json``
+        raises :class:`WebSocketDisconnect` and propagates to ``gather``,
+        cancelling the broadcast loop in the same ``gather`` call.
+        """
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                continue
+            msg_type: str = message.get("type", "")
+            if msg_type == "subscribe":
+                topics.update(_coerce_topics(message.get("topics")))
+                await broker.update_topics(sub_id, topics)
+                await websocket.send_json(
+                    {"type": "subscribed", "topics": sorted(topics)}
+                )
+            elif msg_type == "unsubscribe":
+                topics.difference_update(_coerce_topics(message.get("topics")))
+                await broker.update_topics(sub_id, topics)
+                await websocket.send_json(
+                    {"type": "unsubscribed", "topics": sorted(topics)}
+                )
+            elif msg_type == "session.approve":
+                # Phase A.2 (§5.2.3) routes this to the BackendRunner's
+                # pending-approval store; until then acknowledge the frame so
+                # the client's approve round-trip completes.
+                await websocket.send_json(
+                    {
+                        "type": "session.approve.ack",
+                        "session_id": message.get("session_id", ""),
+                        "tool_call_id": message.get("tool_call_id", ""),
+                    }
+                )
 
-        if msg_type == "subscribe":
-            topics.update(_coerce_topics(message.get("topics")))
-            await websocket.send_json({"type": "subscribed", "topics": sorted(topics)})
-        elif msg_type == "unsubscribe":
-            topics.difference_update(_coerce_topics(message.get("topics")))
-            await websocket.send_json(
-                {"type": "unsubscribed", "topics": sorted(topics)}
+    async def _broadcast_loop() -> None:
+        """Pull frames from the broker iterator and push them as ``event``s.
+
+        Also emits the heartbeat ping: 0.5s after the last activity (or
+        connect), then 30s thereafter. The first ping is the liveness probe
+        that the contract test asserts; later pings are the idle keepalive.
+        """
+        while True:
+            timeout = (
+                _LIVENESS_PROBE_SECONDS if state["first_idle"] else _HEARTBEAT_SECONDS
             )
-        elif msg_type == "session.approve":
-            # Phase 2 routes this to the BackendRunner's pending-approval
-            # store (§5.2.3/§5.4.1); until then acknowledge the frame so the
-            # client's approve round-trip completes.
-            await websocket.send_json(
-                {
-                    "type": "session.approve.ack",
-                    "session_id": message.get("session_id", ""),
-                    "tool_call_id": message.get("tool_call_id", ""),
-                }
-            )
+            try:
+                frame = await asyncio.wait_for(frame_iter.__anext__(), timeout=timeout)
+            except TimeoutError:
+                await websocket.send_json({"type": "ping", "ts": time.time()})
+                state["first_idle"] = False
+                continue
+            except StopAsyncIteration:
+                # Broker removed our subscription (e.g. test teardown);
+                # exit cleanly so ``gather`` unblocks.
+                return
+            state["first_idle"] = False
+            await websocket.send_json({"type": "event", **frame})
+
+    try:
+        await asyncio.gather(_receive_loop(), _broadcast_loop())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        # Idempotent — the broker's iterator ``finally`` also calls
+        # ``unsubscribe`` when this task ends, so this is a belt-and-braces
+        # cleanup that survives a cancel-mid-iter race.
+        await broker.unsubscribe(sub_id)
+

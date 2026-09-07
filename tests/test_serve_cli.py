@@ -45,7 +45,7 @@ class TestRun:
 
         monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=fake_run))
 
-        args = _make_args(["--host", "127.0.0.1", "--port", "9123"])
+        args = _make_args(["--host", "127.0.0.1", "--port", "9123", "--no-seed"])
         assert run(args) == 0
         assert calls["app"] == "orchestratord.api.app:app"
         assert calls["host"] == "127.0.0.1"

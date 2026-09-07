@@ -362,11 +362,40 @@ class StateMachineMixin:
         return record
 
     def mark_completed(self, issue_id: str) -> IssueRecord | None:
-        """Mark the issue as COMPLETED (session finished successfully)."""
+        """Mark the issue as COMPLETED (session finished successfully).
+
+        Clears verification / hook-error fields left by any earlier failed
+        attempt: a completed record must not keep carrying a stale
+        ``verification_status="failed"`` (e.g. a prior ``premise_not_met``)
+        next to ``status="completed"``. A ``"passed"`` verification from
+        the current run is preserved — the success path persists it just
+        before this transition and dashboards read it afterwards.
+        """
         record = self._records.get(issue_id)
         if record is None:
             return None
         record.status = IssueStatus.COMPLETED
+        if record.verification_status == "failed":
+            record.verification_status = None
+            record.verification_output = None
+        if record.last_hook_error:
+            record.last_hook_error = None
+        record.touch()
+        self._save()
+        return record
+
+    def mark_pending(self, issue_id: str) -> IssueRecord | None:
+        """Return the issue to PENDING (claim released without a run).
+
+        Used when a run is interrupted by daemon shutdown before it could
+        produce a verdict: the issue did not fail on its own merits, so it
+        must stay dispatchable by the next daemon start.
+        """
+        record = self._records.get(issue_id)
+        if record is None:
+            return None
+        record.status = IssueStatus.PENDING
+        record.pause_reason = ""
         record.touch()
         self._save()
         return record

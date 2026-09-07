@@ -45,6 +45,7 @@ EXPECTED_TABLES = {
     "issue_labels",
     "issue_status_history",
     "sessions",
+    "messages",
     "runs",
     "events",
     "approvals",
