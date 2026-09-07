@@ -18,9 +18,12 @@ from orchestratord_cursor.session import CursorSession
 class CursorBackend:
     """Cli backend that spawns ``cursor-agent`` per turn.
 
-    cursor-agent output is parsed as line-based text. The orchestrator
-    core treats the entire stdout as a single TEXT event (conservative:
-    no streaming-deltas claim until the protocol is exercised in-tree).
+    The CLI's ``--output-format stream-json`` stream is translated
+    wire-level by :class:`CursorSession` — ported from the multica Go
+    reference (``server/pkg/agent/cursor.go``). Text arrives as complete
+    blocks inside ``assistant`` events (no incremental text-fragment
+    event exists in the protocol), so the backend does NOT claim
+    ``streaming_deltas``.
     """
 
     name = "cursor"

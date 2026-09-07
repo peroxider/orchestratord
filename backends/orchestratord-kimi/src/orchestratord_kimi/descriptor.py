@@ -11,9 +11,10 @@ KIMI_DESCRIPTOR = BackendDescriptor(
     backend_package="orchestratord-kimi",
     capabilities=frozenset({
         "parallel_sessions",
+        "streaming_deltas",
     }),
     cli_command="kimi",
     env_prefix="KIMI_",
-    launch_header="kimi (spawn-per-turn, zh-CN prompt friendly)",
+    launch_header="kimi acp (ACP JSON-RPC stdio, spawn-per-turn)",
     model_discovery="user",
 )

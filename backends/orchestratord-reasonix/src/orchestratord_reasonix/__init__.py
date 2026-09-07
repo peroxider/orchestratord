@@ -1,9 +1,10 @@
 """orchestratord-reasonix — Reasonix CLI backend.
 
-Wraps the ``reasonix`` binary as a spawn-per-turn Cli backend. §8.1 marks
-the reasonix event stream as "not yet exercised", so this backend is
-intentionally conservative: no streaming-deltas claim until the wire
-format is exercised in-tree.
+Wraps the ``reasonix`` binary as a spawn-per-turn backend. Ported from
+multica ``server/pkg/agent/reasonix.go``: the Reasonix CLI speaks ACP
+(Agent Client Protocol) JSON-RPC 2.0 over stdio via the ``acp``
+subcommand, so the session translates ``session/update`` streams into
+real TEXT_DELTA / TOOL_CALL / TOOL_RESULT events (FEATURE_GAP §8.2.3).
 """
 
 from orchestratord_reasonix.backend import ReasonixBackend

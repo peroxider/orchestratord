@@ -1,7 +1,7 @@
-"""ReasonixBackend — Cli backend wrapping the ``reasonix`` binary.
+"""ReasonixBackend — ACP backend wrapping ``reasonix acp``.
 
-Family: Cli
-Capabilities: parallel_sessions
+Family: Cli (ACP JSON-RPC stdio transport)
+Capabilities: streaming_deltas parallel_sessions
 """
 
 from __future__ import annotations
@@ -16,13 +16,16 @@ from orchestratord_reasonix.session import ReasonixSession
 
 
 class ReasonixBackend:
-    """Cli backend that spawns ``reasonix`` per turn.
+    """ACP backend that spawns ``reasonix acp`` per turn.
 
-    The reasonix CLI's event stream shape is not yet exercised in-tree
-    (FEATURE_GAP §8.1). Until a wire-level translator is built, the
-    backend buffers the entire stdout as a single TEXT event — the
-    orchestrator's split-whole-text-into-pseudo-deltas degradation path
-    handles downstream consumers uniformly.
+    Ported from multica ``server/pkg/agent/reasonix.go``: the Reasonix
+    CLI speaks ACP (Agent Client Protocol) JSON-RPC 2.0 over stdio via
+    the ``acp`` subcommand (fixed sandbox/profile flags), so the session
+    translates ``agent_message_chunk`` / ``tool_call`` /
+    ``tool_call_update`` updates into real deltas and tool events
+    instead of buffering whole stdout (FEATURE_GAP §8.2.3).  Permissions
+    — including Reasonix user questions and protected decisions — are
+    auto-answered in-protocol, mirroring the unattended Go daemon.
     """
 
     name = "reasonix"
@@ -42,15 +45,16 @@ class ReasonixBackend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            streaming_deltas=False,
-            resumable=False,
-            interrupt=False,
-            approval_hooks=False,
-            parallel_sessions=True,
-            cost_reporting=False,
+            streaming_deltas=True,   # session/update agent_message_chunk
+            resumable=False,         # continuity via session/resume per turn
+            interrupt=False,         # best-effort session/cancel only
+            approval_hooks=False,    # permissions auto-answered in-protocol
+            parallel_sessions=True,  # one process per turn
+            cost_reporting=False,    # status_update usage has no SPI surface
             tool_filtering=False,
             takeover=False,
-            # reasonix has no cross-process resume protocol.
+            goal_mode=False,
+            # reasonix has no cross-process resume probe.
             resume_detection=False,
         )
 

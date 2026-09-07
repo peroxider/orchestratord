@@ -14,6 +14,6 @@ CURSOR_DESCRIPTOR = BackendDescriptor(
     }),
     cli_command="cursor-agent",
     env_prefix="CURSOR_",
-    launch_header="cursor-agent (spawn-per-turn)",
+    launch_header="cursor-agent (spawn-per-turn, stream-json)",
     model_discovery="user",
 )

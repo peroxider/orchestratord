@@ -11,9 +11,10 @@ ZEROCLAW_DESCRIPTOR = BackendDescriptor(
     backend_package="orchestratord-zeroclaw",
     capabilities=frozenset({
         "parallel_sessions",
+        "streaming_deltas",
     }),
     cli_command="zeroclaw",
     env_prefix="ZEROCLAW_",
-    launch_header="zeroclaw (spawn-per-turn, event stream shape not yet exercised)",
+    launch_header="zeroclaw (spawn-per-turn, ACP/JSON-RPC over stdio: §8.2.3)",
     model_discovery="user",
 )

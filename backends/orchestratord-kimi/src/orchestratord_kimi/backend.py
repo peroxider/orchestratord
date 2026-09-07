@@ -1,7 +1,7 @@
-"""KimiBackend — Cli backend wrapping the ``kimi`` binary.
+"""KimiBackend — ACP backend wrapping ``kimi acp``.
 
-Family: Cli
-Capabilities: parallel_sessions
+Family: Cli (ACP JSON-RPC stdio transport)
+Capabilities: streaming_deltas parallel_sessions
 """
 
 from __future__ import annotations
@@ -16,13 +16,15 @@ from orchestratord_kimi.session import KimiSession
 
 
 class KimiBackend:
-    """Cli backend that spawns ``kimi`` per turn.
+    """ACP backend that spawns ``kimi acp`` per turn.
 
-    Kimi (Moonshot AI) ships a CLI that is friendly to Chinese-language
-    prompts. Until a wire-level translator is exercised, the backend
-    buffers the entire stdout as a single TEXT event — the orchestrator's
-    split-whole-text-into-pseudo-deltas degradation path handles
-    downstream consumers uniformly.
+    Ported from multica ``server/pkg/agent/kimi.go``: Kimi Code CLI
+    speaks ACP (Agent Client Protocol) JSON-RPC 2.0 over stdio via the
+    ``acp`` subcommand, so the session translates ``agent_message_chunk``
+    / ``tool_call`` / ``tool_call_update`` updates into real deltas and
+    tool events instead of buffering whole stdout (FEATURE_GAP §8.2.3).
+    Permissions are auto-answered in-protocol, mirroring the unattended
+    Go daemon.
     """
 
     name = "kimi"
@@ -42,15 +44,16 @@ class KimiBackend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            streaming_deltas=False,
-            resumable=False,
-            interrupt=False,
-            approval_hooks=False,
-            parallel_sessions=True,
-            cost_reporting=False,
+            streaming_deltas=True,   # session/update agent_message_chunk
+            resumable=False,         # continuity via session/resume per turn
+            interrupt=False,         # best-effort session/cancel only
+            approval_hooks=False,    # permissions auto-answered in-protocol
+            parallel_sessions=True,  # one process per turn
+            cost_reporting=False,    # no usage over ACP (wire-log scan in Go)
             tool_filtering=False,
             takeover=False,
-            # kimi has no cross-process resume protocol.
+            goal_mode=False,
+            # kimi has no cross-process resume probe.
             resume_detection=False,
         )
 

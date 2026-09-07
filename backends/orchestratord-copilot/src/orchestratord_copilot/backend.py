@@ -18,11 +18,11 @@ from orchestratord_copilot.session import CopilotSession
 class CopilotBackend:
     """Cli backend that spawns ``copilot`` per turn.
 
-    The copilot CLI's event stream shape is not yet exercised in-tree
-    (FEATURE_GAP §8.1: "事件流需实验"). Until a wire-level translator
-    is built, the backend buffers the entire stdout as a single TEXT
-    event — the orchestrator's split-whole-text-into-pseudo-deltas
-    degradation path handles downstream consumers uniformly.
+    The CLI's ``--output-format json`` stream (JSONL events with
+    ``assistant.message_delta`` fragments) is translated wire-level by
+    :class:`CopilotSession` — ported from the multica Go reference
+    (``server/pkg/agent/copilot.go``). Because the stream carries genuine
+    incremental text deltas, the backend claims ``streaming_deltas``.
     """
 
     name = "copilot"
@@ -42,7 +42,7 @@ class CopilotBackend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            streaming_deltas=False,
+            streaming_deltas=True,
             resumable=False,
             interrupt=False,
             approval_hooks=False,

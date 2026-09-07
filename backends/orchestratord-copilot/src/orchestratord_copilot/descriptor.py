@@ -10,10 +10,11 @@ COPILOT_DESCRIPTOR = BackendDescriptor(
     family=BackendFamily.CLI,
     backend_package="orchestratord-copilot",
     capabilities=frozenset({
+        "streaming_deltas",
         "parallel_sessions",
     }),
     cli_command="copilot",
     env_prefix="COPILOT_",
-    launch_header="copilot (spawn-per-turn, experimental stream shape)",
+    launch_header="copilot (spawn-per-turn, JSONL delta stream)",
     model_discovery="user",
 )

@@ -11,9 +11,14 @@ REASONIX_DESCRIPTOR = BackendDescriptor(
     backend_package="orchestratord-reasonix",
     capabilities=frozenset({
         "parallel_sessions",
+        "streaming_deltas",
     }),
     cli_command="reasonix",
     env_prefix="REASONIX_",
-    launch_header="reasonix (spawn-per-turn, event stream shape not yet exercised)",
+    launch_header=(
+        "reasonix acp --profile balanced --planner auto "
+        "--sandbox-network auto --sandbox-bash auto --workspace-only "
+        "(ACP JSON-RPC stdio, spawn-per-turn)"
+    ),
     model_discovery="user",
 )

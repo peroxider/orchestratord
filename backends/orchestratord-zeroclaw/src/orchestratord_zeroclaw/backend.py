@@ -1,7 +1,7 @@
 """ZeroclawBackend — Cli backend wrapping the ``zeroclaw`` binary.
 
 Family: Cli
-Capabilities: parallel_sessions
+Capabilities: parallel_sessions, streaming_deltas
 """
 
 from __future__ import annotations
@@ -11,18 +11,17 @@ import shutil
 from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.session import AgentSession
-
 from orchestratord_zeroclaw.session import ZeroclawSession
 
 
 class ZeroclawBackend:
-    """Cli backend that spawns ``zeroclaw`` per turn.
+    """Cli backend that speaks ZeroClaw's real ACP wire format.
 
-    The zeroclaw CLI's event stream shape is not yet exercised in-tree
-    (FEATURE_GAP §8.1). Until a wire-level translator is built, the
-    backend buffers the entire stdout as a single TEXT event — the
-    orchestrator's split-whole-text-into-pseudo-deltas degradation path
-    handles downstream consumers uniformly.
+    Each turn spawns ``zeroclaw acp`` and drives the ACP JSON-RPC 2.0
+    handshake (initialize → session/new | session/resume → session/prompt)
+    over NDJSON stdio, translating ``agent_message_chunk`` into
+    TEXT_DELTA and ``tool_call`` / ``tool_call_update`` into TOOL_CALL /
+    TOOL_RESULT (FEATURE_GAP §8.2.3, ported from the Go reference).
     """
 
     name = "zeroclaw"
@@ -31,7 +30,7 @@ class ZeroclawBackend:
     def __init__(self) -> None:
         self._sessions: list[ZeroclawSession] = []
 
-    def preflight(self, spec: SessionSpec) -> None:  # noqa: ARG002
+    def preflight(self, spec: SessionSpec) -> None:
         """Verify zeroclaw is on PATH before daemon startup."""
         if shutil.which("zeroclaw") is None:
             raise RuntimeError(
@@ -42,7 +41,7 @@ class ZeroclawBackend:
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
-            streaming_deltas=False,
+            streaming_deltas=True,
             resumable=False,
             interrupt=False,
             approval_hooks=False,
@@ -50,7 +49,9 @@ class ZeroclawBackend:
             cost_reporting=False,
             tool_filtering=False,
             takeover=False,
-            # zeroclaw has no cross-process resume protocol.
+            # zeroclaw has no cross-process resume probe; the wire-level
+            # session/resume is driven from the persisted session id
+            # without a pre-probe (probe_resume stays UNDETECTABLE).
             resume_detection=False,
         )
 
