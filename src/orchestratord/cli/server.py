@@ -445,6 +445,86 @@ def _format_uptime(started_at: float) -> str:
         return f"{hours}h {minutes}m"
 
 
+_REGISTRY_COUNT_ORDER = (
+    "pending",
+    "running",
+    "pending_review",
+    "completed",
+    "verification_failed",
+    "failed",
+    "abandoned",
+    "cancelled",
+)
+
+
+def _registry_counts_line(workspace_root: str | None) -> str | None:
+    """One-line issue tally from the workspace registry, for ``server status``.
+
+    Pure read of ``<workspace_root>/.orchestratord_issue_registry.json``
+    (flat ``{issue_id: record}``, lowercase status strings). Returns None
+    when there is nothing trustworthy to show — no file, unreadable, or
+    unexpected shape — so a registry problem never breaks ``status``.
+    """
+    if not workspace_root or workspace_root == "unknown":
+        return None
+    registry_path = Path(workspace_root) / ".orchestratord_issue_registry.json"
+    if not registry_path.is_file():
+        return None
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not data:
+        return "none registered"
+    counts: dict[str, int] = {}
+    for rec in data.values():
+        status = str(rec.get("status", "unknown")) if isinstance(rec, dict) else "unknown"
+        counts[status] = counts.get(status, 0) + 1
+    parts = [f"{s}={counts[s]}" for s in _REGISTRY_COUNT_ORDER if counts.get(s)]
+    parts += [
+        f"{s}={n}" for s, n in sorted(counts.items()) if s not in _REGISTRY_COUNT_ORDER
+    ]
+    return " · ".join(parts)
+
+
+def _runtime_lines(meta: dict) -> list[str]:
+    """Render backend / agent / concurrency lines from metadata launch context.
+
+    Older daemons persist none of these fields; each line appears only
+    when its source data exists, keeping ``status`` output backward
+    compatible.
+    """
+    lines: list[str] = []
+    backend = meta.get("backend")
+    if backend:
+        lines.append(f"  Backend        : {backend}")
+    runtime = meta.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    agent_bits: list[str] = []
+    provider_model = "/".join(
+        str(p) for p in (runtime.get("provider"), runtime.get("model")) if p
+    )
+    if provider_model:
+        agent_bits.append(provider_model)
+    if runtime.get("permission_mode"):
+        agent_bits.append(f"permission_mode={runtime['permission_mode']}")
+    if runtime.get("approval_policy"):
+        agent_bits.append(f"approval={runtime['approval_policy']}")
+    if agent_bits:
+        lines.append(f"  Agent          : {' · '.join(agent_bits)}")
+    conc_bits: list[str] = []
+    if runtime.get("max_concurrent_agents") is not None:
+        conc_bits.append(f"{runtime['max_concurrent_agents']} concurrent agent(s)")
+    if runtime.get("poll_interval_ms") is not None:
+        conc_bits.append(f"poll every {runtime['poll_interval_ms']}ms")
+    if conc_bits:
+        lines.append(f"  Concurrency    : {' · '.join(conc_bits)}")
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # server status
 # ---------------------------------------------------------------------------
@@ -475,6 +555,11 @@ def _run_status(args: argparse.Namespace) -> int:
         print(f"  Workspace root : {workspace_root}")
         if workflow_path:
             print(f"  Workflow       : {workflow_path}")
+        for _line in _runtime_lines(meta):
+            print(_line)
+        counts_line = _registry_counts_line(workspace_root)
+        if counts_line:
+            print(f"  Issues         : {counts_line}")
         print(f"  Metadata       : {meta_path}")
     else:
         stale_age = _format_uptime(started_at) if started_at else "unknown"
