@@ -11,6 +11,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from orchestratord.api.routers import (
     agents,
@@ -97,6 +98,21 @@ def create_app(
             "backend-private protocols (§3.1)."
         ),
         lifespan=lifespan,
+    )
+    # The Next.js console (apps/web) calls this API cross-origin from its own
+    # port; the browser blocks every REST response without CORS (WebSocket
+    # is exempt).  Origins stay env-overridable for non-default deployments.
+    cors_env = os.environ.get("ORCHESTRATORD_CORS_ORIGINS", "")
+    cors_origins = [o.strip() for o in cors_env.split(",") if o.strip()] or [
+        "http://localhost:3100",
+        "http://127.0.0.1:3100",
+        "http://localhost:3000",
+    ]
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
     application.include_router(skills.router)
     application.include_router(dashboard.router)
