@@ -43,6 +43,7 @@ from ..tracker import (
     intent_from_label_set,
 )
 from .client import RepositoryIssueClient, _extract_comment_author
+from .normalizers import RepositoryTrackerError
 
 
 class RepositoryTrackerAdapter(TrackerAdapter):
@@ -267,40 +268,41 @@ class RepositoryTrackerAdapter(TrackerAdapter):
         }:
             labels.append(state)
 
-        await self.client.update_issue(
-            issue_id,
-            state=state,
-            title=current.title if current is not None else None,
-            # ``[]`` means "remove every label" while ``None`` means
-            # "leave labels unchanged".  Reopening an issue whose only
-            # label is a terminal lifecycle marker must preserve that
-            # distinction or the remote issue stays labelled failed/
-            # pending_review after the daemon has reset it locally.
-            # If the pre-read could not find the issue, keep the historical
-            # safe behaviour for an ``open`` transition and do not clear
-            # unknown labels.  An empty list is authoritative only when the
-            # current issue was actually fetched.
-            labels=labels if current is not None or labels else None,
-        )
-
-        # Most user tokens cannot mutate labels on public repos (403
-        # "apig token has not permission"). The state transition is the
-        # important part — degrade by retrying WITHOUT labels (labels=None)
-        # so the state still syncs and the 403 stops spamming the logs.
-        if labels is not None:
-            try:
-                await self.client.update_issue(issue_id, state=state, labels=labels)
-            except RepositoryTrackerError as exc:
-                if "403" in str(exc):
-                    logger.warning(
-                        "update_issue_state: label mutation denied (403) for "
-                        "issue_id=%s state=%s — retrying state-only.",
-                        issue_id,
-                        state,
-                    )
-                    await self.client.update_issue(issue_id, state=state, labels=None)
-                else:
-                    raise
+        title = current.title if current is not None else None
+        payload_labels = labels if current is not None or labels else None
+        try:
+            await self.client.update_issue(
+                issue_id,
+                state=state,
+                title=title,
+                # ``[]`` means "remove every label" while ``None`` means
+                # "leave labels unchanged".  Reopening an issue whose only
+                # label is a terminal lifecycle marker must preserve that
+                # distinction or the remote issue stays labelled failed/
+                # pending_review after the daemon has reset it locally.
+                # If the pre-read could not find the issue, keep the historical
+                # safe behaviour for an ``open`` transition and do not clear
+                # unknown labels.  An empty list is authoritative only when the
+                # current issue was actually fetched.
+                labels=payload_labels,
+            )
+        except RepositoryTrackerError as exc:
+            # Most user tokens cannot mutate labels on public repos (403
+            # "apig token has not permission"). The state transition is the
+            # important part — degrade by retrying WITHOUT labels (labels=None)
+            # so the state still syncs and the 403 stops spamming the logs.
+            if "403" in str(exc) and payload_labels is not None:
+                logger.warning(
+                    "update_issue_state: label mutation denied (403) for "
+                    "issue_id=%s state=%s — retrying state-only.",
+                    issue_id,
+                    state,
+                )
+                await self.client.update_issue(
+                    issue_id, state=state, title=title, labels=None
+                )
+            else:
+                raise
 
     async def find_pull_request(
         self,

@@ -22,6 +22,9 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
+
+from orchestratord.backend_registry import resolve_backend
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
 from orchestratord.spi.approval import ApprovalDecision
 from orchestratord.spi.backend import AgentBackend, SessionSpec
@@ -207,6 +210,29 @@ async def _poll_events(
             next_event_task.cancel()
 
 
+class BackendDescription(BaseModel):
+    """Pure-data description of a backend for the ``agent_capabilities_cache``.
+
+    ``BackendRunner.describe()`` snapshots the backend's capability bits,
+    its advertised version, and (when ``cost_reporting=True``) a model
+    pricing table, without invoking any external CLI. The result is
+    JSON-serializable so it can be stored verbatim in
+    ``agent_capabilities_cache.capabilities_jsonb`` /
+    ``model_pricing_jsonb`` (§6.2).
+    """
+
+    streaming_deltas: bool = False
+    resumable: bool = False
+    interrupt: bool = False
+    approval_hooks: bool = False
+    parallel_sessions: bool = False
+    cost_reporting: bool = False
+    tool_filtering: bool = False
+    takeover: bool = False
+    backend_version: str | None = None
+    model_pricing: dict[str, Any] | None = None
+
+
 class BackendRunner:
     """Execute an issue via an AgentBackend (SPI Protocol).
 
@@ -220,18 +246,28 @@ class BackendRunner:
 
     def __init__(
         self,
-        backend: AgentBackend,
-        agent_config: AgentConfig,
-        sandbox_config: SandboxConfig,
+        backend: AgentBackend | None = None,
+        agent_config: AgentConfig | None = None,
+        sandbox_config: SandboxConfig | None = None,
         workspace_cfg: WorkspaceConfig | None = None,
+        *,
+        backend_name: str | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self.backend = backend
         self.agent_config = agent_config
         self.sandbox_config = sandbox_config
         self.workspace_cfg: WorkspaceConfig = workspace_cfg or WorkspaceConfig()
-        self.max_turns = agent_config.max_turns
+        # Lazy form: ``BackendRunner(backend_name=..., config=...)`` resolves
+        # the backend on demand (used by ``describe()``, which never runs a
+        # session). ``config`` is carried through to ``resolve_backend``.
+        self.backend_name = backend_name
+        self.config = config or {}
+        self.max_turns = agent_config.max_turns if agent_config is not None else 0
         self._approval_policy: ApprovalPolicy = get_approval_policy(
-            getattr(sandbox_config, "approval_policy", "never") or "never"
+            (getattr(sandbox_config, "approval_policy", "never") or "never")
+            if sandbox_config is not None
+            else "never"
         )
         self._sleep: Callable[..., Any] = asyncio.sleep
 
@@ -239,6 +275,38 @@ class BackendRunner:
         """Return the optional registry supplied by the configured backend."""
         getter = getattr(self.backend, "get_task_registry", None)
         return getter() if callable(getter) else None
+
+    def describe(self) -> BackendDescription:
+        """Snapshot the backend's capabilities, version, and pricing (§6.2).
+
+        Resolves the backend lazily when constructed via ``backend_name``
+        (otherwise reuses the injected ``self.backend``) and reads its
+        ``capabilities`` — a bound method on real backends, a plain
+        ``BackendCapabilities`` instance on test doubles — without
+        shelling out to any external CLI.
+        """
+        backend = self.backend or resolve_backend(self.backend_name, self.config)
+        caps = backend.capabilities
+        if callable(caps):
+            caps = caps()
+        pricing = getattr(backend, "model_pricing", None)
+        if caps.cost_reporting and pricing is None:
+            # Cost reporting is advertised but the backend ships no pricing
+            # table. Carry an empty table rather than ``None`` so the Web
+            # usage page can distinguish "no pricing" from "not reported".
+            pricing = {}
+        return BackendDescription(
+            streaming_deltas=caps.streaming_deltas,
+            resumable=caps.resumable,
+            interrupt=caps.interrupt,
+            approval_hooks=caps.approval_hooks,
+            parallel_sessions=caps.parallel_sessions,
+            cost_reporting=caps.cost_reporting,
+            tool_filtering=caps.tool_filtering,
+            takeover=caps.takeover,
+            backend_version=getattr(backend, "version", None),
+            model_pricing=pricing if caps.cost_reporting else None,
+        )
 
     # ------------------------------------------------------------------
     # Public API — AgentTaskRunner Protocol

@@ -85,6 +85,26 @@ KNOWN_BACKEND_CLIS: tuple[BackendCLI, ...] = (
         "orchestratord-qwen",
         "spawn-per-turn Cli; qwen -p --output-format stream-json 真正流式",
     ),
+    BackendCLI(
+        "kiro",
+        "orchestratord-kiro-cli",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    BackendCLI(
+        "openclaw",
+        "orchestratord-openclaw",
+        "spawn-per-turn Cli; §8.1 HTTP/Gateway path deferred",
+    ),
+    BackendCLI(
+        "reasonix",
+        "orchestratord-reasonix",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    BackendCLI(
+        "zeroclaw",
+        "orchestratord-zeroclaw",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
 )
 
 

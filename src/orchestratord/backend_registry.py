@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orchestratord.spi.backend_descriptor import BackendDescriptor
 from orchestratord.spi.capabilities import BackendCapabilities
@@ -129,6 +129,7 @@ def _capabilities_to_set(caps: BackendCapabilities) -> set[str]:
 
 def resolve_backend(
     identifier: str,
+    config: dict[str, Any] | None = None,
     *,
     strict: bool = False,
 ) -> "AgentBackend":
@@ -141,6 +142,9 @@ def resolve_backend(
     3. 若 ``strict=True``，校验 :py:meth:`backend.capabilities` 与
        ``desc.capabilities`` 完全一致；不一致抛 :class:`BackendMismatchError`
     4. 用 :class:`DegradingBackend` 包装返回
+
+    *config* 由 :meth:`~orchestratord.backend_runner.BackendRunner.describe`
+    的按调用配置通道传入；解析目前仅以 *identifier* 为准，故此处未使用。
 
     Raises:
         BackendNotFoundError: descriptor 未注册 / 实现类缺失

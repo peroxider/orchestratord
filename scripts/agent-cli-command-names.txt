@@ -7,3 +7,7 @@ cursor-agent
 copilot
 kimi
 qwen
+kiro
+openclaw
+reasonix
+zeroclaw
