@@ -24,3 +24,9 @@ AGENTS.md
 !.env.example
 /lib/
 /bin/
+/node_modules/
+/apps/
+/packages/core/node_modules/
+/packages/eslint-config/node_modules/
+/packages/ui/node_modules/
+/packages/views/node_modules/
