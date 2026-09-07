@@ -1308,6 +1308,18 @@ def _print_session_usage(record: "IssueRecord") -> None:
             continue  # Skip unreadable snapshots; never fail issue show.
 
     if not totals["input_tokens"] and not totals["output_tokens"] and not totals["cost_usd"]:
+        # Session snapshots (claude/codex style) carry the usage; backends
+        # that report through SESSION_COMPLETE payloads (dsh, opencode)
+        # persist it on the registry record instead — fall back there.
+        registry_usage = getattr(record, "run_token_usage", None)
+        if isinstance(registry_usage, dict) and registry_usage:
+            print(
+                f"  Usage (last)   : input={registry_usage.get('input', 0)} "
+                f"output={registry_usage.get('output', 0)} "
+                f"reasoning={registry_usage.get('reasoning', 0)} "
+                f"cache_read={registry_usage.get('cache_read', 0)} "
+                "(cost not reported by backend)"
+            )
         return
     print(
         f"  Usage (total)  : runs={len(run_ids)} input={totals['input_tokens']:.0f} "

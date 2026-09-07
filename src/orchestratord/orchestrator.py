@@ -4154,10 +4154,14 @@ class Orchestrator:
                         output=getattr(session, "verification_output", None),
                         hook_error=getattr(session, "last_hook_error", None),
                     )
-                    await self._sync_tracker_issue_state(
-                        session.issue.id or "", "verification_failed"
-                    )
-                    await self._schedule_retry(session)
+                    # Gate the tracker close on the retry outcome: a
+                    # pending retry keeps the issue open on the tracker
+                    # (GitCode cannot reopen a closed issue).
+                    retry_scheduled = await self._schedule_retry(session)
+                    if not retry_scheduled:
+                        await self._sync_tracker_issue_state(
+                            session.issue.id or "", "verification_failed"
+                        )
                 elif session.status == "agent_timeout":
                     self.status_dashboard.on_session_failed(
                         session.issue.id or "",
@@ -4172,8 +4176,9 @@ class Orchestrator:
                         or getattr(session, "verification_output", None)
                         or "Agent run timed out",
                     )
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    await self._schedule_retry(session)
+                    retry_scheduled = await self._schedule_retry(session)
+                    if not retry_scheduled:
+                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
                 elif session.status == "max_turns_exceeded":
                     self.status_dashboard.on_session_failed(
                         session.issue.id or "",
@@ -4186,11 +4191,12 @@ class Orchestrator:
                         "max turns exceeded",
                     )
                     self._registry.mark_failed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    await self._schedule_retry(
+                    retry_scheduled = await self._schedule_retry(
                         session,
                         delay_base_ms=self.workflow.agent.max_turns_retry_delay_ms,
                     )
+                    if not retry_scheduled:
+                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
                 elif session.status == "rate_limit_circuit_open":
                     # The AgentRunner's 429 backoff circuit breaker tripped
                     # after ``rate_limit_max_retries`` consecutive rate
@@ -4219,11 +4225,12 @@ class Orchestrator:
                         "rate limit circuit open",
                     )
                     self._registry.mark_failed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    await self._schedule_retry(
+                    retry_scheduled = await self._schedule_retry(
                         session,
                         delay_base_ms=backoff_s,
                     )
+                    if not retry_scheduled:
+                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
                 elif session.status in (
                     "stagnation",
                     "loop_detected",
@@ -4311,9 +4318,13 @@ class Orchestrator:
                         )
                     else:
                         self._registry.mark_failed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    # Schedule retry
-                    await self._schedule_retry(session)
+                    # Gate the tracker close on the retry outcome: with a
+                    # retry pending the issue stays open+assigned on the
+                    # tracker; when the retry limit is reached the
+                    # ``_schedule_retry`` abandoned path closes it.
+                    retry_scheduled = await self._schedule_retry(session)
+                    if not retry_scheduled:
+                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
 
                 # Update summary comment for non-completed paths
                 if session.issue.id not in self._state.pending_review:
@@ -4358,6 +4369,11 @@ class Orchestrator:
             body_lines.append(f"- Error: `{reason_text}`")
         if hook_error and hook_error != reason_text:
             body_lines.append(f"- Detail: `{hook_error}`")
+        # Raw backend-side error (code + message), preserved separately
+        # from session_end_summary which downstream guards overwrite.
+        backend_error = getattr(session, "backend_error_detail", None)
+        if backend_error and backend_error not in (reason_text, hook_error):
+            body_lines.append(f"- Backend error: `{str(backend_error)[:300]}`")
         # User-facing guidance — only for FAILURE paths. A successful end
         # reason (e.g. "success") is not in the failure guidance table, so
         # it would fall through to the generic "未知错误" fallback and
@@ -4566,7 +4582,7 @@ class Orchestrator:
         session: AgentSession,
         *,
         delay_base_ms: int | None = None,
-    ) -> None:
+    ) -> bool:
         """Schedule a retry for a failed session.
 
         ``delay_base_ms`` overrides the base delay for the exponential backoff
@@ -4574,6 +4590,14 @@ class Orchestrator:
         (10s). The orchestrator passes ``workflow.agent.max_turns_retry_delay_ms``
         for ``max_turns_exceeded`` sessions so the longer wait default kicks in
         without forcing all retries to share it.
+
+        Returns ``True`` when a retry was actually queued. Callers gate
+        their tracker state sync on this: a pending retry must keep the
+        issue open on the tracker (closing it here — and losing the
+        reopen, which GitCode cannot perform — silently drops the
+        persisted retry plan when the poller sees the closed state).
+        Terminal outcomes (retry exhausted / non-retryable end reason)
+        return ``False`` so the caller still closes the issue.
         """
         issue_id = session.issue.id or ""
 
@@ -4590,7 +4614,7 @@ class Orchestrator:
                 end_reason,
             )
             self._state.claimed.discard(issue_id)
-            return
+            return False
 
         attempt = self._state.retry_attempts.get(issue_id, 0) + 1
         self._state.retry_attempts[issue_id] = attempt
@@ -4618,7 +4642,7 @@ class Orchestrator:
             self._state.claimed.discard(issue_id)
             self._registry.mark_abandoned(issue_id)
             await self._sync_tracker_issue_state(issue_id, "abandoned")
-            return
+            return False
 
         # Exponential backoff capped at max_retry_backoff_ms
         base_ms = delay_base_ms if delay_base_ms is not None else _FAILURE_RETRY_BASE_MS
@@ -4655,6 +4679,7 @@ class Orchestrator:
             f"retry scheduled in {delay_ms}ms",
             {"attempt": attempt, "delay_ms": delay_ms},
         )
+        return True
 
     def _broadcast_clarification_status(self) -> None:
         """收集所有 issue 的澄清状态，推送到 dashboard。"""
