@@ -41,6 +41,7 @@ from orchestratord.db.models import (
     IssueStatusChange,
     Member,
     MemberAgentScope,
+    Message,
     Project,
     ProjectDoc,
     ProjectRepo,
@@ -366,6 +367,64 @@ class ApprovalRepository(Repository[Approval]):
         return result.scalar_one_or_none()
 
 
+class MessageRepository(Repository[Message]):
+    """Per-session chat messages (§6.1).
+
+    ``append`` auto-assigns the per-session ``seq`` by reading
+    ``COALESCE(MAX(seq), -1) + 1`` for the target ``session_id`` so
+    concurrent appends from the runner don't interleave with user POSTs.
+    Callers that already set ``seq`` (e.g. event-fanout writers) can pass it
+    through unchanged.
+    """
+
+    model = Message
+
+    async def append(
+        self,
+        message: Message,
+        *,
+        auto_seq: bool = True,
+    ) -> Message:
+        if auto_seq and message.seq == 0:
+            # Serialize concurrent appends per session: lock the parent
+            # row before reading MAX. Without the lock, two interleaved
+            # transactions (user POST vs runner bridge flush) both read
+            # the same MAX and land duplicate seqs — silently breaking
+            # the ``after_seq`` tail-fetch contract (§6.1a).
+            await self.session.execute(
+                select(Session)
+                .where(Session.id == message.session_id)
+                .with_for_update()
+            )
+            stmt = select(func.coalesce(func.max(Message.seq), -1)).where(
+                Message.session_id == message.session_id
+            )
+            result = await self.session.execute(stmt)
+            next_seq = int(result.scalar_one()) + 1
+            message.seq = next_seq
+        self.session.add(message)
+        await self.session.flush()
+        return message
+
+    async def list_for_session(
+        self,
+        session_id: UUID,
+        after_seq: int | None = None,
+        limit: int | None = None,
+    ) -> list[Message]:
+        stmt = (
+            select(Message)
+            .where(Message.session_id == session_id)
+            .order_by(Message.seq)
+        )
+        if after_seq is not None:
+            stmt = stmt.where(Message.seq > after_seq)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
@@ -541,6 +600,18 @@ class AutopilotRunRepository(Repository[AutopilotRun]):
         )
         return list(result.scalars().all())
 
+    async def find_for_slot(
+        self, autopilot_id: UUID, scheduled_at: datetime
+    ) -> AutopilotRun | None:
+        """Run row already recorded for this cron slot (§7.1 dedup)."""
+        result = await self.session.execute(
+            select(AutopilotRun)
+            .where(AutopilotRun.autopilot_id == autopilot_id)
+            .where(AutopilotRun.scheduled_at == scheduled_at)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
 
 # ---------------------------------------------------------------------------
 # Audit / auth / channels
@@ -585,6 +656,13 @@ class ChannelRepository(Repository[Channel]):
             select(Channel).where(Channel.workspace_id == workspace_id)
         )
         return list(result.scalars().all())
+
+    async def by_external_id(self, external_id: str) -> Channel | None:
+        """Reverse lookup used by the inbound webhook (§6.4, single-user mode)."""
+        result = await self.session.execute(
+            select(Channel).where(Channel.external_id == external_id)
+        )
+        return result.scalars().first()
 
 
 class IntegrationRepository(Repository[Integration]):
@@ -720,6 +798,7 @@ class Repositories:
         self.runs = RunRepository(session)
         self.events = EventRepository(session)
         self.approvals = ApprovalRepository(session)
+        self.messages = MessageRepository(session)
         self.skills = SkillRepository(session)
         self.skill_source_maps = SkillSourceMapRepository(session)
         self.skill_references = SkillReferenceRepository(session)

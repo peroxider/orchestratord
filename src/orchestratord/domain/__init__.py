@@ -26,6 +26,7 @@ from orchestratord.domain.issue import (
     IssueStatusChange,
 )
 from orchestratord.domain.mention import parse_mentions
+from orchestratord.domain.message import Message
 from orchestratord.domain.project import Project, ProjectDoc, ProjectRepo
 from orchestratord.domain.runtime import (
     Runtime,
@@ -60,6 +61,7 @@ __all__ = [
     "IssueStatusChange",
     "Member",
     "MemberAgentScope",
+    "Message",
     "Project",
     "ProjectDoc",
     "ProjectRepo",

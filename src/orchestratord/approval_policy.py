@@ -6,9 +6,12 @@ interception and policy evaluation, replacing Symphony's Codex JSON-RPC.
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # ToolCallEvent — the event object passed to policy.evaluate()
@@ -157,8 +160,53 @@ def get_approval_policy(policy_name: str | dict[str, Any]) -> ApprovalPolicy:
     policy_cls = _APPROVAL_POLICY_MAP.get(name)
     if policy_cls is None:
         # A misspelt policy must never widen permissions.
+        logger.warning(
+            "approval_policy %r is not one of %s — failing closed to 'ask'. "
+            "(Typo? Fix the workflow config.)",
+            policy_name,
+            sorted(_APPROVAL_POLICY_MAP),
+        )
         return AskApprovalPolicy()
     return policy_cls()
+
+
+def resolve_approval_policy(
+    sandbox_config: Any,
+    agent_config: Any = None,
+) -> ApprovalPolicy:
+    """Resolve the effective approval policy for a daemon run.
+
+    Explicit ``sandbox.approval_policy`` config always wins.  When the
+    sandbox config is left at its structured default (i.e. the operator
+    did not express an approval preference) the legacy
+    ``agent.permission_mode`` is honored instead: modes whose canonical
+    triple maps to ``default_decision == "allow"`` (``bypassPermissions``,
+    ``auto``) auto-approve tool calls.  Without this bridge a workflow
+    declaring ``permission_mode: bypassPermissions`` while leaving
+    ``approval_policy`` unset silently denied every tool call.
+    """
+    raw = (getattr(sandbox_config, "approval_policy", None) if sandbox_config is not None else None)
+    mode = str(getattr(agent_config, "permission_mode", "") or "")
+
+    if isinstance(raw, dict):
+        # A structured dict is either the SandboxConfig default (operator
+        # expressed nothing) or an explicit structured reject-policy.
+        from .config.schema import SandboxConfig
+
+        if raw == SandboxConfig().approval_policy:
+            from .config.schema import permission_mode_to_triple
+
+            intent = permission_mode_to_triple(mode).get("default_decision", "ask")
+            if intent == "allow":
+                logger.info(
+                    "sandbox.approval_policy unconfigured — applying "
+                    "agent.permission_mode=%r (auto-approve) to tool calls",
+                    mode,
+                )
+                return NeverApprovalPolicy()
+        return AskApprovalPolicy()
+
+    return get_approval_policy(raw if raw is not None else "never")
 
 
 def build_approval_policy_map(

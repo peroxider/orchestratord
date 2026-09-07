@@ -28,7 +28,7 @@ from orchestratord.db.models.issues import (
     IssueLabel,
     IssueStatusChange,
 )
-from orchestratord.db.models.sessions import Approval, Event, Run, Session
+from orchestratord.db.models.sessions import Approval, Event, Message, Run, Session
 from orchestratord.db.models.skills import Skill, SkillReference, SkillSourceMap
 from orchestratord.db.models.tenancy import Member, MemberAgentScope, Workspace
 from orchestratord.db.models.vcs import GitHubInstallation, PullRequest
@@ -52,6 +52,7 @@ __all__ = [
     "IssueStatusChange",
     "Member",
     "MemberAgentScope",
+    "Message",
     "Project",
     "ProjectDoc",
     "ProjectRepo",

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import PrimaryKeyConstraint
+from sqlalchemy import PrimaryKeyConstraint, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -64,3 +64,34 @@ class Approval(Base):
     decision: Mapped[str | None]
     created_at: Mapped[datetime]
     decided_at: Mapped[datetime | None]
+
+
+class Message(Base):
+    """Chat message (one conversational turn) for a session (§6.1).
+
+    The high-level shape the chat UI renders: each row collapses a span of
+    SPI events — one ``user`` POST, or many ``text_delta`` events folded
+    into a single ``assistant`` turn — into a renderable unit. ``role``
+    ∈ {user, assistant, system, tool}. ``seq`` is per-session monotonically
+    increasing, assigned by the repository at insert time so concurrent
+    appends from the runner don't interleave with user posts.
+    """
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        # Backend integrity for the per-session seq: the repository locks
+        # the parent session row when assigning MAX+1, and this constraint
+        # catches any residual path that would corrupt the after_seq
+        # tail-fetch contract (§6.1a).
+        UniqueConstraint("session_id", "seq", name="uq_messages_session_seq"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    session_id: Mapped[uuid.UUID]
+    workspace_id: Mapped[uuid.UUID]
+    seq: Mapped[int]
+    role: Mapped[str]
+    content: Mapped[str]
+    agent_id: Mapped[uuid.UUID | None]
+    author_label: Mapped[str | None]
+    created_at: Mapped[datetime]
