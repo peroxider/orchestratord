@@ -317,3 +317,25 @@ async def test_degrading_session_handles_missing_probe_resume():
 
     wrapped = DegradingSession(_LegacyNoProbeSession())
     assert await wrapped.probe_resume() is ResumeStatus.UNDETECTABLE
+
+
+def test_current_pid_forwarded_from_inner() -> None:
+    """The live-session registry resolves operator pause/stop through
+    ``current_pid``; the wrapper must forward it or per-turn backends
+    (e.g. ``claude -p``) become invisible to §5.2.3 forwarding.
+    """
+
+    class _InnerWithPid:
+        session_id = "inner-pid"
+        capabilities = BackendCapabilities()
+        current_pid = 4242
+
+    assert DegradingSession(_InnerWithPid()).current_pid == 4242
+
+
+def test_current_pid_none_without_inner_support() -> None:
+    class _InnerWithoutPid:
+        session_id = "inner-no-pid"
+        capabilities = BackendCapabilities()
+
+    assert DegradingSession(_InnerWithoutPid()).current_pid is None

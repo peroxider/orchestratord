@@ -985,6 +985,15 @@ class BackendRunner:
                     },
                 ),
             )
+            logger.info(
+                "live session registered: id=%s run=%s spi=%s#%s "
+                "pid_support=%s",
+                live_id,
+                session.run_id,
+                type(spi_session).__module__,
+                type(spi_session).__name__,
+                hasattr(spi_session, "current_pid"),
+            )
         except Exception:
             logger.exception(
                 "live-session registration failed; API control unavailable "

@@ -34,6 +34,7 @@ from orchestratord.api.routers import (
     tokens,
     usage,
     vcs,
+    workspaces,
 )
 
 
@@ -142,6 +143,7 @@ def create_app(
     application.include_router(members.router, dependencies=_auth)
     application.include_router(audit.router, dependencies=_auth)
     application.include_router(vcs.router, dependencies=_auth)
+    application.include_router(workspaces.router, dependencies=_auth)
     return application
 
 

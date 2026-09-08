@@ -124,10 +124,22 @@ class TurnProcessControl:
     def _live_tree(self) -> ProcessTree:
         pid = self._pid_provider()
         if pid is None:
-            raise RuntimeError(
-                "No live agent process to control (between turns)"
+            logger.warning(
+                "TurnProcessControl: no live pid from pid_provider "
+                "(between turns or backend without current_pid)"
             )
-        return ProcessTree(pid)
+            raise RuntimeError(
+                "No live agent process to control (pid is None — "
+                "between turns)"
+            )
+        try:
+            return ProcessTree(pid)
+        except psutil.NoSuchProcess:
+            # The turn ended between the pid_provider call and here.
+            raise RuntimeError(
+                f"No live agent process to control (pid {pid} already "
+                "exited)"
+            ) from None
 
     def pause(self) -> None:
         if self._tree is not None:
@@ -155,7 +167,11 @@ class TurnProcessControl:
             else:
                 pid = self._pid_provider()
                 if pid is not None:
-                    ProcessTree(pid).kill()
+                    try:
+                        ProcessTree(pid).kill()
+                    except psutil.NoSuchProcess:
+                        # Reaped between the pid_provider call and here.
+                        pass
         finally:
             self._tree = None
             if self._stop_command is not None:
