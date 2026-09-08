@@ -66,9 +66,9 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
 }
 
 const copy = {
-  en: { groups: ['Attention', 'Work', 'Orchestration', 'System'], newIssue: 'New issue', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', reconnecting: 'Reconnecting', offline: 'Offline', create: 'Create issue', title: 'Issue title', description: 'Describe the desired outcome…', cancel: 'Cancel', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', reconnectNote: 'Realtime is taking longer than expected to reconnect. You can keep working with the data already loaded.', recovered: 'Realtime connection restored.', noResults: 'No matching issues, sessions, agents, or commands.', creating: 'Creating…' },
-  'zh-CN': { groups: ['需要关注', '工作', '编排', '系统'], newIssue: '新建任务', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', reconnecting: '正在重连', offline: '离线', create: '创建任务', title: '任务标题', description: '描述期望结果…', cancel: '取消', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', reconnectNote: '实时连接恢复时间超出预期。你仍可继续处理已加载的数据。', recovered: '实时连接已恢复。', noResults: '没有匹配的任务、会话、Agent 或命令。', creating: '正在创建…' },
-  ja: { groups: ['要対応', '作業', 'オーケストレーション', 'システム'], newIssue: 'Issue を作成', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', reconnecting: '再接続中', offline: 'オフライン', create: 'Issue を作成', title: 'Issue タイトル', description: '期待する結果を説明…', cancel: 'キャンセル', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', reconnectNote: 'リアルタイム接続の復旧に時間がかかっています。読み込み済みのデータは引き続き操作できます。', recovered: 'リアルタイム接続が復旧しました。', noResults: '一致する Issue、セッション、エージェント、コマンドはありません。', creating: '作成中…' },
+  en: { groups: ['Attention', 'Work', 'Orchestration', 'System'], newIssue: 'New issue', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', reconnecting: 'Reconnecting', degraded: 'Degraded', offline: 'Offline', create: 'Create issue', title: 'Issue title', description: 'Describe the desired outcome…', cancel: 'Cancel', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', reconnectNote: 'Realtime is taking longer than expected to reconnect. You can keep working with the data already loaded.', degradedNote: 'Live updates are degraded. Loaded data remains available while the console continues reconnecting.', recovered: 'Realtime connection restored.', noResults: 'No matching issues, sessions, agents, or commands.', creating: 'Creating…' },
+  'zh-CN': { groups: ['需要关注', '工作', '编排', '系统'], newIssue: '新建任务', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', reconnecting: '正在重连', degraded: '服务降级', offline: '离线', create: '创建任务', title: '任务标题', description: '描述期望结果…', cancel: '取消', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', reconnectNote: '实时连接恢复时间超出预期。你仍可继续处理已加载的数据。', degradedNote: '实时更新已降级。已加载数据仍可使用，控制台会继续尝试重连。', recovered: '实时连接已恢复。', noResults: '没有匹配的任务、会话、Agent 或命令。', creating: '正在创建…' },
+  ja: { groups: ['要対応', '作業', 'オーケストレーション', 'システム'], newIssue: 'Issue を作成', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', reconnecting: '再接続中', degraded: '機能低下', offline: 'オフライン', create: 'Issue を作成', title: 'Issue タイトル', description: '期待する結果を説明…', cancel: 'キャンセル', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', reconnectNote: 'リアルタイム接続の復旧に時間がかかっています。読み込み済みのデータは引き続き操作できます。', degradedNote: 'ライブ更新の機能が低下しています。読み込み済みデータは利用でき、再接続を継続します。', recovered: 'リアルタイム接続が復旧しました。', noResults: '一致する Issue、セッション、エージェント、コマンドはありません。', creating: '作成中…' },
 } as const
 
 const NAV = [
@@ -85,6 +85,28 @@ const detailsCopy = {
 } as const
 
 const GO_ROUTES: Record<string, string> = { o: '/', i: '/inbox', c: '/chat', w: '/issues', p: '/projects', s: '/sessions', a: '/agents', q: '/squads', u: '/autopilots', r: '/runtimes', k: '/skills', g: '/usage', v: '/activity' }
+type CommandItem = { label: string; type: string; href: string }
+const RECENT_KEY = 'orchestratord.recent-items'
+
+function recentItems(): CommandItem[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const value = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]')
+    return Array.isArray(value) ? value.filter(item => item && typeof item.label === 'string' && typeof item.type === 'string' && typeof item.href === 'string').slice(0, 6) : []
+  } catch { return [] }
+}
+
+function rememberItem(item: CommandItem): CommandItem[] {
+  const next = [item, ...recentItems().filter(value => value.href !== item.href)].slice(0, 6)
+  localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+  return next
+}
+
+const paletteCopy = {
+  en: { recent: 'Recent', browse: 'browse', open: 'open', newIssue: 'new issue', close: 'close', palette: 'Command palette' },
+  'zh-CN': { recent: '最近访问', browse: '选择', open: '打开', newIssue: '新建任务', close: '关闭', palette: '命令面板' },
+  ja: { recent: '最近使った項目', browse: '選択', open: '開く', newIssue: 'Issue を作成', close: '閉じる', palette: 'コマンドパレット' },
+} as const
 
 function localeIndex(locale: string) { return locale === 'zh-CN' ? 1 : locale === 'ja' ? 2 : 0 }
 
@@ -144,11 +166,12 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
   const [infoOpen, setInfoOpen] = useState<'help' | 'diagnostics' | null>(null)
   const [returnFocus, setReturnFocus] = useState<HTMLElement | null>(null)
   const goPrefix = useRef<number | null>(null)
-  const [connection, setConnection] = useState<'connecting' | 'connected' | 'reconnecting' | 'offline'>('connecting')
+  const [connection, setConnection] = useState<'connecting' | 'connected' | 'reconnecting' | 'degraded' | 'offline'>('connecting')
   const [reconnectNotice, setReconnectNotice] = useState(false)
   const [recovered, setRecovered] = useState(false)
   const everConnected = useRef(false)
   const reconnectTimer = useRef<number | null>(null)
+  const degradedTimer = useRef<number | null>(null)
   const recoveredTimer = useRef<number | null>(null)
   const inbox = useInbox(apiClient, instance.workspace_id)
   const sessions = useSessions(apiClient, instance.workspace_id)
@@ -157,7 +180,9 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
   const onRealtimeStatus = useCallback((status: 'connecting' | 'open' | 'closed' | 'error') => {
     if (status === 'open') {
       if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
+      if (degradedTimer.current !== null) window.clearTimeout(degradedTimer.current)
       reconnectTimer.current = null
+      degradedTimer.current = null
       setReconnectNotice(false)
       if (everConnected.current) {
         setRecovered(true)
@@ -170,17 +195,21 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
     }
     if (status === 'connecting') {
       if (!everConnected.current) { setConnection('connecting'); return }
-      setConnection('reconnecting')
+      setConnection(current => current === 'degraded' ? current : 'reconnecting')
       if (reconnectTimer.current === null) reconnectTimer.current = window.setTimeout(() => setReconnectNotice(true), 5_000)
+      if (degradedTimer.current === null) degradedTimer.current = window.setTimeout(() => setConnection('degraded'), 15_000)
       return
     }
     if (everConnected.current && window.navigator.onLine) {
-      setConnection('reconnecting')
+      setConnection(current => current === 'degraded' ? current : 'reconnecting')
       if (reconnectTimer.current === null) reconnectTimer.current = window.setTimeout(() => setReconnectNotice(true), 5_000)
+      if (degradedTimer.current === null) degradedTimer.current = window.setTimeout(() => setConnection('degraded'), 15_000)
       return
     }
     if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
     reconnectTimer.current = null
+    if (degradedTimer.current !== null) window.clearTimeout(degradedTimer.current)
+    degradedTimer.current = null
     setReconnectNotice(false)
     setConnection('offline')
   }, [])
@@ -188,6 +217,7 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
 
   useEffect(() => () => {
     if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
+    if (degradedTimer.current !== null) window.clearTimeout(degradedTimer.current)
     if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current)
   }, [])
 
@@ -221,8 +251,12 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
 
   const active = NAV.flat().find((item) => item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)) ?? NAV[0][0]
   const title = active.labels[idx]
-  const connectionText = connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : connection === 'reconnecting' ? c.reconnecting : c.offline
-  const navigate = (href: string) => { router.push(href); setMobileOpen(false) }
+  const connectionText = connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : connection === 'reconnecting' ? c.reconnecting : connection === 'degraded' ? c.degraded : c.offline
+  const navigate = (href: string) => {
+    const item = NAV.flat().find(value => value.href === href)
+    if (item) rememberItem({ label: item.labels[idx], type: 'Navigate', href })
+    router.push(href); setMobileOpen(false)
+  }
 
   return <div className={`app-shell${collapsed ? ' app-shell--collapsed' : ''}`}>
     {mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
@@ -236,7 +270,7 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
     <div className="app-main">
       <header className="page-header"><div className="page-header__identity"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><Icon name={active.icon} /><h1>{title}</h1></div><div className="page-header__actions"><button className="search-trigger" onClick={openSearch}><Icon name="search" /><span>{c.search}</span><kbd>⌘ K</kbd></button><button className="connection-button" onClick={() => openInfo('diagnostics')} title={`${instance.realtime_url} · REST 127.0.0.1:9000`}><span className={`connection-dot connection-dot--${connection}`} /><span>{connectionText}</span></button><button className="icon-button" aria-label="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button><LocaleSwitcher /><Button onClick={openCreate}><Icon name="plus" />{c.newIssue}</Button></div></header>
       {connection === 'offline' && <div className="connection-banner">{c.offlineNote}</div>}
-      {reconnectNotice && connection === 'reconnecting' && <div className="connection-banner">{c.reconnectNote}</div>}
+      {reconnectNotice && (connection === 'reconnecting' || connection === 'degraded') && <div className="connection-banner">{connection === 'degraded' ? c.degradedNote : c.reconnectNote}</div>}
       <main className="page-canvas">{children}</main>
     </div>
     {searchOpen && <CommandPalette instance={instance} close={() => setSearchOpen(false)} navigate={navigate} returnFocus={returnFocus} />}
@@ -253,11 +287,13 @@ function InfoDialog({ kind, instance, connection, close, returnFocus }: { kind: 
 
 function CommandPalette({ instance, close, navigate, returnFocus }: { instance: InstanceBootstrap; close: () => void; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
   const locale = useLocale(); const idx = localeIndex(locale)
+  const p = paletteCopy[locale]
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
+  const [recent, setRecent] = useState<CommandItem[]>(recentItems)
   const dialogRef = useRef<HTMLElement>(null)
   const onDialogKeyDown = useDialogFocus(dialogRef, returnFocus)
-  const [entities, setEntities] = useState<Array<{ label: string; type: string; href: string }>>([])
+  const [entities, setEntities] = useState<CommandItem[]>([])
   useEffect(() => {
     let live = true
     Promise.allSettled([
@@ -281,10 +317,12 @@ function CommandPalette({ instance, close, navigate, returnFocus }: { instance: 
     ]) })
     return () => { live = false }
   }, [instance.workspace_id])
-  const navItems = NAV.flat().map(x => ({ label: x.labels[idx], type: 'Navigate', href: x.href }))
-  const results = [...navItems, ...entities].filter(x => !query || `${x.label} ${x.type}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12)
-  const openItem = (index: number) => { const item = results[index]; if (!item) return; navigate(item.href); close() }
-  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{results.map((item, i) => <button key={`${item.type}-${item.href}-${i}`} data-active={i === activeIndex || undefined} onMouseEnter={() => setActiveIndex(i)} onClick={() => openItem(i)}><span>{item.label}</span><small>{item.type}</small></button>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> browse</span><span><kbd>↵</kbd> open</span><span><kbd>C</kbd> new issue</span><span><kbd>esc</kbd> close</span></footer></section></div>
+  const navItems: CommandItem[] = NAV.flat().map(x => ({ label: x.labels[idx], type: 'Navigate', href: x.href }))
+  const source = query ? [...navItems, ...entities] : recent.length > 0 ? recent : navItems
+  const results = source.filter(x => !query || `${x.label} ${x.type}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12)
+  const groups = query ? [...new Set(results.map(item => item.type))].map(type => ({ label: type, items: results.map((item, index) => ({ item, index })).filter(entry => entry.item.type === type) })) : [{ label: recent.length > 0 ? p.recent : 'Navigate', items: results.map((item, index) => ({ item, index })) }]
+  const openItem = (index: number) => { const item = results[index]; if (!item) return; setRecent(rememberItem(item)); navigate(item.href); close() }
+  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label={p.palette}><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{groups.map(group => <section className="command-group" key={group.label}><p className="command-group__label">{group.label}</p>{group.items.map(({ item, index }) => <button key={`${item.type}-${item.href}-${index}`} data-active={index === activeIndex || undefined} onMouseEnter={() => setActiveIndex(index)} onClick={() => openItem(index)}><span>{item.label}</span><small>{item.type}</small></button>)}</section>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> {p.browse}</span><span><kbd>↵</kbd> {p.open}</span><span><kbd>C</kbd> {p.newIssue}</span><span><kbd>esc</kbd> {p.close}</span></footer></section></div>
 }
 
 function CreateIssueDialog({ workspaceId, close, labels, navigate, returnFocus }: { workspaceId: string; close: () => void; labels: typeof copy[keyof typeof copy]; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
