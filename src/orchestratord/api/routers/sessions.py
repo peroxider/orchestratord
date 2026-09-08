@@ -236,8 +236,9 @@ async def _forward_process_control(
             live.process_tree.resume()
     except RuntimeError as exc:
         # Per-turn backends raise this between turns (no child process to
-        # signal). The DB status flip already happened above — surface the
-        # race instead of leaking a 500.
+        # signal). Raising also rolls back the DB status flip done earlier
+        # in the handler, so the row keeps its pre-request status; surface
+        # the race as 409 instead of leaking a 500.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     logger.info("Process control forwarded: session_id=%s action=%s",
                 session_id, action)
