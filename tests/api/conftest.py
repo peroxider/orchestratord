@@ -16,6 +16,7 @@ run stays green without a database (mirroring ``tests/db_integration``).
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 
 import asyncpg
@@ -23,8 +24,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from orchestratord.api.app import create_app
-from orchestratord.api.db import get_repositories
+# Production defaults to local single-user mode (no login); the gate and
+# WebSocket token contracts below exercise the multi-user path, so force
+# it on for this test process before any app module is imported.
+os.environ.setdefault("ORCHESTRATORD_AUTH", "1")
+
+from orchestratord.api.app import create_app  # noqa: E402
+from orchestratord.api.db import get_repositories  # noqa: E402
 from orchestratord.db.base import Base
 from orchestratord.db.engine import (
     build_engine,

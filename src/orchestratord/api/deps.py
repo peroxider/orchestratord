@@ -1,14 +1,23 @@
 """Authorization principal helpers for the API layer.
 
-The global ``require_auth`` dependency puts every workspace-scoped path
-behind an ``auth_tokens`` bearer token; the only credential is the token
-itself (no passwords).  The admin gate remains the process-local override
-below, used by tests and single-user developer mode for admin-only
-endpoints such as ``POST /api/skills/refresh-hashes``.
+Auth runs in one of two modes, selected by ``ORCHESTRATORD_AUTH``:
+
+* **Local single-user (default, unset/``0``)** — the deployment is a
+  personal daemon on a trusted host; ``require_auth`` and the WebSocket
+  token gate accept everything. The login/multi-user implementation stays
+  fully wired (routers, frontend token store, login page) but is inert.
+* **Multi-user token mode (``ORCHESTRATORD_AUTH=1``)** — every
+  workspace-scoped path requires an ``auth_tokens`` bearer token; the only
+  credential is the token itself (no passwords).
+
+The admin gate remains the process-local override below, used by tests and
+single-user developer mode for admin-only endpoints such as ``POST
+/api/skills/refresh-hashes``.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -18,6 +27,17 @@ from fastapi import Depends, HTTPException, Request
 from orchestratord.api.db import get_repositories
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import AuthToken, hash_api_token
+
+_AUTH_ENV = "ORCHESTRATORD_AUTH"
+
+
+def auth_enabled() -> bool:
+    """Return whether multi-user token auth is active for this process.
+
+    Read per call (not cached at import) so tests can flip the switch with
+    ``monkeypatch``/``setenv``.
+    """
+    return os.environ.get(_AUTH_ENV) == "1"
 
 # Paths reachable without a bearer token: the login handshake itself,
 # liveness, the WebSocket (which authenticates via its own ``token`` query
@@ -53,7 +73,12 @@ async def require_auth(
     that has not expired.  Returns the matched token so routes that need
     the principal (e.g. ``GET /api/auth/me``) can inject it via the same
     dependency (FastAPI caches the result per request).
+
+    In local single-user mode (``auth_enabled()`` false) every path is
+    accepted and ``None`` is returned without touching the database.
     """
+    if not auth_enabled():
+        return None
     path = request.url.path
     if path in PUBLIC_PATHS or path == "/api/auth/verify":
         return None

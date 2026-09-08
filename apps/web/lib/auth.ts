@@ -4,8 +4,19 @@
  * tokens page) and verified via ``POST /api/auth/verify``. It is held in
  * localStorage and attached as ``Authorization: Bearer`` by
  * ``apps/web/lib/api.ts`` / the realtime bridge.
+ *
+ * The whole login/multi-user flow is decoupled behind one build-time flag
+ * (mirroring the backend's ``ORCHESTRATORD_AUTH``): the default local
+ * single-user deployment ships it inert — ``isAuthEnabled()`` is false, no
+ * token is requested or stored, and every API/WS call goes out anonymous.
+ * Set ``NEXT_PUBLIC_ORCHESTRATORD_AUTH=1`` at build time to re-enable the
+ * gated flow for a multi-user deployment.
  */
 const TOKEN_STORAGE_KEY = 'orchestratord.token'
+
+export function isAuthEnabled(): boolean {
+  return process.env.NEXT_PUBLIC_ORCHESTRATORD_AUTH === '1'
+}
 
 export function getToken(): string | null {
   if (typeof window === 'undefined') {

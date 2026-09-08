@@ -11,7 +11,7 @@ import {
 } from 'react'
 import { I18nProvider } from '@orchestratord/views'
 import { usePathname, useRouter } from 'next/navigation'
-import { getToken } from '@/lib/auth'
+import { getToken, isAuthEnabled } from '@/lib/auth'
 
 /* -------------------------------------------------------------------------- */
 /*  ThemeProvider — root-level data-theme controller                          */
@@ -101,12 +101,16 @@ export function useTheme(): ThemeContextValue {
 /* -------------------------------------------------------------------------- */
 
 /**
- * The console is token-gated: every route outside the public paths requires
- * a stored session token (``apps/web/lib/auth.ts``). The gate is the
- * outermost provider so an unauthenticated visit is bounced to ``/login``
- * before any child provider runs its effects. The check runs in an effect
- * (not during render) so SSR markup stays hydration-safe; the login page
- * itself performs the server-side verification and stores the token.
+ * Token gate for multi-user mode: every route outside the public paths
+ * requires a stored session token (``apps/web/lib/auth.ts``). The gate is
+ * the outermost provider so an unauthenticated visit is bounced to
+ * ``/login`` before any child provider runs its effects. The check runs in
+ * an effect (not during render) so SSR markup stays hydration-safe; the
+ * login page itself performs the server-side verification and stores the
+ * token.  In the default local single-user deployment (``isAuthEnabled()``
+ * false) the gate is a pass-through — the login/multi-user implementation
+ * stays wired but inert, mirroring the backend's ``ORCHESTRATORD_AUTH``
+ * switch.
  */
 const PUBLIC_PATHS = new Set(['/', '/login'])
 
@@ -115,7 +119,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const router = useRouter()
 
   useEffect(() => {
-    if (PUBLIC_PATHS.has(pathname)) {
+    if (!isAuthEnabled() || PUBLIC_PATHS.has(pathname)) {
       return
     }
     if (getToken() == null) {

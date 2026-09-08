@@ -25,7 +25,7 @@ import time
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 
 from orchestratord.api.db import get_repositories
-from orchestratord.api.deps import _is_expired
+from orchestratord.api.deps import _is_expired, auth_enabled
 from orchestratord.api.realtime import get_broker
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import hash_api_token
@@ -44,8 +44,12 @@ async def _ws_token_valid(repos: Repositories, token: str) -> bool:
     """Token gate: the plaintext must hash to a persisted, unexpired row.
 
     Mirrors the REST ``require_auth`` contract — the query-param plaintext's
-    SHA-256 must match an ``auth_tokens`` row that has not expired.
+    SHA-256 must match an ``auth_tokens`` row that has not expired.  In
+    local single-user mode (``auth_enabled()`` false) every connection is
+    accepted without a database lookup.
     """
+    if not auth_enabled():
+        return True
     if not token:
         return False
     record = await repos.auth_tokens.by_token_hash(hash_api_token(token))

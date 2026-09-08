@@ -204,7 +204,15 @@ async def _forward_interrupt(
     if live.capabilities.interrupt:
         await live.spi_session.interrupt()
     if live.process_tree is not None:
-        live.process_tree.kill()
+        try:
+            live.process_tree.kill()
+        except Exception as exc:
+            # ProcessTree raises when descendants survive SIGKILL — tell
+            # the operator rather than leaking a 500.
+            raise HTTPException(
+                status_code=409,
+                detail=f"process kill failed: {exc}",
+            ) from exc
     logger.info("Stop forwarded to live session: session_id=%s", session_id)
 
 
@@ -221,10 +229,16 @@ async def _forward_process_control(
     live = await _lookup_live(session_id, backend_runner)
     if live is None or live.process_tree is None:
         return
-    if action == "pause":
-        live.process_tree.pause()
-    elif action == "resume":
-        live.process_tree.resume()
+    try:
+        if action == "pause":
+            live.process_tree.pause()
+        elif action == "resume":
+            live.process_tree.resume()
+    except RuntimeError as exc:
+        # Per-turn backends raise this between turns (no child process to
+        # signal). The DB status flip already happened above — surface the
+        # race instead of leaking a 500.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     logger.info("Process control forwarded: session_id=%s action=%s",
                 session_id, action)
 

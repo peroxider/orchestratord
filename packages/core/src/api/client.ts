@@ -26,7 +26,9 @@ export class ApiClient {
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/$/, '')
-    this.fetchFn = options.fetchFn ?? fetch
+    // Native fetch must keep its Window receiver — stored unbound it throws
+    // "Illegal invocation" the moment a page calls request().
+    this.fetchFn = options.fetchFn ?? fetch.bind(globalThis)
     this.getAccessToken = options.getAccessToken
   }
 
