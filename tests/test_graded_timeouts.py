@@ -173,3 +173,80 @@ class TestBackwardCompatConstruction:
         assert spec.total_timeout_s == 1800.0
         assert spec.inactivity_timeout_s == 300.0
         assert spec.stall_warn_s == 30.0
+
+
+class TestFirstTurnTimeoutWiring:
+    """``agent.first_turn_timeout_ms`` in workflow config must flow through
+    to ``SessionSpec.first_turn_timeout_s`` via ``_build_session_spec``.
+
+    Regression for issue #9: first_turn_timeout was hardcoded at 120s and
+    not configurable from workflow YAML.
+    """
+
+    @staticmethod
+    def _make_runner(*, first_turn_timeout_ms: int = 0) -> object:
+        from orchestratord.backend_runner import BackendRunner
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        agent_config = AgentConfig(
+            first_turn_timeout_ms=first_turn_timeout_ms,
+        )
+        return BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=agent_config,
+            sandbox_config=SandboxConfig(),
+        )
+
+    @staticmethod
+    def _make_session() -> object:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            workspace=SimpleNamespace(path="."),
+            run_id=None,
+            _runtime_tasks=None,
+        )
+
+    def test_default_zero_yields_none_in_spec(self) -> None:
+        """When ``first_turn_timeout_ms`` is 0 (default), the spec field
+        must be ``None`` so ``_resolve_timeouts`` applies the 120s fallback."""
+        runner = self._make_runner(first_turn_timeout_ms=0)
+        spec = runner._build_session_spec(
+            session=self._make_session(),
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="",
+        )
+        assert spec.first_turn_timeout_s is None
+
+    def test_explicit_value_flows_to_spec(self) -> None:
+        """``first_turn_timeout_ms=600000`` (600s) must produce
+        ``first_turn_timeout_s=600.0`` in the ``SessionSpec``."""
+        runner = self._make_runner(first_turn_timeout_ms=600_000)
+        spec = runner._build_session_spec(
+            session=self._make_session(),
+            workflow=None,  # type: ignore[arg-type]
+            system_prompt="",
+        )
+        assert spec.first_turn_timeout_s == 600.0
+
+    def test_wiring_round_trip_via_from_dict(self) -> None:
+        """``WorkflowConfig.from_dict`` must parse
+        ``agent.first_turn_timeout_ms`` from raw YAML dict and forward it
+        through ``_build_session_spec`` to the ``SessionSpec``."""
+        from orchestratord.backend_runner import BackendRunner
+        from orchestratord.config.schema import WorkflowConfig
+
+        workflow = WorkflowConfig.from_dict({
+            "agent": {"first_turn_timeout_ms": 300_000},
+        })
+        runner = BackendRunner(
+            backend=object(),  # type: ignore[arg-type]
+            agent_config=workflow.agent,
+            sandbox_config=workflow.sandbox,
+        )
+        spec = runner._build_session_spec(
+            session=self._make_session(),
+            workflow=workflow,
+            system_prompt="",
+        )
+        assert spec.first_turn_timeout_s == 300.0

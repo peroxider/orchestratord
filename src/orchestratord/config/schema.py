@@ -783,6 +783,14 @@ class AgentConfig:
     # turns not streamed to stdout); genuine hangs sat 949s/1140s.
     # 0 disables. See QueryConfig.stall_timeout_s.
     stall_timeout_ms: int = 300_000
+    # First-turn timeout in milliseconds.  When set to a positive value,
+    # overrides the hardcoded 120s default for ``first_turn_timeout_s``
+    # in the ``SessionSpec``.  0 (default) means "not configured" — the
+    # runner's built-in 120s fallback applies.  This is the only
+    # mechanism to adjust the first-turn deadline for single-turn
+    # backends (e.g. opencode) where the entire run is one turn and
+    # long bash commands can exceed 120s.
+    first_turn_timeout_ms: int = 0
     # Early-diagnosis tier: emit a stall_suspected diagnostic (debug
     # event + WARNING log) after this much silence — guarantees a clear
     # diagnosis within ~30s of a hang without false-kill risk. 0 disables.
@@ -1338,6 +1346,7 @@ class WorkflowConfig:
             delay_between_requests_ms=agent_raw.get("delay_between_requests_ms", 2000),
             run_timeout_ms=agent_raw.get("run_timeout_ms", 1_800_000),
             stall_timeout_ms=agent_raw.get("stall_timeout_ms", 300_000),
+            first_turn_timeout_ms=agent_raw.get("first_turn_timeout_ms", 0),
             stall_warn_ms=agent_raw.get("stall_warn_ms", 30_000),
             # File-path whitelist gate (see AgentConfig docstring).
             allowed_changed_files=_normalize_string_list(
