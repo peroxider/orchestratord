@@ -1399,7 +1399,7 @@ class BackendRunner:
                 if (session.turn_count or 0) > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
                     try:
                         from orchestratord.git.utils import get_file_status
-                        statuses = get_file_status(str(session.workspace.path))
+                        statuses = await asyncio.to_thread(get_file_status, str(session.workspace.path))
                         ws_dirty = any(
                             s.status not in ("unmodified", "ignored")
                             for s in statuses
@@ -1769,7 +1769,9 @@ class BackendRunner:
         try:
             from orchestratord.git.utils import get_file_status
 
-            current = get_file_status(str(session.workspace.path))
+            current = await asyncio.to_thread(
+                get_file_status, str(session.workspace.path)
+            )
             current_map = {s.path: s for s in current}
             if last_snapshot is None:
                 return any(
