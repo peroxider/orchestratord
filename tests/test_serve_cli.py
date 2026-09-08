@@ -24,7 +24,7 @@ def _make_args(argv: list[str]) -> argparse.Namespace:
 class TestParser:
     def test_defaults(self) -> None:
         args = _make_args([])
-        assert args.host == "0.0.0.0"
+        assert args.host == "127.0.0.1"
         assert args.port == 9000
         assert args.reload is False
 

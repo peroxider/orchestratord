@@ -3718,7 +3718,9 @@ class Orchestrator:
                             try:
                                 _repo_root = get_repo_root(str(session.workspace.path))
                                 if _repo_root:
-                                    _file_status = get_file_status(_repo_root)
+                                    _file_status = await asyncio.to_thread(
+                                        get_file_status, _repo_root
+                                    )
                                     _has_changes = bool(_file_status)
                                     if not _has_changes:
                                         _start_sha = getattr(session, "start_commit_sha", None)
@@ -4073,7 +4075,11 @@ class Orchestrator:
                     session.issue.id,
                     self.workflow.agent.run_timeout_ms,
                 )
-                workspace_dirty = bool(get_file_status(str(session.workspace.path)))
+                workspace_dirty = bool(
+                    await asyncio.to_thread(
+                        get_file_status, str(session.workspace.path)
+                    )
+                )
                 append_debug_event(
                     getattr(session, "debug_log_path", None),
                     "orchestrator.timeout",
