@@ -53,6 +53,34 @@ from .session_state import AgentSession, RunSession, RunSubject
 logger = logging.getLogger(__name__)
 
 
+def _normalize_token_usage(usage: dict) -> dict[str, int]:
+    """Normalize backend-specific token usage keys to canonical lowercase.
+
+    Backends may report usage in different key formats:
+    - opencode: ``input``/``output``/``reasoning``/``cache_read``
+    - dsh (SDK pass-through): ``inputTokens``/``outputTokens`` / \
+      ``reasoningTokens``/``cacheReadTokens``
+
+    The canonical format matches what ``issue show`` (``_print_session_usage``)
+    and the ``run_read_model`` expect.  Unknown keys are preserved verbatim
+    so future backend fields are never silently dropped.
+    """
+    _CAMEL_TO_SNAKE: dict[str, str] = {
+        "inputTokens": "input",
+        "outputTokens": "output",
+        "reasoningTokens": "reasoning",
+        "cacheReadTokens": "cache_read",
+        "cacheWriteTokens": "cache_write",
+        "totalTokens": "total",
+    }
+    canonical: dict[str, int] = {}
+    for key, value in usage.items():
+        if isinstance(value, (int, float)):
+            normalized = _CAMEL_TO_SNAKE.get(key, key)
+            canonical[normalized] = canonical.get(normalized, 0) + int(value)
+    return canonical
+
+
 def _as_uuid(value: Any) -> uuid.UUID | None:
     """Best-effort UUID coercion — returns ``None`` on any mismatch."""
     try:
@@ -1508,9 +1536,11 @@ class BackendRunner:
                 if isinstance(usage, dict) and usage:
                     existing = getattr(session, "token_usage", None)
                     merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-                    for key, value in usage.items():
-                        if isinstance(value, (int, float)):
-                            merged[key] = merged.get(key, 0) + int(value)
+                    # Normalize backend-specific key formats (dsh camelCase,
+                    # opencode lowercase) to the canonical lowercase keys the
+                    # registry / CLI / dashboard consume, then accumulate.
+                    for key, value in _normalize_token_usage(usage).items():
+                        merged[key] = merged.get(key, 0) + int(value)
                     session.token_usage = merged
                 # Record run-level usage into orchestratord telemetry
                 # (best-effort; local JSONL — independent of clawcodex).
@@ -1649,6 +1679,21 @@ class BackendRunner:
 
         session.completed_at = time.time()
         session.duration_ms = max(0.0, (time.monotonic() - run_start) * 1000)
+
+        # Final diagnostics snapshot after the event loop ends.
+        # The in-loop callback fires BEFORE each event, so the last
+        # in-loop invocation cannot see the terminal state that the
+        # SESSION_COMPLETE handler sets (token_usage from the ``usage``
+        # payload, cost_usd, duration_ms, final status) before it
+        # breaks out of the loop. Persist it here so the registry
+        # ``run_token_usage`` always receives the real token counts —
+        # the orchestrator's finally block is a separate safety net,
+        # not the only capture point.
+        if diagnostics_callback is not None:
+            try:
+                diagnostics_callback(session)
+            except Exception:
+                logger.debug("final diagnostics_callback failed", exc_info=True)
 
     @staticmethod
     async def _drain_backend_controls(spi_session: Any, session: AgentSession) -> bool:

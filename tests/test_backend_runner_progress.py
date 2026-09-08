@@ -219,7 +219,9 @@ async def test_session_complete_extracts_cost_and_usage() -> None:
     """The core must read cost telemetry from the
     SESSION_COMPLETE payload (clawcodex/claude convention:
     ``total_cost_usd``; dsh convention: ``usage`` token dict) instead of
-    ignoring it.
+    ignoring it. Backend token keys are normalized to the canonical
+    lowercase format (``input``/``output``/``reasoning``/``cache_read``)
+    so the registry / CLI / dashboard consume a single consistent shape.
     """
     runner = object.__new__(BackendRunner)
     runner._check_file_changes = lambda *_args: _changed()  # type: ignore[method-assign]
@@ -259,7 +261,185 @@ async def test_session_complete_extracts_cost_and_usage() -> None:
     )
 
     assert session.cost_usd == 0.42
-    assert session.token_usage == {"inputTokens": 150, "outputTokens": 30}
+    assert session.token_usage == {"input": 150, "output": 30}
+
+
+async def test_session_complete_usage_reaches_diagnostics_callback() -> None:
+    """Regression (#12): the usage extracted from SESSION_COMPLETE must
+    reach the run-diagnostics callback.
+
+    The in-loop diagnostics callback fires BEFORE each event is
+    processed, so the last in-loop invocation cannot see the
+    ``token_usage`` that the SESSION_COMPLETE handler sets before
+    breaking. ``_process_events`` must invoke the callback once more
+    after the loop ends, so the registry (the persistent diagnostics
+    source behind ``issue show`` / telemetry) receives the real token
+    numbers instead of an empty dict.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from orchestratord.issue_registry import IssueRegistry
+
+    runner = object.__new__(BackendRunner)
+    runner._check_file_changes = lambda *_args: _changed()  # type: ignore[method-assign]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        reg_path = Path(tmp) / "registry.json"
+        reg = IssueRegistry(reg_path)
+        reg.register(issue_id="1", issue_identifier="ISSUE-1")
+        reg.mark_running("1")
+
+        seen_usage: list[dict] = []
+
+        def diagnostics_callback(sess: Any) -> None:
+            issue_id = getattr(getattr(sess, "issue", None), "id", None) or ""
+            rec = reg.update_run_diagnostics(
+                issue_id,
+                run_id=getattr(sess, "run_id", None),
+                turn_count=getattr(sess, "turn_count", 0),
+                tool_count=getattr(sess, "tool_count", 0),
+                token_usage=getattr(sess, "token_usage", None),
+                cost_usd=getattr(sess, "cost_usd", None),
+            )
+            if rec is not None:
+                seen_usage.append(dict(rec.run_token_usage))
+
+        session = SimpleNamespace(
+            turn_count=0,
+            tool_count=0,
+            status="running",
+            session_end_reason=None,
+            control_socket=None,
+            cost_usd=0.0,
+            token_usage={},
+            run_id="run-1",
+            issue=SimpleNamespace(id="1"),
+        )
+        spi_session = _Session(
+            [
+                EventEnvelope(
+                    seq=1,
+                    timestamp=0,
+                    kind=EventKind.SESSION_COMPLETE,
+                    payload={
+                        "reason": "success",
+                        "usage": {
+                            "inputTokens": 4287,
+                            "outputTokens": 34,
+                            "reasoningTokens": 120,
+                            "cacheReadTokens": 500,
+                        },
+                    },
+                ),
+            ]
+        )
+
+        await runner._process_events(
+            spi_session,
+            session,
+            {},
+            None,
+            None,
+            None,
+            None,
+            diagnostics_callback=diagnostics_callback,
+        )
+
+        # _process_events must persist the terminal usage itself — no
+        # orchestrator finally-block call required.
+        assert session.token_usage == {
+            "input": 4287,
+            "output": 34,
+            "reasoning": 120,
+            "cache_read": 500,
+        }
+        assert seen_usage, "diagnostics callback was never invoked"
+        assert seen_usage[-1] == session.token_usage, (
+            f"last diagnostics snapshot has empty/old usage: {seen_usage[-1]}"
+        )
+
+        # Reload from disk: the record's run_token_usage must carry the
+        # real token counts.
+        reloaded = IssueRegistry(reg_path).get("1")
+        assert reloaded is not None
+        assert reloaded.run_token_usage == {
+            "input": 4287,
+            "output": 34,
+            "reasoning": 120,
+            "cache_read": 500,
+        }, f"registry run_token_usage empty: {reloaded.run_token_usage}"
+
+
+async def test_session_complete_no_usage_stays_empty() -> None:
+    """Regression (#12) criterion 3: when the backend reports no usage,
+    the registry must keep ``run_token_usage`` empty — never fabricate
+    zeros or estimates.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from orchestratord.issue_registry import IssueRegistry
+
+    runner = object.__new__(BackendRunner)
+    runner._check_file_changes = lambda *_args: _changed()  # type: ignore[method-assign]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        reg_path = Path(tmp) / "registry.json"
+        reg = IssueRegistry(reg_path)
+        reg.register(issue_id="1", issue_identifier="ISSUE-1")
+        reg.mark_running("1")
+
+        def diagnostics_callback(sess: Any) -> None:
+            issue_id = getattr(getattr(sess, "issue", None), "id", None) or ""
+            reg.update_run_diagnostics(
+                issue_id,
+                run_id=getattr(sess, "run_id", None),
+                turn_count=getattr(sess, "turn_count", 0),
+                tool_count=getattr(sess, "tool_count", 0),
+                token_usage=getattr(sess, "token_usage", None),
+                cost_usd=getattr(sess, "cost_usd", None),
+            )
+
+        session = SimpleNamespace(
+            turn_count=0,
+            tool_count=0,
+            status="running",
+            session_end_reason=None,
+            control_socket=None,
+            cost_usd=0.0,
+            token_usage={},
+            run_id="run-1",
+            issue=SimpleNamespace(id="1"),
+        )
+        spi_session = _Session(
+            [
+                EventEnvelope(
+                    seq=1,
+                    timestamp=0,
+                    kind=EventKind.SESSION_COMPLETE,
+                    payload={"reason": "success"},  # no usage key
+                ),
+            ]
+        )
+
+        await runner._process_events(
+            spi_session,
+            session,
+            {},
+            None,
+            None,
+            None,
+            None,
+            diagnostics_callback=diagnostics_callback,
+        )
+
+        assert session.token_usage == {}
+        reloaded = IssueRegistry(reg_path).get("1")
+        assert reloaded is not None
+        assert reloaded.run_token_usage == {}, (
+            f"expected empty run_token_usage, got {reloaded.run_token_usage}"
+        )
 
 
 async def test_preflight_failure_short_circuits_run() -> None:
