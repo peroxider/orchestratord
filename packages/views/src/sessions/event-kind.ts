@@ -31,7 +31,10 @@ export function eventKindLabel(
 }
 
 /** One-line summary of an event's payload for timeline rows. */
-export function eventSummary(event: SessionEvent, locale: Locale = 'en'): string {
+export function eventSummary(
+  event: Pick<SessionEvent, 'kind' | 'payload'>,
+  locale: Locale = 'en',
+): string {
   const p = event.payload
   switch (event.kind) {
     case 'text':

@@ -5,45 +5,63 @@
 :root {
   color-scheme: dark;
 
-  --bg-0: #0b0f17;
-  --bg-1: #11161f;
-  --bg-2: #161c26;
-  --bg-3: #1d2532;
-  --line: #232c3a;
+  --app-shell: #0d1016;
+  --page-canvas: #121721;
+  --surface: #181e29;
+  --surface-raised: #212938;
+  --foreground: #eef3fa;
+  --signal: #6aa9ff;
+  --muted: #8b95a5;
+  --border: #293241;
 
-  --accent: #58a6ff;
-  --accent-2: #79c0ff;
-  --good: #3fb950;
-  --warn: #d29922;
-  --bad: #f85149;
-  --purple: #a371f7;
+  --bg-0: var(--page-canvas);
+  --bg-1: var(--surface);
+  --bg-2: var(--surface-raised);
+  --bg-3: #2a3445;
+  --line: var(--border);
+
+  --accent: var(--signal);
+  --accent-2: #9fc8ff;
+  --good: #49b675;
+  --warn: #d5a447;
+  --bad: #f06a6a;
+  --purple: #b18cff;
   --vermillion: #db6d28;
 
-  --text-caption: #8b949e;
-  --text-body: #c9d1d9;
-  --text-title: #e6edf3;
+  --text-caption: var(--muted);
+  --text-body: #c8d0dc;
+  --text-title: var(--foreground);
 }
 
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --bg-0: #ffffff;
-  --bg-1: #f6f8fa;
-  --bg-2: #eef1f4;
-  --bg-3: #e6e9ed;
-  --line: #d0d7de;
+  --app-shell: #eef1f5;
+  --page-canvas: #f7f8fa;
+  --surface: #ffffff;
+  --surface-raised: #f1f4f8;
+  --foreground: #161b22;
+  --signal: #2563eb;
+  --muted: #667085;
+  --border: #d8dee8;
 
-  --accent: #0969da;
+  --bg-0: var(--page-canvas);
+  --bg-1: var(--surface);
+  --bg-2: var(--surface-raised);
+  --bg-3: #e7ebf1;
+  --line: var(--border);
+
+  --accent: var(--signal);
   --accent-2: #1f6feb;
-  --good: #1a7f37;
+  --good: #168449;
   --warn: #9a6700;
   --bad: #cf222e;
   --purple: #8250df;
   --vermillion: #bc4c00;
 
-  --text-caption: #6e7781;
-  --text-body: #1f2328;
-  --text-title: #0d1117;
+  --text-caption: var(--muted);
+  --text-body: #394150;
+  --text-title: var(--foreground);
 }
 
 /* ---- atomic component styles ---- */
@@ -59,6 +77,7 @@
   color: var(--text-body);
   background: var(--bg-2);
   cursor: pointer;
+  min-height: 32px;
   transition:
     background 120ms ease,
     border-color 120ms ease;
@@ -77,7 +96,8 @@
 .ui-button--primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #0b0f17;
+  color: #07111f;
+  font-weight: 600;
 }
 
 .ui-button--secondary {
@@ -98,6 +118,13 @@
 .ui-button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.ui-button:focus-visible,
+.ui-input:focus-visible,
+.ui-textarea:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
 }
 
 .ui-badge {

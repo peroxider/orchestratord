@@ -16,6 +16,8 @@ export interface RealtimeClientOptions {
 export class RealtimeClient {
   private readonly options: RealtimeClientOptions
   private socket: WebSocket | null = null
+  private listeners = new Set<(message: RealtimeMessage) => void>()
+  private topics = new Set<string>()
 
   constructor(options: RealtimeClientOptions) {
     this.options = options
@@ -30,13 +32,21 @@ export class RealtimeClient {
     this.socket = socket
 
     this.options.onStatus?.('connecting')
-    socket.onopen = () => this.options.onStatus?.('open')
+    socket.onopen = () => {
+      this.options.onStatus?.('open')
+      if (this.topics.size > 0) {
+        this.send({ type: 'subscribe', topics: [...this.topics] })
+      }
+    }
     socket.onclose = () => this.options.onStatus?.('closed')
     socket.onerror = () => this.options.onStatus?.('error')
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(String(event.data)) as RealtimeMessage
         this.options.onMessage?.(message)
+        for (const listener of this.listeners) {
+          listener(message)
+        }
       } catch {
         // ignore non-JSON frames
       }
@@ -44,7 +54,26 @@ export class RealtimeClient {
   }
 
   subscribe(topics: string[]): void {
-    this.send({ type: 'subscribe', topics })
+    const fresh = topics.filter((topic) => !this.topics.has(topic))
+    for (const topic of fresh) this.topics.add(topic)
+    if (fresh.length > 0) this.send({ type: 'subscribe', topics: fresh })
+  }
+
+  unsubscribe(topics: string[]): void {
+    const existing = topics.filter((topic) => this.topics.delete(topic))
+    if (existing.length > 0) this.send({ type: 'unsubscribe', topics: existing })
+  }
+
+  /**
+   * Fan out every received frame to *fn*; returns the unregister function.
+   * Lets feature hooks (e.g. the chat stream) observe raw frames without
+   * going through the query-invalidation bridge.
+   */
+  addMessageListener(fn: (message: RealtimeMessage) => void): () => void {
+    this.listeners.add(fn)
+    return () => {
+      this.listeners.delete(fn)
+    }
   }
 
   disconnect(): void {

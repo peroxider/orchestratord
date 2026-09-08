@@ -14,11 +14,13 @@ Reference: docs/FEATURE_GAP_VS_MULTICA.md §6.1d.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 
+from orchestratord.api.realtime import get_broker, reset_broker
 from orchestratord.chat_bridge import ChatMessageBridge, is_progress_reporter
 from orchestratord.db import models as orm
 from orchestratord.db.engine import build_session_factory
@@ -166,6 +168,81 @@ class TestFailurePaths:
         messages = await _list_messages(client, session.id)
         assert len(messages) == 1
         assert messages[0]["agent_id"] == str(agent_id)
+
+
+class TestRealtimePublishing:
+    async def test_delta_then_turn_complete_frames(
+        self, client, db, db_engine
+    ) -> None:
+        reset_broker()
+        session = await _seed_session(db)
+        factory = build_session_factory(db_engine)
+        bridge = ChatMessageBridge(factory, session.id, session.workspace_id)
+        topic = f"chat.{session.id}"
+        _sub_id, frames = await get_broker().subscribe({topic})
+
+        bridge.on_text_delta("stream me")
+        bridge.on_turn_complete(object(), object())
+        await bridge.flush()
+
+        first = await asyncio.wait_for(anext(frames), timeout=2)
+        assert first == {
+            "topic": topic,
+            "payload": {
+                "event": "text_delta",
+                "session_id": str(session.id),
+                "text": "stream me",
+            },
+        }
+        second = await asyncio.wait_for(anext(frames), timeout=2)
+        assert second["payload"]["event"] == "turn_complete"
+        reset_broker()
+
+    async def test_tool_call_frame_published(self, client, db, db_engine) -> None:
+        reset_broker()
+        session = await _seed_session(db)
+        factory = build_session_factory(db_engine)
+        bridge = ChatMessageBridge(factory, session.id, session.workspace_id)
+        _sub_id, frames = await get_broker().subscribe(
+            {f"chat.{session.id}"}
+        )
+
+        bridge.on_tool_call("run", "call-9")
+
+        frame = await asyncio.wait_for(anext(frames), timeout=2)
+        assert frame["payload"] == {
+            "event": "tool_call",
+            "session_id": str(session.id),
+            "tool_name": "run",
+            "call_id": "call-9",
+        }
+        reset_broker()
+
+    async def test_error_frame_and_partial_text_persisted(
+        self, client, db, db_engine
+    ) -> None:
+        reset_broker()
+        session = await _seed_session(db)
+        factory = build_session_factory(db_engine)
+        bridge = ChatMessageBridge(factory, session.id, session.workspace_id)
+        _sub_id, frames = await get_broker().subscribe(
+            {f"chat.{session.id}"}
+        )
+
+        bridge.on_text_delta("partial before crash")
+        bridge.on_error("backend died")
+        await bridge.flush()
+
+        delta = await asyncio.wait_for(anext(frames), timeout=2)
+        assert delta["payload"]["event"] == "text_delta"
+        error = await asyncio.wait_for(anext(frames), timeout=2)
+        assert error["payload"]["event"] == "error"
+        assert error["payload"]["message"] == "backend died"
+
+        messages = await _list_messages(client, session.id)
+        assert len(messages) == 1
+        assert messages[0]["content"] == "partial before crash"
+        reset_broker()
 
 
 class TestDuckTyping:

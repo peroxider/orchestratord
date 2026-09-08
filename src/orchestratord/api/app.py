@@ -23,6 +23,7 @@ from orchestratord.api.routers import (
     dashboard,
     inbox,
     integrations,
+    instance,
     issues,
     members,
     projects,
@@ -125,6 +126,7 @@ def create_app(
     # ``require_auth`` itself.
     _auth = [Depends(require_auth)]
     application.include_router(skills.router, dependencies=_auth)
+    application.include_router(instance.router, dependencies=_auth)
     application.include_router(dashboard.router, dependencies=_auth)
     application.include_router(realtime.router)
     application.include_router(auth.router, dependencies=_auth)

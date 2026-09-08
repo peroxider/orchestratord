@@ -32,7 +32,12 @@ function lastInstance(): MockWebSocket {
   return inst
 }
 
-function newClient(options: ConstructorParameters<typeof RealtimeClient>[0]) {
+function newClient(
+  options: Omit<
+    ConstructorParameters<typeof RealtimeClient>[0],
+    'url' | 'workspaceId' | 'WebSocketImpl'
+  >,
+) {
   return new RealtimeClient({
     url: 'ws://localhost:9000/ws',
     workspaceId: 'ws-1',
@@ -63,6 +68,49 @@ describe('RealtimeClient', () => {
     expect(socket.sent).toEqual([
       JSON.stringify({ type: 'subscribe', topics: ['issue.123'] }),
     ])
+  })
+
+  it('flushes subscriptions requested while connecting', () => {
+    const client = newClient({})
+    client.connect()
+    const socket = lastInstance()
+    client.subscribe(['chat.abc'])
+    expect(socket.sent).toEqual([])
+    socket.readyState = 1
+    socket.onopen?.()
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'subscribe', topics: ['chat.abc'] }),
+    ])
+  })
+
+  it('unsubscribes from topics', () => {
+    const client = newClient({})
+    client.connect()
+    const socket = lastInstance()
+    socket.readyState = 1
+    client.subscribe(['chat.abc'])
+    socket.sent = []
+    client.unsubscribe(['chat.abc'])
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: 'unsubscribe', topics: ['chat.abc'] }),
+    ])
+  })
+
+  it('fans frames out to message listeners and honors cleanup', () => {
+    const seen: unknown[] = []
+    const client = newClient({})
+    client.connect()
+    const detach = client.addMessageListener((m) => seen.push(m))
+    lastInstance().onmessage?.({
+      data: JSON.stringify({ type: 'event', topic: 'chat.1' }),
+    })
+    expect(seen).toEqual([{ type: 'event', topic: 'chat.1' }])
+
+    detach()
+    lastInstance().onmessage?.({
+      data: JSON.stringify({ type: 'event', topic: 'chat.2' }),
+    })
+    expect(seen).toEqual([{ type: 'event', topic: 'chat.1' }])
   })
 
   it('dispatches parsed messages to onMessage', () => {

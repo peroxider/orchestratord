@@ -69,12 +69,31 @@ async def _truncate_all(session) -> None:
     await session.execute(text(f"TRUNCATE TABLE {names}"))
 
 
+async def _ensure_bucket_index(engine) -> None:
+    """Mirror migration 0008's unique usage bucket index.
+
+    ``create_schema`` deliberately builds no indexes (migrations are the
+    authoritative source), but the test DB must emulate a *migrated*
+    deployment: the §0.5 usage upsert relies on ``ON CONFLICT`` against
+    ``uq_usage_aggregates_bucket``. Idempotent via ``IF NOT EXISTS``.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_usage_aggregates_bucket "
+                "ON usage_aggregates (workspace_id, agent_id, issue_id, backend, day) "
+                "NULLS NOT DISTINCT"
+            )
+        )
+
+
 @pytest.fixture
 async def db_engine():
     try:
         await _ensure_test_db()
         engine = build_engine(_TEST_DSN)
         await create_schema(engine)
+        await _ensure_bucket_index(engine)
     except Exception as exc:  # noqa: BLE001 — DB down / role missing → skip
         pytest.skip(f"Postgres unavailable at 127.0.0.1:5432: {exc}")
     try:

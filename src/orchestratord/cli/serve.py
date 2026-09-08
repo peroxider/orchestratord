@@ -25,8 +25,12 @@ def add_serve_parser(subparsers: argparse._SubParsersAction) -> None:
     serve_parser.add_argument(
         "--host",
         type=str,
-        default="0.0.0.0",
-        help="Bind address (default: 0.0.0.0)",
+        default="127.0.0.1",
+        help=(
+            "Bind address (default: 127.0.0.1). Exposing the operator console "
+            "on a non-loopback interface requires a trusted VPN or an "
+            "authenticating reverse proxy."
+        ),
     )
     serve_parser.add_argument(
         "--port",

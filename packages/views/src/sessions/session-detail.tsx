@@ -48,32 +48,43 @@ export function SessionDetail({ client, sessionId }: SessionDetailProps) {
   const data = session.data
   const eventList = events.data?.events ?? []
   const approvals = eventList.filter((e) => e.kind === 'approval_request')
+  const controlPending = pause.isPending || resume.isPending || stop.isPending
+  const controlError = pause.error ?? resume.error ?? stop.error
 
   return (
     <div className="session-detail">
       <header className="session-detail__header">
-        <h2 className="session-detail__title">{data.mode} session</h2>
-        <Badge tone={STATUS_TONE[data.status] ?? 'neutral'}>
-          {data.status}
-        </Badge>
+        <div className="session-detail__identity">
+          <p className="section-eyebrow">EXECUTION / {data.mode.toUpperCase()}</p>
+          <div><h2 className="session-detail__title">Session {data.id.slice(0, 8)}</h2><Badge tone={STATUS_TONE[data.status] ?? 'neutral'}>{data.status}</Badge></div>
+        </div>
         <div className="session-detail__controls">
           {data.status === 'running' && (
-            <Button size="sm" variant="secondary" onClick={() => pause.mutate()}>
+            <Button size="sm" variant="secondary" disabled={controlPending} onClick={() => pause.mutate()}>
               Pause
             </Button>
           )}
           {data.status === 'paused' && (
-            <Button size="sm" variant="secondary" onClick={() => resume.mutate()}>
+            <Button size="sm" variant="secondary" disabled={controlPending} onClick={() => resume.mutate()}>
               Resume
             </Button>
           )}
           {(data.status === 'running' || data.status === 'paused') && (
-            <Button size="sm" variant="danger" onClick={() => stop.mutate()}>
-              Stop
+            <Button size="sm" variant="danger" disabled={controlPending} onClick={() => { if (window.confirm('Stop this session and terminate its active child process?')) stop.mutate() }}>
+              {stop.isPending ? 'Stopping…' : 'Stop'}
             </Button>
           )}
         </div>
       </header>
+
+      <dl className="session-detail__facts">
+        <div><dt>Mode</dt><dd>{data.mode}</dd></div>
+        <div><dt>Source</dt><dd>{data.issue_id ? `Issue ${data.issue_id.slice(0, 8)}` : 'Direct conversation'}</dd></div>
+        <div><dt>Agent</dt><dd>{data.agent_id ? data.agent_id.slice(0, 8) : 'Automatic routing'}</dd></div>
+        <div><dt>Started</dt><dd>{new Date(data.created_at).toLocaleString()}</dd></div>
+      </dl>
+
+      {controlError && <p className="session-detail__control-error">The control request was not confirmed. The execution record is unchanged; check the Runtime connection and try again.</p>}
 
       {approvals.length > 0 && (
         <div className="session-detail__approvals">
@@ -105,7 +116,10 @@ export function SessionDetail({ client, sessionId }: SessionDetailProps) {
         </div>
       )}
 
-      <ModeRenderer mode={data.mode} events={eventList} />
+      <section className="session-detail__ledger">
+        <header><div><p className="section-eyebrow">EXECUTION SPINE</p><h3>Event ledger</h3></div><span>{eventList.length} events</span></header>
+        <ModeRenderer mode={data.mode} events={eventList} />
+      </section>
     </div>
   )
 }

@@ -14,13 +14,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from orchestratord.api.db import get_repositories
-from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.usage import (
     UsageRecord,
@@ -97,29 +96,16 @@ async def record_usage(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    existing = await repos.usage_aggregates.by_bucket(
-        workspace_id, record.agent_id, record.issue_id, record.backend, record.day
+    await repos.usage_aggregates.upsert(
+        workspace_id=workspace_id,
+        agent_id=record.agent_id,
+        issue_id=record.issue_id,
+        backend=record.backend,
+        day=record.day,
+        tokens_in=record.tokens_in,
+        tokens_out=record.tokens_out,
+        cost_usd=record.cost_usd,
     )
-    if existing is None:
-        await repos.usage_aggregates.add(
-            orm.UsageAggregate(
-                id=uuid4(),
-                workspace_id=workspace_id,
-                agent_id=record.agent_id,
-                issue_id=record.issue_id,
-                backend=record.backend,
-                day=record.day,
-                tokens_in=record.tokens_in,
-                tokens_out=record.tokens_out,
-                cost_usd=record.cost_usd,
-                sessions=1,
-            )
-        )
-    else:
-        existing.tokens_in += record.tokens_in
-        existing.tokens_out += record.tokens_out
-        existing.cost_usd += record.cost_usd
-        existing.sessions += 1
     return _record_payload(record)
 
 

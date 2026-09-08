@@ -19,6 +19,12 @@ export function invalidationFor(
       if (topic.startsWith('issue.')) {
         return [['issues', workspaceId]]
       }
+      if (topic.startsWith('chat.')) {
+        // Per-session chat timeline: streaming frames keep the streaming
+        // bubble fresh; turn/session completion also triggers this refetch
+        // so the persisted assistant message replaces the buffer.
+        return [['chat-messages', topic.slice('chat.'.length)]]
+      }
       if (topic.startsWith('session.')) {
         return [['sessions']]
       }

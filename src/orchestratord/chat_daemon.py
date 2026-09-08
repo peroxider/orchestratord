@@ -104,6 +104,21 @@ def build_chat_runner_invoke(session_factory: Any) -> RunnerInvoke:
             description=prompt,
             workspace_path=root,
             prompt_override=prompt,
+            # DB row identity for usage aggregation (§7.3): the runner has no
+            # UUID context of its own (workspace is filesystem-bound).
+            context={
+                "workspace_id": str(session_row.workspace_id),
+                "agent_id": (
+                    str(session_row.agent_id)
+                    if session_row.agent_id is not None
+                    else None
+                ),
+                "issue_id": (
+                    str(getattr(session_row, "issue_id", None))
+                    if getattr(session_row, "issue_id", None) is not None
+                    else None
+                ),
+            },
         )
         await runner.run_task(task, progress_callback=progress_event_adapter(bridge))
 

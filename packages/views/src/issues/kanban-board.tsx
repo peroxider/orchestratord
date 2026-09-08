@@ -192,7 +192,7 @@ function KanbanCard({
       >
         <a
           className="kanban-card__link"
-          href={`/${workspaceId}/issues/${issue.id}`}
+          href={`/issues/${issue.id}`}
           draggable={false}
           onDragStart={(e) => e.preventDefault()}
         >

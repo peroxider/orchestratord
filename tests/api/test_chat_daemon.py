@@ -1,13 +1,18 @@
-"""Chat daemon wiring tests (§6.1d) — DB-free unit coverage.
+"""Chat daemon wiring tests (§6.1d).
 
-Pins the ``orchestratord.chat_daemon`` production seam: the
+Unit coverage pins the ``orchestratord.chat_daemon`` production seam: the
 ``ProgressEvent`` → sink-protocol adapter, backend-name resolution
 (session agent provider, then ``ORCHESTRATORD_CHAT_BACKEND``), the
 ``AgentTask`` shape handed to ``BackendRunner.run_task``, and the
 start/stop lifecycle helpers. ``resolve_backend`` / ``BackendRunner``
-are monkeypatched so no real backend or database is needed.
+are monkeypatched so the unit classes need no real backend or database.
 
-Reference: docs/FEATURE_GAP_VS_MULTICA.md §6.1d.
+:class:`TestUsageAggregation` additionally exercises the §7.3 run →
+``usage_aggregates`` fold through the real ``BackendRunner.run_task`` on
+the live ``orchestratord_test`` database (skipped when Postgres is
+unreachable).
+
+Reference: docs/FEATURE_GAP_VS_MULTICA.md §6.1d, §7.3.
 """
 
 from __future__ import annotations
@@ -18,7 +23,11 @@ from uuid import uuid4
 
 import pytest
 
-from orchestratord.agent.task import ProgressEvent, ProgressEventKind
+from orchestratord.agent.task import (
+    AgentTask,
+    ProgressEvent,
+    ProgressEventKind,
+)
 from orchestratord.chat_daemon import (
     build_chat_runner_invoke,
     progress_event_adapter,
@@ -235,3 +244,112 @@ class TestDaemonLifecycle:
         )
         await stop_chat_daemon(dispatcher)
         await stop_chat_daemon(dispatcher)
+
+
+# ---------------------------------------------------------------------------
+# run → usage_aggregates fold (§7.3, live DB)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageAggregation:
+    pytestmark = pytest.mark.database
+
+    def _runner(self):
+        from orchestratord.backend_runner import BackendRunner
+        from orchestratord.config.schema import AgentConfig, SandboxConfig
+
+        runner = object.__new__(BackendRunner)
+        runner.agent_config = AgentConfig(model="gpt-test")
+        runner.sandbox_config = SandboxConfig()
+        runner.workspace_cfg = None
+        runner.backend = SimpleNamespace(name="stub")
+        return runner
+
+    async def test_completed_run_lands_usage_row(
+        self, client, db_engine, monkeypatch
+    ) -> None:
+        from sqlalchemy import select
+
+        from orchestratord.api import db as api_db
+        from orchestratord.db import models as orm
+        from orchestratord.db.engine import build_session_factory
+
+        monkeypatch.setattr(
+            api_db, "_session_factory", build_session_factory(db_engine)
+        )
+        runner = self._runner()
+
+        async def _fake_run(session, workflow, **kwargs):  # noqa: ANN003
+            session.backend_name = "stub"
+            session.token_usage = {"input": 120, "output": 40}
+            # No backend-reported cost → the §7.2 estimator decides.
+            session.cost_usd = 0.0
+
+        runner.run = _fake_run
+
+        ws_id, agent_id = uuid4(), uuid4()
+        task = AgentTask(
+            id="chat-usage-1",
+            kind="chat",
+            title="t",
+            description="d",
+            context={
+                "workspace_id": str(ws_id),
+                "agent_id": str(agent_id),
+                "issue_id": None,
+            },
+        )
+        await runner.run_task(task)
+
+        factory = build_session_factory(db_engine)
+        async with factory() as db:
+            rows = (
+                (await db.execute(select(orm.UsageAggregate)))
+                .scalars()
+                .all()
+            )
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.workspace_id == ws_id
+        assert row.agent_id == agent_id
+        assert row.backend == "stub"
+        assert row.tokens_in == 120
+        assert row.tokens_out == 40
+        assert row.sessions == 1
+
+    async def test_usage_failure_does_not_fail_run(
+        self, db_engine, monkeypatch
+    ) -> None:
+        from orchestratord.api import db as api_db
+        from orchestratord.db.engine import build_session_factory
+
+        monkeypatch.setattr(
+            api_db, "_session_factory", build_session_factory(db_engine)
+        )
+
+        def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise RuntimeError("pricing service exploded")
+
+        monkeypatch.setattr(
+            "orchestratord.cost.estimator.estimate_cost_usd", _boom
+        )
+        runner = self._runner()
+
+        async def _fake_run(session, workflow, **kwargs):  # noqa: ANN003
+            session.backend_name = "stub"
+            session.status = "completed"
+            session.token_usage = {"input": 10, "output": 5}
+            session.cost_usd = 0.0
+
+        runner.run = _fake_run
+
+        task = AgentTask(
+            id="chat-usage-2",
+            kind="chat",
+            title="t",
+            description="d",
+            context={"workspace_id": str(uuid4())},
+        )
+        # Best-effort ingestion: the run itself must still succeed.
+        result = await runner.run_task(task)
+        assert result.status == "completed"

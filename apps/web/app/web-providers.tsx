@@ -9,9 +9,8 @@ import {
   useState,
   type ReactNode,
 } from 'react'
+import { CoreProvider } from '@orchestratord/core'
 import { I18nProvider } from '@orchestratord/views'
-import { usePathname, useRouter } from 'next/navigation'
-import { getToken, isAuthEnabled } from '@/lib/auth'
 
 /* -------------------------------------------------------------------------- */
 /*  ThemeProvider — root-level data-theme controller                          */
@@ -43,17 +42,11 @@ export function ThemeProvider({
   children: ReactNode
   initialTheme?: Theme
 }) {
-  const [theme, setThemeState] = useState<Theme>(initialTheme)
-
-  // Read the persisted theme only after hydration so SSR markup matches the
-  // first client render (the root layout hardcodes ``data-theme="dark"`` as
-  // the SSR default).
-  useEffect(() => {
+  const [theme, setThemeState] = useState<Theme>(() => {
+    if (typeof window === 'undefined') return initialTheme
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY)
-    if (stored === 'light' || stored === 'dark') {
-      setThemeState(stored)
-    }
-  }, [])
+    return stored === 'light' || stored === 'dark' ? stored : initialTheme
+  })
 
   // Reflect state into the DOM attribute on every change so the design
   // tokens in ``apps/web/app/globals.css`` re-resolve.
@@ -97,40 +90,6 @@ export function useTheme(): ThemeContextValue {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  AuthGate — redirect-to-login boundary for the workspace tree              */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Token gate for multi-user mode: every route outside the public paths
- * requires a stored session token (``apps/web/lib/auth.ts``). The gate is
- * the outermost provider so an unauthenticated visit is bounced to
- * ``/login`` before any child provider runs its effects. The check runs in
- * an effect (not during render) so SSR markup stays hydration-safe; the
- * login page itself performs the server-side verification and stores the
- * token.  In the default local single-user deployment (``isAuthEnabled()``
- * false) the gate is a pass-through — the login/multi-user implementation
- * stays wired but inert, mirroring the backend's ``ORCHESTRATORD_AUTH``
- * switch.
- */
-const PUBLIC_PATHS = new Set(['/', '/login'])
-
-export function AuthGate({ children }: { children: ReactNode }) {
-  const pathname = usePathname()
-  const router = useRouter()
-
-  useEffect(() => {
-    if (!isAuthEnabled() || PUBLIC_PATHS.has(pathname)) {
-      return
-    }
-    if (getToken() == null) {
-      router.replace('/login')
-    }
-  }, [pathname, router])
-
-  return <>{children}</>
-}
-
-/* -------------------------------------------------------------------------- */
 /*  WebProviders — root-level composition                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -147,10 +106,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
  */
 export function WebProviders({ children }: { children: ReactNode }) {
   return (
-    <AuthGate>
+    <CoreProvider>
       <ThemeProvider>
         <I18nProvider>{children}</I18nProvider>
       </ThemeProvider>
-    </AuthGate>
+    </CoreProvider>
   )
 }

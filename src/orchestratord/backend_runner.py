@@ -53,6 +53,14 @@ from .session_state import AgentSession, RunSession, RunSubject
 logger = logging.getLogger(__name__)
 
 
+def _as_uuid(value: Any) -> uuid.UUID | None:
+    """Best-effort UUID coercion — returns ``None`` on any mismatch."""
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def providers_extra(agent_config: Any) -> dict[str, Any]:
     """Serialize ``agent.providers`` into the SPI ``SessionSpec.extra``
     channel: ``{"providers": {route: {...}}}``.
@@ -402,6 +410,10 @@ class BackendRunner:
             progress_reporter=bridge,
             diagnostics_callback=None,
         )
+
+        # Fold the finished run into usage_aggregates (§7.3) — best-effort,
+        # never fails the run.
+        await self._record_usage(session)
 
         # Build result from session state.
         result = AgentTaskResult(
@@ -1038,12 +1050,6 @@ class BackendRunner:
         from .db import models as orm
         from .db.repository import Repositories
 
-        def _as_uuid(value: Any) -> uuid.UUID | None:
-            try:
-                return uuid.UUID(str(value))
-            except (TypeError, ValueError):
-                return None
-
         slug = "daemon"
         async with _get_session_factory()() as db:
             repos = Repositories(db)
@@ -1088,6 +1094,60 @@ class BackendRunner:
                 "completed" if session.status == "completed" else "failed"
             )
             await db.commit()
+
+    async def _record_usage(self, session: AgentSession) -> None:
+        """Fold one finished run into ``usage_aggregates`` (§7.3).
+
+        Only runs that carry a UUID ``workspace_id`` in
+        ``task.context`` (chat/mention dispatch today) are aggregated.
+        Cost falls back to the §7.2 estimator when the backend reports no
+        ``total_cost_usd``. Best-effort: a failure here must never fail
+        the run itself.
+        """
+        try:
+            ctx = getattr(getattr(session, "task", None), "context", None) or {}
+            workspace_id = _as_uuid(ctx.get("workspace_id"))
+            if workspace_id is None:
+                return
+            agent_id = _as_uuid(ctx.get("agent_id"))
+            issue_id = _as_uuid(ctx.get("issue_id")) or _as_uuid(
+                getattr(getattr(session, "issue", None), "id", None)
+            )
+            usage = getattr(session, "token_usage", None) or {}
+            tokens_in = int(
+                usage.get("input", usage.get("input_tokens", 0)) or 0
+            )
+            tokens_out = int(
+                usage.get("output", usage.get("output_tokens", 0)) or 0
+            )
+            cost = float(getattr(session, "cost_usd", 0.0) or 0.0)
+            if cost == 0.0:
+                from .cost.estimator import estimate_cost_usd
+
+                estimated = estimate_cost_usd(
+                    getattr(session, "_snapshot_model", None) or "",
+                    tokens_in,
+                    tokens_out,
+                )
+                if estimated is not None:
+                    cost = estimated
+            from .api.db import _get_session_factory
+            from .db.repository import Repositories
+
+            async with _get_session_factory()() as db:
+                await Repositories(db).usage_aggregates.upsert(
+                    workspace_id=workspace_id,
+                    agent_id=agent_id,
+                    issue_id=issue_id,
+                    backend=getattr(session, "backend_name", None) or "",
+                    day=datetime.now(UTC).date(),
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    cost_usd=cost,
+                )
+                await db.commit()
+        except Exception:
+            logger.debug("usage aggregation failed", exc_info=True)
 
     @staticmethod
     async def _start_control_socket(session: AgentSession, *, pausable: bool = False) -> bool:

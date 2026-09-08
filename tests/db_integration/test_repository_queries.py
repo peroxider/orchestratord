@@ -538,6 +538,40 @@ async def test_usage_aggregate_by_bucket_and_list(db) -> None:
     ] == [agg.id]
 
 
+async def test_usage_aggregate_upsert_accumulates_bucket(db) -> None:
+    """Two ``upsert`` calls on the same (NULL-inclusive) bucket converge on
+    one row with summed metrics — the §0.5 usage-ingestion contract."""
+    repos = Repositories(db)
+    ws = await _add_workspace(repos)
+    day = date(2026, 9, 1)
+    await repos.usage_aggregates.upsert(
+        workspace_id=ws.id,
+        agent_id=None,
+        issue_id=None,
+        backend="codex",
+        day=day,
+        tokens_in=10,
+        tokens_out=5,
+        cost_usd=0.25,
+    )
+    await repos.usage_aggregates.upsert(
+        workspace_id=ws.id,
+        agent_id=None,
+        issue_id=None,
+        backend="codex",
+        day=day,
+        tokens_in=7,
+        tokens_out=3,
+        cost_usd=0.5,
+    )
+    got = await repos.usage_aggregates.by_bucket(ws.id, None, None, "codex", day)
+    assert got is not None
+    assert (got.tokens_in, got.tokens_out) == (17, 8)
+    assert got.cost_usd == 0.75
+    assert got.sessions == 2
+    assert len(await repos.usage_aggregates.list_for_workspace(ws.id)) == 1
+
+
 # --- Collaboration ---------------------------------------------------------
 
 

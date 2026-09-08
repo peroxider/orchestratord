@@ -12,6 +12,7 @@ build/
 htmlcov/
 *.egg
 .venv/
+.venv-win/
 venv/
 .reports/
 .orchestratord/
@@ -28,6 +29,7 @@ AGENTS.md
 *.tsbuildinfo
 /node_modules/
 /node_modules/.pnpm/
+.playwright-cli/
 /apps/docs/node_modules/
 /apps/web/node_modules/
 /packages/eslint-config/node_modules/

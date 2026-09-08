@@ -2,6 +2,7 @@ export { ApiClient, ApiError } from './api/client'
 export type { ApiClientOptions } from './api/client'
 export type {
   Issue,
+  InstanceBootstrap,
   IssueComment,
   IssueStatus,
   Session,
@@ -50,12 +51,14 @@ export type {
   AddCommentInput,
 } from './queries/issues'
 export {
+  useSessions,
   useSessionsByIssue,
   useSession,
   useSessionEvents,
   useSessionDecision,
   useSessionControl,
 } from './queries/sessions'
+export { useInstance } from './queries/instance'
 export {
   useSessionMessages,
   useStartChatSession,

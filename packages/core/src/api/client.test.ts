@@ -12,7 +12,7 @@ describe('ApiClient', () => {
     const client = new ApiClient({ baseUrl: 'http://test/', fetchFn })
     const res = await client.request<{ ok: boolean }>('/api/issues')
     expect(res.ok).toBe(true)
-    const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit]
+    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('http://test/api/issues')
     expect(new Headers(init.headers).get('Content-Type')).toBeNull()
   })
@@ -22,7 +22,7 @@ describe('ApiClient', () => {
     const client = new ApiClient({ baseUrl: 'http://test/', fetchFn })
     const res = await client.request<void>('/api/issues')
     expect(res).toBeUndefined()
-    const [url] = fetchFn.mock.calls[0] as [string]
+    const [url] = fetchFn.mock.calls[0] as unknown as [string]
     expect(url).toBe('http://test/api/issues')
   })
 

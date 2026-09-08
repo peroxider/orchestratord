@@ -22,6 +22,7 @@ from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.issue import Issue, IssueComment
 from orchestratord.domain.mention import parse_mentions
+from orchestratord.seed import DEFAULT_OWNER_MEMBER_ID
 
 router = APIRouter(prefix="/api/workspaces/{workspace_id}/issues", tags=["issues"])
 
@@ -83,8 +84,6 @@ class _IssuePatch(BaseModel):
 
 class _CommentCreate(BaseModel):
     body: str
-    author_type: str
-    author_id: UUID
 
 
 class _MentionCreate(BaseModel):
@@ -220,8 +219,8 @@ async def add_comment(
         validated = IssueComment(
             id=uuid4(),
             issue_id=issue_id,
-            author_type=body.author_type,
-            author_id=body.author_id,
+            author_type="member",
+            author_id=DEFAULT_OWNER_MEMBER_ID,
             body=body.body,
         )
     except ValueError as exc:
@@ -256,15 +255,38 @@ async def mention(
     message on the session's chat timeline.
     """
     issue = await _issue_or_404(repos, workspace_id, issue_id)
-    if (body.agent_id is None) == (body.member_id is None):
+    agent_id = body.agent_id
+    member_id = body.member_id
+    if agent_id is not None and member_id is not None:
         raise HTTPException(
             status_code=422,
-            detail="mention requires exactly one of agent_id or member_id",
+            detail="mention requires at most one of agent_id or member_id",
         )
+    if agent_id is None and member_id is None:
+        # Text-driven resolution: explicit ids win; otherwise scan the message
+        # for ``@handle`` tokens and bind the first hit (agents before
+        # members, in order of appearance).
+        for handle in parse_mentions(body.text):
+            agent = await repos.agents.by_name(workspace_id, handle)
+            if agent is not None:
+                agent_id = agent.id
+                break
+            member = await repos.members.by_name(workspace_id, handle)
+            if member is not None:
+                member_id = member.id
+                break
+        if agent_id is None and member_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "mention requires agent_id, member_id, or a resolvable "
+                    "@handle in text"
+                ),
+            )
     target = (
-        {"agent_id": str(body.agent_id)}
-        if body.agent_id is not None
-        else {"member_id": str(body.member_id)}
+        {"agent_id": str(agent_id)}
+        if agent_id is not None
+        else {"member_id": str(member_id)}
     )
 
     session_id = uuid4()
@@ -272,7 +294,7 @@ async def mention(
         id=session_id,
         workspace_id=workspace_id,
         issue_id=issue.id,
-        agent_id=body.agent_id,
+        agent_id=agent_id,
         run_id=None,
         mode="single",
         status="pending",

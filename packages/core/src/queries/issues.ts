@@ -96,8 +96,6 @@ export function useUpdateIssue(
 
 export interface AddCommentInput {
   body: string
-  author_type: string
-  author_id: string
 }
 
 export function useAddComment(

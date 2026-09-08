@@ -17,16 +17,12 @@ export interface IssueDetailProps {
   client: ApiClient
   workspaceId: string
   issueId: string
-  authorType: string
-  authorId: string
 }
 
 export function IssueDetail({
   client,
   workspaceId,
   issueId,
-  authorType,
-  authorId,
 }: IssueDetailProps) {
   const issue = useIssue(client, workspaceId, issueId)
   const addComment = useAddComment(client, workspaceId, issueId)
@@ -104,7 +100,7 @@ export function IssueDetail({
           <ul className="issue-detail__session-list">
             {sessions.data.map((session) => (
               <li key={session.id}>
-                <a href={`/${workspaceId}/sessions/${session.id}`}>
+                <a href={`/sessions/${session.id}`}>
                   {session.mode} — {session.status}
                 </a>
               </li>
@@ -140,8 +136,6 @@ export function IssueDetail({
             if (!body.trim()) return
             addComment.mutate({
               body,
-              author_type: authorType,
-              author_id: authorId,
             })
             setBody('')
           }}

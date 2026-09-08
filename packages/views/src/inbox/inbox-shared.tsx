@@ -37,12 +37,12 @@ export function InboxCardShell({
   const terminal = item.status === 'resolved' || item.status === 'dismissed'
   const links: { label: string; href: string }[] = []
   if (item.issue_id) {
-    links.push({ label: 'issue', href: `/${workspaceId}/issues/${item.issue_id}` })
+    links.push({ label: 'issue', href: `/issues/${item.issue_id}` })
   }
   if (item.session_id) {
     links.push({
       label: 'session',
-      href: `/${workspaceId}/sessions/${item.session_id}`,
+      href: `/sessions/${item.session_id}`,
     })
   }
 

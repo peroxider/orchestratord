@@ -66,6 +66,8 @@ export { ChatTimeline } from './chat/chat-timeline'
 export type { ChatTimelineProps } from './chat/chat-timeline'
 export { ChatComposer } from './chat/chat-composer'
 export type { ChatComposerProps } from './chat/chat-composer'
+export { useChatStream } from './chat/use-chat-stream'
+export type { ChatStream } from './chat/use-chat-stream'
 export { PR_STATE_TONE, prStateLabel, prStateTone } from './vcs/pr-labels'
 export {
   I18nProvider,

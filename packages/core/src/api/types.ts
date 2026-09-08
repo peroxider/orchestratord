@@ -8,6 +8,15 @@ export type IssueStatus =
   | 'abandoned'
   | 'verification_failed'
 
+export interface InstanceBootstrap {
+  instance_name: string
+  workspace_id: string
+  workspace_name: string
+  server_version: string
+  realtime_url: string
+  features: Record<string, unknown>
+}
+
 export interface Issue {
   id: string
   workspace_id: string

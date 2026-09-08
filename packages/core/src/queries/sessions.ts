@@ -2,6 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '../api/client'
 import type { Session, SessionEventsPage } from '../api/types'
 
+export function useSessions(client: ApiClient, workspaceId: string) {
+  return useQuery({
+    queryKey: ['sessions', 'workspace', workspaceId],
+    queryFn: () =>
+      client.request<Session[]>(`/api/workspaces/${workspaceId}/sessions`),
+  })
+}
+
 export function useSessionsByIssue(client: ApiClient, issueId: string) {
   return useQuery({
     queryKey: ['sessions', 'issue', issueId],

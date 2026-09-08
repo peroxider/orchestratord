@@ -35,7 +35,7 @@ export function I18nProvider({
   // default locale first, avoiding a server/client mismatch).
   useEffect(() => {
     const stored = window.localStorage.getItem(STORAGE_KEY)
-    if (stored === 'en' || stored === 'zh-CN') {
+    if (stored === 'en' || stored === 'zh-CN' || stored === 'ja') {
       setLocaleState(stored)
     }
   }, [])

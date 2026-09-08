@@ -14,6 +14,26 @@ describe('invalidationFor', () => {
     ).toEqual([['sessions']])
   })
 
+  it('maps chat events to the per-session chat-messages query', () => {
+    expect(
+      invalidationFor(
+        { type: 'event', topic: 'chat.d9b0f2a1-0000-0000-0000-000000000001' },
+        'ws-1',
+      ),
+    ).toEqual([['chat-messages', 'd9b0f2a1-0000-0000-0000-000000000001']])
+  })
+
+  it('does not conflate chat topics with session topics', () => {
+    // `chat.` and `session.` are distinct namespaces; the chat branch must
+    // not shadow (or be shadowed by) the sessions mapping.
+    expect(
+      invalidationFor({ type: 'event', topic: 'session.abc' }, 'ws-1'),
+    ).toEqual([['sessions']])
+    expect(
+      invalidationFor({ type: 'event', topic: 'chat.abc' }, 'ws-1'),
+    ).toEqual([['chat-messages', 'abc']])
+  })
+
   it('maps inbox created/resolved to the inbox query', () => {
     expect(invalidationFor({ type: 'inbox.created' }, 'ws-1')).toEqual([
       ['inbox', 'ws-1'],

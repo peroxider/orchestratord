@@ -43,6 +43,33 @@ v1 是"空地规划"——草案阶段 describe 一个完整产品形态。v2 �
 | Phase D | 后端协议覆盖：落地 `orchestratord-acp` 通用适配 + `protocol_family` / `runtime_id` 分离 + 5 个 stub backend 补齐 | §8 | §8 |
 | Phase E | 文档站深耕 + i18n 三语 + 测试烟囱 | §5.6 | §9 |
 
+### 0.5 Phase B–E 实施状态与剩余待完成项（2026-09-08 审计）
+
+对照代码全面审计（3 路探查 + 实现方案设计）后的结论：Phase A 全部落地；Phase B–E **绝大部分已实现**（多数早于 Phase A 会话经 67c5c2c / d1b9b7c / 25dc9a0 / dd55d06 / 1f2a929 / c85485e / 3b7428e 等提交进入）。审计发现的 4 个功能缺口已于同日（2026-09-08）全部闭环，§6.6 / §7.5 验收成立。
+
+**已落地（无需重做）**：
+
+| 维度 | 已落地证据 |
+| --- | --- |
+| B.1 chat 主链路 | `chat_dispatcher.py` / `chat_daemon.py` / `chat_bridge.py`（dispatcher → daemon → 真实 BackendRunner → 折叠落库）；`POST /api/workspaces/{ws}/chat/sessions` + messages 端点；`Message` 表（db/models/sessions.py:69）；前端 chat 页（暂 2s 轮询） |
+| B.3 / B.4 / B.5 | `integrations/oauth.py`（SlackOAuth / LarkOAuth）+ `/slack/authorize` `/slack/callback` `/integrations/slack/events` 路由；`vcs.py` + `github_app.py` |
+| C.1 调度器 | `scheduler/autopilot.py`（croniter，start/stop/tick/claim_slot/mark_failed），`serve` lifespan 已启动（api/app.py:78-89） |
+| C.2 成本估算器 | `cost/estimator.py`（`load_pricing` + `estimate_cost_usd`）+ `tests/cost/test_estimator.py`；usage 页已渲染 USD |
+| C.3 / C.4 | usage-charts / usage-page 组件 + usage 路由；inbox 已拆 approval / clarification / failure 三卡片 |
+| D 全部 | ACP 通用包（一个包导出 codebuddy / qodercli / qoderclicn / deveco descriptor）；`protocol_family` / `runtime_id` 两层派生；5 个 ex-stub 真翻译（copilot 623 / cursor 815 / kimi 1084 / reasonix 1247 / zeroclaw 961 LOC）+ kiro-cli 299 LOC + opencode 重写 1094 LOC |
+| E 全部 | apps/docs Fumadocs；locales en / ja / zh-CN；`agentintegration` pytest 标记（pyproject 默认排除真实 CLI） |
+
+**审计缺口闭环记录（2026-09-08，全部已落地）**：
+
+| # | 缺口 | 实施结果 | 关键落点 | 详见 |
+| --- | --- | --- | --- | --- |
+| 1 | **usage 聚合写入** ✅ | 完成的 run 自动落一行聚合：`UsageAggregateRepository.upsert`（PG `ON CONFLICT` 幂等累加，`uq_usage_aggregates_bucket` NULLS NOT DISTINCT）；`POST /usage` router 复用同一 upsert；`chat_daemon.py` 给 `AgentTask` 塞 `context={workspace_id, agent_id, issue_id}`；`backend_runner.py::_record_usage()` 在 `run_task` 完成后 best-effort 写入（cost==0 时用 `_snapshot_model` 估算，失败绝不影响 run） | `db/repository.py` / `api/routers/usage.py` / `chat_daemon.py` / `backend_runner.py`；测试 `tests/db_integration/test_repository_queries.py`、`tests/api/test_usage_api.py`、`tests/api/test_chat_daemon.py::TestUsageAggregation` | §7.2 / §7.3 |
+| 2 | **mention 文本解析** ✅ | 显式 id 优先，都为空时 `parse_mentions` 逐 handle 查 `agents.by_name` / `members.by_name`（agent 优先、按出现顺序取首个命中），解析不出维持 422；session 绑定解析出的目标 | `db/repository.py::MemberRepository.by_name`；`api/routers/issues.py` mention 处理器；测试 `tests/api/test_issues_api.py::TestMention` | §6.2 |
+| 3 | **chat 流式推送** ✅ | bridge sink 发布 `chat.{session_id}` 帧（text / text_delta / tool_call / tool_result；`turn_complete` / `session_complete` / `error` 终结帧在 DB commit 之后发布）；前端 `RealtimeClient` 加 `unsubscribe` + `addMessageListener`，`useRealtimeBridge` 暴露 `getActiveRealtimeClient`，新增 `useRealtimeSubscription` hook，`invalidationFor` 映射 `chat.` → `['chat-messages', id]`，chat 页流式缓冲气泡（无 socket 时回落 2s 轮询） | `chat_bridge.py`、`packages/core/src/realtime/*`、`packages/views/src/chat/{chat-page.tsx,use-chat-stream.ts}`；测试 `tests/api/test_chat_bridge.py::TestRealtimePublishing`、`client.test.ts`、`messages.test.ts` | §6.1 |
+| 4 | **daemon 调度器** ✅ | `orchestratord server start` 独立 daemon 也拉起 `AutopilotScheduler`（`subsystem.run()` 前 start、finally 里 stop），与 serve 路径同受 `ORCHESTRATORD_AUTOPILOT_DAEMON=1` 门控 | `cli/server.py::_run()` | §7.1 |
+
+本文档 §6–§9 各节的"状态"注记与 §8 的 LOC 表修正已随本次审计同步更新。
+
 ---
 
 ## 1. 范围与非目标
@@ -450,12 +477,16 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 
 ### 6.1 Workspace-level chat
 
+> **状态（2026-09-08）**：主链路已落地——chat 页 + `POST /api/workspaces/{ws}/chat/sessions`（创建 pending 会话 + 初始消息，daemon 认领后跑真实 BackendRunner）+ messages 端点 + `chat_bridge` 折叠落库；流式推送已闭环——bridge sink 发布 `chat.{session_id}` 帧（终结帧在 commit 后发），前端订阅 + 流式缓冲气泡 + `chat.` 失效映射（§0.5 表 #3，无 socket 时回落 2s 轮询）。
+
 - 新增 `apps/web/app/[workspaceSlug]/(dashboard)/chat/page.tsx` + `packages/views/src/chat/`
 - 不创建 issue 也能发 prompt → 启动 session
 - 数据模型：复用 `sessions` 表（不带 `issue_id`）+ `messages` 表（新增 migration）
 - 复用 `RealtimeBroker`（§5.1）做流式推送
 
 ### 6.2 Mention 路由
+
+> **状态（2026-09-08）**：mention 路由 + 文本解析均已落地——显式 `agent_id`/`member_id` 优先，都为空时 `parse_mentions` 逐 handle 查 `agents.by_name` / `members.by_name`（agent 优先、按出现顺序首个命中），解析不出维持 422（§0.5 表 #2）。
 
 - `parse_mentions()` 已写（`src/orchestratord/domain/mention.py`）
 - 在 `/api/workspaces/{ws}/issues/{id}/mention` 接 `BackendRunner`：根据 `agent_id` / `member_id` 启动 session
@@ -487,6 +518,8 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 
 ### 6.6 Phase B 验收
 
+> **状态（2026-09-08）**：① 落库 ✓ / 流式接收 ✓（§0.5 表 #3 闭环）；② 文本解析 ✓（§0.5 表 #2 闭环）；③ Slack OAuth authorize / callback / events 路由与实现均在（未活体验收）。
+
 - workspace-level chat 跑通：发 prompt → 流式接收 → 落库
 - mention `@agent-name` 触发 session
 - Slack OAuth authorize → callback → integration 落库，webhook 接收事件
@@ -496,6 +529,8 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 ## 7. Phase C — 调度与可观测
 
 ### 7.1 Autopilot scheduler loop
+
+> **状态（2026-09-08）**：调度器已完整实现（`src/orchestratord/scheduler/autopilot.py`，asyncio task + croniter + start/stop/tick/claim_slot/mark_failed，tests/scheduler 全绿），`serve` lifespan 已启动（`api/app.py:78-89`，`ORCHESTRATORD_AUTOPILOT_DAEMON=1` 门控）；独立 daemon（`orchestratord server start`）路径也已同参启动（§0.5 表 #4）。
 
 **当前**：CRUD 已写；无调度循环。
 
@@ -511,11 +546,15 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 
 ### 7.2 Token cost 估算
 
+> **状态（2026-09-08）**：估算器已实现于 `src/orchestratord/cost/estimator.py`（`load_pricing` 读 `packages/core/src/pricing/pricing.json`，`estimate_cost_usd(model, tokens_in, tokens_out)`；精确 id → 最长前缀 → default 匹配），`POST /api/workspaces/{ws}/usage` 在 `cost_usd==0` 时调用；`BackendRunner` 的 run 完成路径也经同一估算器兜底（§0.5 表 #1）。
+
 - `cost_reporting=False` 的 backend 走 token estimator：`@orchestratord/cost/estimator.py`
 - 输入：token 数 + 模型；输出：USD
 - 模型价格表：`pricing.json`（在 `packages/core/src/pricing/`）
 
 ### 7.3 Usage 聚合 + 图表
+
+> **状态（2026-09-08）**：`usage_aggregates` 表 + 读侧聚合（`domain/usage.py`）+ `usage-charts.tsx`（折线/柱状，含 `cost_usd`）+ usage 路由均已落地；生产写入路径已闭环——`BackendRunner._record_usage()` 在 run 完成后 best-effort upsert（`UsageAggregateRepository.upsert` ON CONFLICT；`chat_daemon` 经 `task.context` 传 workspace/agent/issue id）（§0.5 表 #1）。
 
 - `usage_aggregates` 表已建
 - 新增 `packages/views/src/usage/usage-charts.tsx`（折线 + 柱状）
@@ -527,6 +566,8 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 
 ### 7.5 Phase C 验收
 
+> **状态（2026-09-08）**：三条全部满足——① serve 启动 + tests/scheduler 全绿；② run 完成写入 `usage_aggregates` 已接线（§0.5 表 #1）；③ 三类卡片组件在。
+
 - autopilot 每 5 分钟触发一次，产 issue + 落 run
 - 无 `cost_reporting` 的 backend 在 usage 页有估算 USD
 - inbox 三类事件各自差异化视图
@@ -535,7 +576,9 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 
 ## 8. Phase D — 后端协议覆盖
 
-### 8.1 已落地 backend 现状（v2 实测）
+### 8.1 已落地 backend 现状（v2 实测，2026-09-08 复测修正）
+
+> Phase D 三件事（§8.2）已全部落地；下表 LOC / 缺口列按当前代码复测修正。
 
 | backend | 真实深度 | 缺口 |
 | --- | --- | --- |
@@ -543,14 +586,17 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
 | dsh (1440 LOC) | SDK 包装 + agent.cordis 补丁 | — |
 | codex (987 LOC) | app-server + Cli 双路径 | — |
 | claude (631 LOC) | SDK 包装 | — |
-| opencode (594 LOC) | SSE 翻译 | — |
+| opencode (1094 LOC) | 真实 /api 协议传输重写（1f2a929） | — |
 | qwen (441 LOC) | stream-json | — |
 | hermes (220 LOC) | 简单 CLI | — |
-| copilot / cursor / kimi / openclaw / reasonix / zeroclaw (296-302 LOC) | **stub**（仅 descriptor） | 补真 session 翻译 |
-| kiro-cli (0 LOC) | **仅 pyproject** | 补 `backend.py` + `session.py` |
-| orchestratord-acp (811 LOC) | 部分 | 落地 ACP 通用抽象 |
+| copilot (623) / cursor (815) / kimi (1084) / reasonix (1247) / zeroclaw (961) | 真 session 翻译（2026-09-08 已翻正） | — |
+| openclaw (302 LOC) | **stub**（仅 descriptor） | 后置 |
+| kiro-cli (299 LOC) | `backend.py` + `session.py` 已补 | — |
+| orchestratord-acp (811 LOC) | 通用 ACP 包已落地（导出 codebuddy / deveco / qodercli / qoderclicn descriptor） | — |
 
 ### 8.2 Phase D 三件事
+
+> **状态（2026-09-08）**：三件事全部落地——① `orchestratord-acp` 通用包导出 codebuddy / deveco / qodercli / qoderclicn 四个 descriptor（qwenpaw 未导出，后置）；② `protocol_family` / `runtime_id` 两层派生在 `spi/backend_descriptor.py` + `backend_registry.py`；③ 5 个 stub 已真翻译（LOC 见 §8.1）。
 
 1. **落地 `orchestratord-acp` 通用包**（草案 §8.3）：
    - 实现通用 ACP backend（基于 `@agentclientprotocol/sdk` 或自写 JSON-RPC stdio）
@@ -563,6 +609,8 @@ v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
    - copilot / cursor / kimi / reasonix / zeroclaw 各自补真 session 翻译（参照 multica 各 `_invocation.go` 拆分）
 
 ### 8.3 multica 完整 26 family 全清单与 v2 覆盖决策
+
+> **状态（2026-09-08）**：下表 🟡 行（#3 copilot、#4 cursor、#8 kimi、#10 reasonix、#11 zeroclaw）已全部翻正为 ✅（真翻译）；#22 kiro 已补齐（orchestratord-kiro-cli 299 LOC）；#15–#17 经 ACP 通用包覆盖；#5 opencode 已重写（594→1094 LOC）。⚪ 后置行维持不变。
 
 multica `SupportedTypes`（`server/pkg/agent/agent.go:312`）列出的 26 个 protocol family，加 1 个 builtin runtime 派生（`omp` → `pi` family）。下表给出 v2 周期内 orchestrator / Phase D / 后置的三档决策：
 
@@ -594,7 +642,7 @@ multica `SupportedTypes`（`server/pkg/agent/agent.go:312`）列出的 26 个 pr
 | 24 | `dim` | `dim.go` | ⚪ 后置（私有协议） |
 | 25 | `traecli` | `traecli.go` (448) + integration _test | ⚪ 后置（私有协议） |
 
-**说明**：multica 完整 26 family 中 v2 周期落地 9 个（1-9 + qwen），Phase D 落地 6 个（3-4-8-10-11 stub backend 真翻译 + ACP 通用包覆盖 4 个 family），后置 11 个（私有协议 / Windows 特殊 / multica 完整 builtin 派生）。v2 周期后 orchestrator 仍缺 14 个 family。
+**说明**（2026-09-08 更新）：multica 完整 26 family 中，orchestrator 已覆盖 16 个——v2 首批 6 个（claude / codex / opencode / dsh / hermes / qwen）+ Phase D 补齐 5 个真翻译（copilot / cursor / kimi / reasonix / zeroclaw）+ kiro-cli（299 LOC）+ ACP 通用包覆盖 codebuddy / deveco / qoder / qoderclicn 4 个。后置 10 个（openclaw / pi / omp / qwenpaw / antigravity / codearts / grok / mcode / dim / traecli——私有协议 / Windows 特殊 / multica 完整 builtin 派生；qwenpaw 的 ACP 抽象已就绪、descriptor 未导出）。
 
 ### 8.4 协议基础设施后置清单（multica 已沉淀 / orchestratord 缺）
 
@@ -616,6 +664,8 @@ multica 在 `server/pkg/agent/` 已沉淀 9 项跨 family 的协议基础设施�
 
 ### 8.5 Phase D 验收
 
+> **状态（2026-09-08）**：三条全部满足（见 §8.1 / §8.2 状态注记）。
+
 - ACP 通用包至少覆盖 3 个 backend（codebuddy / deveco / qoderclicn）
 - 5 个 stub backend 有真 session 翻译（不再仅 ack）
 - `protocol_family` / `runtime_id` 字段在 `BackendDescriptor` 落地
@@ -623,6 +673,8 @@ multica 在 `server/pkg/agent/` 已沉淀 9 项跨 family 的协议基础设施�
 ---
 
 ## 9. Phase E — 文档站深耕 + i18n + 测试烟囱
+
+> **状态（2026-09-08）**：`apps/docs` Fumadocs 骨架已落地；i18n 三语（en / zh-CN / ja）locales 已在；`agentintegration` 测试烟囱已就位（pyproject `addopts = "-m 'not agentintegration'"`，显式 opt-in）。**待补**：§9.1 的中英双语 `conventions.mdx` 术语对照内容深度。
 
 ### 9.1 文档站
 

@@ -123,6 +123,14 @@ class MemberRepository(Repository[Member]):
         )
         return list(result.scalars().all())
 
+    async def by_name(self, workspace_id: UUID, name: str) -> Member | None:
+        result = await self.session.execute(
+            select(Member).where(
+                Member.workspace_id == workspace_id, Member.name == name
+            )
+        )
+        return result.scalar_one_or_none()
+
 
 class MemberAgentScopeRepository(Repository[MemberAgentScope]):
     model = MemberAgentScope
@@ -506,6 +514,52 @@ class UsageAggregateRepository(Repository[UsageAggregate]):
             )
         )
         return result.scalar_one_or_none()
+
+    async def upsert(
+        self,
+        *,
+        workspace_id: UUID,
+        agent_id: UUID | None,
+        issue_id: UUID | None,
+        backend: str,
+        day: date,
+        tokens_in: int,
+        tokens_out: int,
+        cost_usd: float,
+    ) -> None:
+        """Atomically accumulate one session into a daily usage bucket.
+
+        ``INSERT ... ON CONFLICT DO UPDATE`` against the
+        ``uq_usage_aggregates_bucket`` unique index (``NULLS NOT DISTINCT``,
+        migration 0008) so concurrent completions of the same
+        ``(workspace, agent, issue, backend, day)`` bucket converge on one
+        row instead of racing a read-then-write.
+        """
+        insert_stmt = pg_insert(UsageAggregate).values(
+            id=uuid4(),
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            issue_id=issue_id,
+            backend=backend,
+            day=day,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+            sessions=1,
+        )
+        stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["workspace_id", "agent_id", "issue_id", "backend", "day"],
+            set_={
+                "tokens_in": UsageAggregate.tokens_in
+                + insert_stmt.excluded.tokens_in,
+                "tokens_out": UsageAggregate.tokens_out
+                + insert_stmt.excluded.tokens_out,
+                "cost_usd": UsageAggregate.cost_usd
+                + insert_stmt.excluded.cost_usd,
+                "sessions": UsageAggregate.sessions + 1,
+            },
+        )
+        await self.session.execute(stmt)
 
     async def list_for_workspace(
         self, workspace_id: UUID

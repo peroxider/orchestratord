@@ -58,7 +58,7 @@ function SkillCard({
       <header className="skill-card__header">
         <a
           className="skill-card__name"
-          href={`/${workspaceId}/skills/${skill.name}`}
+          href={`/skills/${skill.name}`}
         >
           {skill.display_name}
         </a>

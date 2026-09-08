@@ -13,6 +13,8 @@ from uuid import uuid4
 
 import pytest
 
+from orchestratord.domain.agent import CORE_CAPABILITY_BITS
+
 pytestmark = pytest.mark.database
 
 
@@ -20,6 +22,18 @@ async def _create(client, ws: str, **overrides) -> dict:
     payload = {"title": "wire up dashboard"}
     payload.update(overrides)
     resp = await client.post(f"/api/workspaces/{ws}/issues", json=payload)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def _create_agent(client, ws: str, name: str = "codex") -> dict:
+    payload = {
+        "name": name,
+        "provider": "codex",
+        "runtime_id": str(uuid4()),
+        "capabilities_cache_jsonb": {bit: True for bit in CORE_CAPABILITY_BITS},
+    }
+    resp = await client.post(f"/api/workspaces/{ws}/agents", json=payload)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -146,31 +160,30 @@ class TestComment:
         issue = await _create(client, ws)
         resp = await client.post(
             f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
-            json={"body": "nice", "author_type": "agent", "author_id": str(uuid4())},
+            json={"body": "nice"},
         )
         assert resp.status_code == 201
         assert resp.json()["body"] == "nice"
         assert resp.json()["issue_id"] == issue["id"]
 
-    async def test_comment_invalid_author_rejected(self, client) -> None:
+    async def test_comment_authored_by_owner(self, client) -> None:
+        # Single-user mode (D9): the server derives authorship (owner member),
+        # the client only supplies the body.
         ws = str(uuid4())
         issue = await _create(client, ws)
         resp = await client.post(
             f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
             json={"body": "x", "author_type": "system", "author_id": str(uuid4())},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 201
+        assert resp.json()["author_type"] == "member"
 
     async def test_comment_detects_mentions(self, client) -> None:
         ws = str(uuid4())
         issue = await _create(client, ws)
         resp = await client.post(
             f"/api/workspaces/{ws}/issues/{issue['id']}/comments",
-            json={
-                "body": "cc @alice and @agent-name for review",
-                "author_type": "member",
-                "author_id": str(uuid4()),
-            },
+            json={"body": "cc @alice and @agent-name for review"},
         )
         assert resp.status_code == 201
         assert resp.json()["mentions"] == ["alice", "agent-name"]
@@ -269,3 +282,66 @@ class TestMention:
                 url, json={"agent_id": str(uuid4()), "member_id": str(uuid4())}
             )
         ).status_code == 422
+
+    async def test_mention_text_resolves_agent_handle(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        agent = await _create_agent(client, ws, name="codex")
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"text": "please @codex review"},
+        )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["agent_id"] == agent["id"]
+
+        detail = await client.get(f"/api/sessions/{body['session_id']}")
+        assert detail.status_code == 200
+        assert detail.json()["agent_id"] == agent["id"]
+
+    async def test_mention_text_without_explicit_id_resolves_handle(
+        self, client
+    ) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        agent = await _create_agent(client, ws, name="codex")
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"text": "@codex fix the flaky test"},
+        )
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["agent_id"] == agent["id"]
+
+    async def test_mention_text_member_handle_binds_member(self, client) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp_member = await client.post(
+            f"/api/workspaces/{ws}/members",
+            json={"role": "member", "name": "alice"},
+        )
+        assert resp_member.status_code == 201, resp_member.text
+        member = resp_member.json()
+
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"text": "cc @alice please take a look"},
+        )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        assert body["member_id"] == member["id"]
+        assert body.get("agent_id") is None
+
+        detail = await client.get(f"/api/sessions/{body['session_id']}")
+        assert detail.status_code == 200
+        assert detail.json()["agent_id"] is None
+
+    async def test_mention_text_unresolvable_handle_rejected(
+        self, client
+    ) -> None:
+        ws = str(uuid4())
+        issue = await _create(client, ws)
+        resp = await client.post(
+            f"/api/workspaces/{ws}/issues/{issue['id']}/mention",
+            json={"text": "no handle here"},
+        )
+        assert resp.status_code == 422

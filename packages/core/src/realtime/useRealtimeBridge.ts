@@ -3,12 +3,36 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { RealtimeClient } from './client'
+import type { RealtimeStatus } from './client'
 import { invalidationFor } from './messages'
 
 export interface UseRealtimeBridgeOptions {
   url: string
   workspaceId: string
   token?: string
+  onStatus?: (status: RealtimeStatus) => void
+}
+
+// The dashboard shell opens ONE authenticated socket for the whole app;
+// feature hooks (e.g. the chat stream) reuse it instead of opening their own.
+let activeClient: RealtimeClient | null = null
+const activeClientListeners = new Set<(client: RealtimeClient | null) => void>()
+
+export function getActiveRealtimeClient(): RealtimeClient | null {
+  return activeClient
+}
+
+export function observeActiveRealtimeClient(
+  listener: (client: RealtimeClient | null) => void,
+): () => void {
+  activeClientListeners.add(listener)
+  listener(activeClient)
+  return () => activeClientListeners.delete(listener)
+}
+
+function setActiveRealtimeClient(client: RealtimeClient | null): void {
+  activeClient = client
+  for (const listener of activeClientListeners) listener(client)
 }
 
 /**
@@ -21,6 +45,7 @@ export function useRealtimeBridge({
   url,
   workspaceId,
   token,
+  onStatus,
 }: UseRealtimeBridgeOptions): void {
   const queryClient = useQueryClient()
 
@@ -37,8 +62,15 @@ export function useRealtimeBridge({
           }
         }
       },
+      onStatus,
     })
+    setActiveRealtimeClient(client)
     client.connect()
-    return () => client.disconnect()
-  }, [url, workspaceId, token, queryClient])
+    return () => {
+      client.disconnect()
+      if (activeClient === client) {
+        setActiveRealtimeClient(null)
+      }
+    }
+  }, [url, workspaceId, token, onStatus, queryClient])
 }

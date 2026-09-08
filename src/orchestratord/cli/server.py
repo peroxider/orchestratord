@@ -1472,12 +1472,23 @@ def _run_orchestrator(
         if im_client_wrapper is not None:
             im_task = asyncio.create_task(im_client_wrapper._heartbeat_loop())
             im_client_wrapper._heartbeat_task = im_task
+        # Autopilot scheduler opt-in — mirrors the serve path's lifespan
+        # (api/app.py) so a standalone daemon drives autopilots too.
+        scheduler = None
+        if os.environ.get("ORCHESTRATORD_AUTOPILOT_DAEMON") == "1":
+            from orchestratord.db.engine import build_session_factory
+            from orchestratord.scheduler.autopilot import AutopilotScheduler
+
+            scheduler = AutopilotScheduler(build_session_factory())
+            await scheduler.start()
         try:
             await subsystem.run()
         except (asyncio.CancelledError, KeyboardInterrupt):
             await subsystem.shutdown()
             raise
         finally:
+            if scheduler is not None:
+                await scheduler.stop()
             if api_server is not None:
                 api_server.should_exit = True
             if api_task is not None and not api_task.done():

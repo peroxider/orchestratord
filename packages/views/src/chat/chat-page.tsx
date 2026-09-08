@@ -10,6 +10,7 @@ import {
 import { Button } from '@orchestratord/ui'
 import { ChatComposer } from './chat-composer'
 import { ChatTimeline } from './chat-timeline'
+import { useChatStream } from './use-chat-stream'
 
 export interface ChatPageProps {
   client: ApiClient
@@ -21,6 +22,7 @@ export function ChatPage({ client, workspaceId }: ChatPageProps) {
   const start = useStartChatSession(client, workspaceId)
   const timeline = useSessionMessages(client, sessionId)
   const send = useSendChatMessage(client, sessionId ?? '')
+  const stream = useChatStream(sessionId)
 
   if (sessionId === null) {
     return (
@@ -65,6 +67,12 @@ export function ChatPage({ client, workspaceId }: ChatPageProps) {
       ) : (
         <ChatTimeline messages={timeline.data?.messages ?? []} />
       )}
+      {stream.streamText && (
+        <div className="chat__stream" role="status" aria-live="polite">
+          {stream.streamText}
+        </div>
+      )}
+      {stream.streamError && <p className="chat__error">{stream.streamError}</p>}
       <ChatComposer busy={send.isPending} onSend={(content) => send.mutate({ content })} />
       {send.isError && (
         <p className="chat__error">
