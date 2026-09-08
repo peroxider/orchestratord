@@ -2121,17 +2121,28 @@ class Orchestrator:
 
         Iterates the registry, picks records with ``has_conflict=True``
         that are not already running/claimed and not rate-limited, and
-        invokes ``_launch_rebase_resolution``. Each resolution opens a
-        fresh ``AgentSession`` whose prompt is built by
-        ``PromptBuilder.render_rebase``.
+        invokes ``_launch_rebase_resolution`` as a background task so the
+        agent_rebase run does not block the poll loop (control commands,
+        retry queue, heartbeat, candidate issue fetch). Each resolution
+        opens a fresh ``AgentSession`` whose prompt is built by
+        ``PromptBuilder.render_rebase``. The done-callback calls
+        ``_finalize_rebase_resolution`` for post-run state migration.
         """
         available_slots = self._state.max_concurrent_agents - len(self._state.running)
         if available_slots <= 0:
             logger.debug("No concurrency slots for rebase-resolution")
             return
 
+        # Background tasks only populate ``_state.running`` once they start
+        # executing, so the top-of-function slot check alone would let this
+        # loop oversubscribe beyond ``max_concurrent_agents`` when several
+        # records carry conflicts at once. Mirror ``_poll_and_dispatch`` and
+        # stop launching once this poll has consumed the available slots.
+        launched_this_poll = 0
         records_snapshot = list(self._registry._records.values())
         for record in records_snapshot:
+            if launched_this_poll >= available_slots:
+                break
             issue_id = record.issue_id or ""
             if not issue_id:
                 continue
@@ -2164,7 +2175,47 @@ class Orchestrator:
                     issue_id,
                     exc,
                 )
-            await self._launch_rebase_resolution(issue_obj)
+            # Launch as a background task so a long agent_rebase run does not
+            # block the poll loop (control commands / retry queue / heartbeat).
+            launched_this_poll += 1
+            task = asyncio.create_task(self._launch_rebase_resolution(issue_obj))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+            # Done-callback: run _finalize_rebase_resolution after the
+            # agent_rebase run completes, so the state migration (conflict
+            # clearing, IM events, audit) does not block the poll loop.
+            def _finalize_rebase_callback(t: asyncio.Task, issue=issue_obj) -> None:
+                try:
+                    session = t.result()
+                except Exception as exc:
+                    logger.error(
+                        "Issue %s rebase-resolution task raised: %s", issue.id, exc
+                    )
+                    return
+                if session is None:
+                    return
+                finalize_task = asyncio.create_task(
+                    self._finalize_rebase_resolution(issue, session)
+                )
+                self._tasks.add(finalize_task)
+
+                # Log exceptions from the finalizer so they don't
+                # become unhandled task exceptions (mirrors the
+                # try/except that wrapped the original inline call).
+                def _finalize_done(t2: asyncio.Task) -> None:
+                    self._tasks.discard(t2)
+                    exc = t2.exception()
+                    if exc is not None:
+                        logger.error(
+                            "Issue %s rebase-resolution finalizer raised: %s",
+                            issue.id,
+                            exc,
+                        )
+
+                finalize_task.add_done_callback(_finalize_done)
+
+            task.add_done_callback(_finalize_rebase_callback)
 
     async def _process_pr_conflict_scan(self) -> None:
         """Optional daemon scan of PR mergeable state.
@@ -2227,13 +2278,21 @@ class Orchestrator:
                 )
             await self._process_rebase_intent(issue_obj)
 
-    async def _launch_rebase_resolution(self, issue: Issue) -> None:
+    async def _launch_rebase_resolution(self, issue: Issue) -> AgentSession:
         """Launch an ``agent_rebase`` session to resolve a content conflict.
 
         Mirrors ``_launch_issue`` for the conflict-resolution path.
         The session is tagged with ``run_kind="agent_rebase"`` so the
         agent runner can route the run through a rebase-tailored
         prompt and dispatch policy.
+
+        The caller (``_process_pending_rebase_conflicts``) invokes this
+        via ``asyncio.create_task`` and attaches a done-callback that
+        calls ``_finalize_rebase_resolution`` — so the agent run does
+        not block the poll loop.
+
+        Returns the ``AgentSession`` so the done-callback can pass it
+        to ``_finalize_rebase_resolution``.
         """
         record = self._registry.get(issue.id or "")
         workspace_path = record.workspace_path if record else None
@@ -2314,21 +2373,11 @@ class Orchestrator:
             )
         finally:
             self._state.running.pop(issue.id or "", None)
-            # Completion handling. Without this the record kept
-            # has_conflict=True forever -> the next poll re-launched an
-            # agent_rebase run in an infinite loop (repeated "Run in
-            # progress" placeholder comments + 任务已启动/任务完成
-            # oscillation on IM), and the PR link never reached IM.
-            # Detect resolution via git ground-truth (not session.status),
-            # clear the conflict on success, and emit a PR-link-bearing
-            # event either way.
-            try:
-                await self._finalize_rebase_resolution(issue, session)
-            except Exception:
-                logger.exception(
-                    "Issue %s rebase-resolution finalizer failed",
-                    issue.id,
-                )
+        # The caller (``_process_pending_rebase_conflicts``) runs this via
+        # ``asyncio.create_task`` and completes the state migration from its
+        # done-callback (``_finalize_rebase_resolution``), so the agent run
+        # never blocks the poll loop.
+        return session
 
     async def _finalize_rebase_resolution(
         self,

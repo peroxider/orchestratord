@@ -27,6 +27,7 @@ import asyncio
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -404,9 +405,13 @@ class TestProcessPendingRebaseConflicts(unittest.IsolatedAsyncioTestCase):
             )
             orch.workspace.current_head = AsyncMock(return_value="abc123")
             orch._launch_rebase_resolution = AsyncMock()
+            orch._tasks = set()
             orch._state.max_concurrent_agents = 10
             orch._state.running = {}
             await orch._process_pending_rebase_conflicts()
+            # The resolution is launched as a background task; yield once
+            # so the scheduled task runs before asserting on the mock.
+            await asyncio.sleep(0)
             orch._launch_rebase_resolution.assert_awaited_once()
             # First arg is the Issue.
             self.assertEqual(orch._launch_rebase_resolution.await_args.args[0].id, "7")
@@ -429,6 +434,191 @@ class TestProcessPendingRebaseConflicts(unittest.IsolatedAsyncioTestCase):
             orch._state.running = {}
             await orch._process_pending_rebase_conflicts()
             orch._launch_rebase_resolution.assert_not_called()
+
+    async def test_slot_limiting_prevents_oversubscription(self) -> None:
+        """Regression: concurrency slot guard limits rebase launches per poll.
+
+        With ``asyncio.create_task``, ``_state.running`` is only populated
+        when each task starts executing — not at task creation.  Without a
+        ``launched_this_poll`` counter (mirroring ``_poll_and_dispatch``),
+        the loop would launch background tasks for every conflicting record
+        in the snapshot, oversubscribing beyond ``max_concurrent_agents``.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Build a registry with 3 conflicting records plus 1 running
+            # issue so that only 1 free slot remains.
+            reg = _make_registry_record(tmp_path, issue_id="7", has_conflict=True)
+            reg.register(
+                issue_id="8",
+                issue_identifier="ISSUE-8",
+                branch_name="feature/8",
+                base_branch="main",
+            )
+            reg.register(
+                issue_id="9",
+                issue_identifier="ISSUE-9",
+                branch_name="feature/9",
+                base_branch="main",
+            )
+            # Mark all 3 as conflicting.
+            for rid in ("7", "8", "9"):
+                rec = reg.get(rid)
+                assert rec is not None
+                rec.has_conflict = True
+            reg._save()
+
+            # 1 of 10 slots consumed by a running issue → 9 free,
+            # but we deliberately set max_concurrent_agents=2 and
+            # running={session} so available_slots=1.
+            tracker = MagicMock()
+            tracker.fetch_issue_states_by_ids = AsyncMock(
+                side_effect=lambda ids: {i: _make_issue(issue_id=i) for i in ids}
+            )
+            orch = _make_orchestrator(tracker=tracker, registry=reg)
+            orch.workspace.create_for_issue = AsyncMock(
+                return_value=MagicMock(path=tmp_path / "ws")
+            )
+            orch.workspace.current_head = AsyncMock(return_value="abc123")
+            orch._launch_rebase_resolution = AsyncMock()
+            orch._tasks = set()
+            orch._state.max_concurrent_agents = 2
+            # 1 running (non-rebase) issue occupies a slot.
+            orch._state.running = {"99": MagicMock()}
+
+            await orch._process_pending_rebase_conflicts()
+            await asyncio.sleep(0)
+
+            # With only 1 free slot, at most 1 resolution should launch.
+            self.assertEqual(
+                orch._launch_rebase_resolution.await_count,
+                1,
+                f"expected 1 rebase launch (1 free slot, 3 conflicts); "
+                f"got {orch._launch_rebase_resolution.await_count} launches — "
+                f"slot guard may be missing",
+            )
+
+    async def test_hanging_agent_run_does_not_block_poll_loop(self) -> None:
+        """Regression (O1 CRITICAL): rebase resolution must not freeze the daemon.
+
+        ``_process_pending_rebase_conflicts`` used to ``await``
+        ``_launch_rebase_resolution`` inline, which awaited
+        ``agent_runner.run`` with the 30-minute ``run_timeout_ms`` budget —
+        freezing the whole poll loop (control commands, retry queue,
+        heartbeat, candidate issue fetch) for the duration.
+
+        After the fix the resolution is launched via ``asyncio.create_task``,
+        so ``_process_pending_rebase_conflicts`` returns immediately while
+        the agent_rebase run hangs in the background: the stop control file
+        is consumed and the retry queue advances.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg = _make_registry_record(
+                tmp_path,
+                has_conflict=True,
+                conflict_files=("src/x.py",),
+            )
+            tracker = MagicMock()
+            tracker.fetch_issue_states_by_ids = AsyncMock(
+                return_value={"7": _make_issue()}
+            )
+            orch = _make_orchestrator(tracker=tracker, registry=reg)
+            orch.workspace.create_for_issue = AsyncMock(
+                return_value=MagicMock(path=tmp_path / "ws")
+            )
+            orch.workspace.current_head = AsyncMock(return_value="abc123")
+            orch._tasks = set()
+            orch._issue_tasks = {}
+            orch._workspace_root = tmp_path
+            orch._state.max_concurrent_agents = 10
+            orch._state.running = {}
+            orch._state.completed = set()
+            orch._state.failed = set()
+            orch._state.retry_queue = []
+            orch._build_session_sink = MagicMock(return_value=MagicMock())
+            orch._emit_im_event = MagicMock()
+            orch._log_audit_event = MagicMock()
+            orch._rebase_conflict_resolved = AsyncMock(
+                return_value=(True, "newhead123")
+            )
+            orch._clarification_resolver = MagicMock()
+
+            # Fake agent_runner.run that hangs until released — simulates a
+            # rebase-resolution session lasting longer than a poll interval
+            # (real budget: run_timeout_ms, default 30 minutes).
+            run_started = asyncio.Event()
+            hang = asyncio.Event()
+
+            async def hanging_run(*args: Any, **kwargs: Any) -> None:
+                run_started.set()
+                await hang.wait()  # hangs >= 60s in production; released below
+
+            orch.agent_runner.run = hanging_run
+
+            # Must return promptly instead of blocking on the hanging run.
+            try:
+                await asyncio.wait_for(
+                    orch._process_pending_rebase_conflicts(),
+                    timeout=5.0,
+                )
+            except TimeoutError:
+                self.fail(
+                    "_process_pending_rebase_conflicts blocked the poll loop: "
+                    "rebase resolution was awaited inline, not launched as a "
+                    "background task"
+                )
+            # Yield once so the background task starts running.
+            await asyncio.sleep(0)
+            self.assertTrue(run_started.is_set(), "agent_runner.run was not called")
+            self.assertIn(
+                "7", orch._state.running, "issue must be in running state"
+            )
+
+            # Daemon responsibilities keep advancing while the run hangs.
+
+            # 1) Control command consumption: write a stop control file.
+            control_dir = tmp_path / ".orchestrator_control"
+            control_dir.mkdir()
+            stop_file = control_dir / "stop.control"
+            stop_file.write_text("stop\n7\n", encoding="utf-8")
+            await orch._process_control_commands()
+            self.assertFalse(
+                stop_file.exists(), "stop control file was not consumed"
+            )
+
+            # 2) Retry queue processing still works.
+            retry_issue = _make_issue(issue_id="9", branch_name="feature/9")
+            retry_record = SimpleNamespace(
+                issue_id="9",
+                scheduled_at=time.time() - 10,
+                delay_seconds=0,
+                attempt=1,
+                requeue_count=0,
+            )
+            orch._state.retry_queue = [retry_record]
+            tracker.fetch_issue_states_by_ids = AsyncMock(
+                return_value={"9": retry_issue}
+            )
+            orch._launch_issue = AsyncMock()
+            await orch._process_retry_queue()
+            orch._launch_issue.assert_awaited_once()
+
+            # 3) Release the run; the done-callback must migrate state via
+            #    _finalize_rebase_resolution (conflict cleared).
+            hang.set()
+            for _ in range(200):
+                rec = reg.get("7")
+                if rec is not None and not rec.has_conflict:
+                    break
+                await asyncio.sleep(0.01)
+            rec = reg.get("7")
+            assert rec is not None
+            self.assertFalse(
+                rec.has_conflict,
+                "conflict not cleared after rebase run completed",
+            )
+            orch._rebase_conflict_resolved.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +733,7 @@ class TestLaunchRebaseResolution(unittest.IsolatedAsyncioTestCase):
         orch._build_session_sink = MagicMock(return_value=MagicMock())
         orch._emit_im_event = MagicMock()
         orch._rebase_conflict_resolved = AsyncMock()
+        orch._tasks = set()
         orch._state.completed = set()
         orch._state.failed = set()
         return orch, reg
@@ -551,7 +742,13 @@ class TestLaunchRebaseResolution(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             orch, reg = self._make_orch(Path(tmp))
             orch._rebase_conflict_resolved = AsyncMock(return_value=(True, "abc123deadbeef"))
-            await orch._launch_rebase_resolution(_make_issue())
+            issue = _make_issue()
+            # _launch_rebase_resolution runs the agent (stubbed) and returns
+            # the session; the state migration is completed by
+            # _finalize_rebase_resolution (invoked via the done-callback
+            # wired in _process_pending_rebase_conflicts).
+            session = await orch._launch_rebase_resolution(issue)
+            await orch._finalize_rebase_resolution(issue, session)
 
             # has_conflict cleared + new HEAD recorded on the registry.
             rec = reg.get("7")
@@ -576,7 +773,9 @@ class TestLaunchRebaseResolution(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             orch, reg = self._make_orch(Path(tmp))
             orch._rebase_conflict_resolved = AsyncMock(return_value=(False, None))
-            await orch._launch_rebase_resolution(_make_issue())
+            issue = _make_issue()
+            session = await orch._launch_rebase_resolution(issue)
+            await orch._finalize_rebase_resolution(issue, session)
 
             rec = reg.get("7")
             assert rec is not None
