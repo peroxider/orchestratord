@@ -338,3 +338,207 @@ async def test_run_summary_surfaces_backend_error_detail(
         "the raw backend error must reach the tracker summary"
     )
     assert "opencode_unexpected_response" in created[0]
+
+
+# ---------------------------------------------------------------------------
+# #13 [O5][MAJOR] 持久化 retry plan 重启后永不恢复。
+# ``_schedule_retry`` 把 ``next_retry_at`` 持久化到 registry 记录，但启动
+# 恢复路径只处理 RUNNING 记录，从不回填 retry_queue——daemon 重启后计划中
+# 的重试静默蒸发，issue 无限挂起。以下测试验证启动时重建 retry queue。
+# ---------------------------------------------------------------------------
+
+
+def _orchestrator_from_disk(tmp_path: Path) -> Orchestrator:
+    """Orchestrator backed by the on-disk registry (no re-register).
+
+    ``_orchestrator`` re-registers issue "1", which would overwrite the
+    persisted ``next_retry_at`` — this helper only loads the registry so
+    the file's records (including a persisted retry plan) survive.
+    """
+    orch = object.__new__(Orchestrator)
+    orch._state = OrchestratorState()
+    orch._registry = IssueRegistry(tmp_path / "registry.json")
+    orch.workflow = SimpleNamespace(
+        agent=SimpleNamespace(
+            max_retry_attempts=3,
+            max_retry_backoff_ms=60_000,
+            max_turns_retry_delay_ms=60_000,
+        )
+    )
+    return orch
+
+
+def _persist_retry_plan(tmp_path: Path, *, retry_count: int = 1) -> None:
+    """First-daemon-lifetime simulation: write a registry record carrying
+    a persisted retry plan (``next_retry_at`` already due, status FAILED —
+    the exact state ``_schedule_retry`` leaves behind after a failure).
+    """
+    import time as _time
+
+    from orchestratord.issue_registry.models import IssueStatus
+
+    first = _orchestrator(tmp_path)
+    record = first._registry.get("1")
+    assert record is not None
+    record.retry_count = retry_count
+    record.next_retry_at = _time.time() - 10.0  # came due while daemon was down
+    record.status = IssueStatus.FAILED
+    first._registry._save()
+
+
+@pytest.mark.asyncio
+async def test_startup_recovers_persisted_retry_plan(tmp_path: Path) -> None:
+    """A retry plan persisted by a previous daemon lifetime must be
+    rebuilt into the retry queue on startup and dispatched by the normal
+    retry machinery.
+    """
+    _persist_retry_plan(tmp_path)
+
+    # Second daemon lifetime: fresh in-memory state, same registry.
+    orch = _orchestrator_from_disk(tmp_path)
+    assert orch._state.retry_queue == []
+    assert orch._state.retry_attempts == {}
+
+    orch._recover_pending_retries()
+
+    assert len(orch._state.retry_queue) == 1, (
+        "persisted retry plan must be rebuilt into the retry queue"
+    )
+    recovered = orch._state.retry_queue[0]
+    assert recovered.issue_id == "1"
+    assert recovered.delay_seconds == 0.0, "overdue retry must be immediately ready"
+    assert orch._state.retry_attempts.get("1") == 1, (
+        "attempt counter must be restored so max_retry_attempts holds"
+    )
+
+    # The recovered plan flows through the normal dispatch path — the
+    # concurrency-slot, tracker active-state and requeue guards still apply.
+    launched: list[str] = []
+
+    async def _fake_launch(issue) -> None:
+        launched.append(issue.id)
+
+    orch._launch_issue = _fake_launch  # type: ignore[method-assign]
+    orch.tracker = SimpleNamespace(
+        active_states=["open"],
+        fetch_issue_states_by_ids=_fetch_ok,
+    )
+
+    await orch._process_retry_queue()
+
+    assert launched == ["1"]
+    assert orch._state.retry_queue == []
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_retry_defers_future_due_time(tmp_path: Path) -> None:
+    """A retry whose due time is still in the future keeps its remaining
+    delay — recovery must not launch it early.
+    """
+    import time as _time
+
+    from orchestratord.issue_registry.models import IssueStatus
+
+    first = _orchestrator(tmp_path)
+    record = first._registry.get("1")
+    assert record is not None
+    record.retry_count = 1
+    record.next_retry_at = _time.time() + 300.0  # 5 minutes out
+    record.status = IssueStatus.FAILED
+    first._registry._save()
+
+    orch = _orchestrator_from_disk(tmp_path)
+    orch._recover_pending_retries()
+
+    assert len(orch._state.retry_queue) == 1
+    recovered = orch._state.retry_queue[0]
+    assert 290.0 < recovered.delay_seconds <= 300.0, (
+        "future plan must keep its remaining delay"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_retry_respects_slot_limit(tmp_path: Path) -> None:
+    """Recovery only rebuilds the queue; dispatch still respects the
+    concurrency-slot guard (no launch while the daemon is at capacity).
+    """
+    _persist_retry_plan(tmp_path)
+
+    orch = _orchestrator_from_disk(tmp_path)
+    orch._recover_pending_retries()
+    assert len(orch._state.retry_queue) == 1
+
+    # No concurrency slots free — the recovered retry must stay queued.
+    orch._state.max_concurrent_agents = 0
+    orch.tracker = SimpleNamespace(
+        active_states=["open"],
+        fetch_issue_states_by_ids=_fetch_ok,
+    )
+
+    await orch._process_retry_queue()
+
+    assert len(orch._state.retry_queue) == 1, (
+        "recovered retry must defer when no concurrency slot is free"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_retry_respects_requeue_ceiling(
+    tmp_path: Path,
+) -> None:
+    """A recovered retry that the tracker permanently misses is dropped
+    after the requeue ceiling — recovery must not bypass that guard.
+    """
+    _persist_retry_plan(tmp_path)
+
+    orch = _orchestrator_from_disk(tmp_path)
+    orch._recover_pending_retries()
+    assert len(orch._state.retry_queue) == 1
+
+    async def _fetch_empty(ids):
+        return {}  # tracker never reports the issue
+
+    orch.tracker = SimpleNamespace(
+        active_states=["open"],
+        fetch_issue_states_by_ids=_fetch_empty,
+    )
+
+    # max_retry_attempts=3 → requeue ceiling is 3. Repeated misses must
+    # eventually drop the recovered item instead of looping forever.
+    for _ in range(10):
+        await orch._process_retry_queue()
+
+    assert orch._state.retry_queue == [], (
+        "recovered retry must respect the requeue ceiling"
+    )
+    record = orch._registry.get("1")
+    assert record is not None
+    assert record.next_retry_at is None, (
+        "dropped recovered retry must clear the persisted plan"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_retry_restores_attempt_count(
+    tmp_path: Path,
+) -> None:
+    """The persisted retry_count restores the in-memory attempt counter
+    so max_retry_attempts is not bypassed by a restart.
+    """
+    _persist_retry_plan(tmp_path, retry_count=2)
+
+    orch = _orchestrator_from_disk(tmp_path)
+    orch._recover_pending_retries()
+
+    assert orch._state.retry_attempts.get("1") == 2
+    assert orch._state.retry_queue[0].attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_recover_pending_retry_is_noop_without_plan(tmp_path: Path) -> None:
+    """Records without a persisted retry plan are left untouched."""
+    orch = _orchestrator(tmp_path)
+
+    orch._recover_pending_retries()
+
+    assert orch._state.retry_queue == []
