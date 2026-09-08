@@ -5,7 +5,10 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
   type ReactNode,
 } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
@@ -75,6 +78,37 @@ const NAV = [
 
 function localeIndex(locale: string) { return locale === 'zh-CN' ? 1 : locale === 'ja' ? 2 : 0 }
 
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+function useDialogFocus<T extends HTMLElement>(ref: RefObject<T | null>) {
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const frame = window.requestAnimationFrame(() => {
+      const first = ref.current?.querySelector<HTMLElement>(FOCUSABLE)
+      if (first && !ref.current?.contains(document.activeElement)) first.focus()
+    })
+    return () => {
+      window.cancelAnimationFrame(frame)
+      if (previous?.isConnected) previous.focus()
+    }
+  }, [ref])
+  const onKeyDown = (event: ReactKeyboardEvent<T>) => {
+    if (event.key !== 'Tab' || !ref.current) return
+    const items = [...ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)]
+    if (items.length === 0) return
+    const first = items[0]!
+    const last = items[items.length - 1]!
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault()
+      last.focus()
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault()
+      first.focus()
+    }
+  }
+  return onKeyDown
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
   const instance = useInstance(apiClient)
   if (instance.isPending) return <BootstrapState />
@@ -141,6 +175,8 @@ function CommandPalette({ instance, close, navigate }: { instance: InstanceBoots
   const locale = useLocale(); const idx = localeIndex(locale)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
+  const dialogRef = useRef<HTMLElement>(null)
+  const onDialogKeyDown = useDialogFocus(dialogRef)
   const [entities, setEntities] = useState<Array<{ label: string; type: string; href: string }>>([])
   useEffect(() => {
     let live = true
@@ -148,21 +184,31 @@ function CommandPalette({ instance, close, navigate }: { instance: InstanceBoots
       apiClient.request<Array<{ id: string; title: string }>>(`/api/workspaces/${instance.workspace_id}/issues`),
       apiClient.request<Array<{ id: string; mode: string }>>(`/api/workspaces/${instance.workspace_id}/sessions`),
       apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/agents`),
-    ]).then(([issues, sessions, agents]) => { if (!live) return; setEntities([
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/projects`),
+      apiClient.request<Array<{ id: string; hostname: string }>>(`/api/workspaces/${instance.workspace_id}/runtimes`),
+      apiClient.request<Array<{ name: string; display_name: string }>>('/api/skills'),
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/autopilots`),
+    ]).then(([issues, sessions, agents, projects, runtimes, skills, autopilots]) => { if (!live) return; setEntities([
       ...(issues.status === 'fulfilled' ? issues.value.map(x => ({ label: x.title, type: 'Issue', href: `/issues/${x.id}` })) : []),
       ...(sessions.status === 'fulfilled' ? sessions.value.map(x => ({ label: `${x.mode} · ${x.id.slice(0, 8)}`, type: 'Session', href: `/sessions/${x.id}` })) : []),
       ...(agents.status === 'fulfilled' ? agents.value.map(x => ({ label: x.name, type: 'Agent', href: '/agents' })) : []),
+      ...(projects.status === 'fulfilled' ? projects.value.map(x => ({ label: x.name, type: 'Project', href: '/projects' })) : []),
+      ...(runtimes.status === 'fulfilled' ? runtimes.value.map(x => ({ label: x.hostname, type: 'Runtime', href: '/runtimes' })) : []),
+      ...(skills.status === 'fulfilled' ? skills.value.map(x => ({ label: x.display_name, type: 'Skill', href: `/skills/${encodeURIComponent(x.name)}` })) : []),
+      ...(autopilots.status === 'fulfilled' ? autopilots.value.map(x => ({ label: x.name, type: 'Autopilot', href: '/autopilots' })) : []),
     ]) })
     return () => { live = false }
   }, [instance.workspace_id])
   const navItems = NAV.flat().map(x => ({ label: x.labels[idx], type: 'Navigate', href: x.href }))
   const results = [...navItems, ...entities].filter(x => !query || `${x.label} ${x.type}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12)
   const openItem = (index: number) => { const item = results[index]; if (!item) return; navigate(item.href); close() }
-  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section className="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{results.map((item, i) => <button key={`${item.type}-${item.href}-${i}`} data-active={i === activeIndex || undefined} onMouseEnter={() => setActiveIndex(i)} onClick={() => openItem(i)}><span>{item.label}</span><small>{item.type}</small></button>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> browse</span><span><kbd>↵</kbd> open</span><span><kbd>C</kbd> new issue</span><span><kbd>esc</kbd> close</span></footer></section></div>
+  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{results.map((item, i) => <button key={`${item.type}-${item.href}-${i}`} data-active={i === activeIndex || undefined} onMouseEnter={() => setActiveIndex(i)} onClick={() => openItem(i)}><span>{item.label}</span><small>{item.type}</small></button>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> browse</span><span><kbd>↵</kbd> open</span><span><kbd>C</kbd> new issue</span><span><kbd>esc</kbd> close</span></footer></section></div>
 }
 
 function CreateIssueDialog({ workspaceId, close, labels, navigate }: { workspaceId: string; close: () => void; labels: typeof copy[keyof typeof copy]; navigate: (href: string) => void }) {
   const create = useCreateIssue(apiClient, workspaceId)
   const [title, setTitle] = useState(''); const [description, setDescription] = useState('')
-  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><form className="create-dialog" role="dialog" aria-modal="true" onSubmit={e => { e.preventDefault(); if (!title.trim()) return; create.mutate({ title: title.trim(), description }, { onSuccess: issue => { close(); navigate(`/issues/${issue.id}`) } }) }}><header><div><span className="dialog-eyebrow">ISSUE / NEW</span><h2>{labels.newIssue}</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={close}><Icon name="close" /></button></header><label>{labels.title}<Input autoFocus value={title} onChange={e => setTitle(e.target.value)} /></label><label>{labels.description}<Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder={labels.description} /></label>{create.isError && <p className="form-error">Could not create the issue. Your draft is still here; check the local API and try again.</p>}<footer><Button type="button" variant="ghost" onClick={close}>{labels.cancel}</Button><Button type="submit" disabled={!title.trim() || create.isPending}>{create.isPending ? labels.creating : labels.create}</Button></footer></form></div>
+  const dialogRef = useRef<HTMLFormElement>(null)
+  const onDialogKeyDown = useDialogFocus(dialogRef)
+  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><form ref={dialogRef} onKeyDown={onDialogKeyDown} className="create-dialog" role="dialog" aria-modal="true" onSubmit={e => { e.preventDefault(); if (!title.trim()) return; create.mutate({ title: title.trim(), description }, { onSuccess: issue => { close(); navigate(`/issues/${issue.id}`) } }) }}><header><div><span className="dialog-eyebrow">ISSUE / NEW</span><h2>{labels.newIssue}</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={close}><Icon name="close" /></button></header><label>{labels.title}<Input autoFocus value={title} onChange={e => setTitle(e.target.value)} /></label><label>{labels.description}<Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder={labels.description} /></label>{create.isError && <p className="form-error">Could not create the issue. Your draft is still here; check the local API and try again.</p>}<footer><Button type="button" variant="ghost" onClick={close}>{labels.cancel}</Button><Button type="submit" disabled={!title.trim() || create.isPending}>{create.isPending ? labels.creating : labels.create}</Button></footer></form></div>
 }

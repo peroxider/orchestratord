@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react'
 import type { ChatMessage } from '@orchestratord/core'
+import { useLocale } from '../i18n'
 
 export interface ChatTimelineProps {
   messages: ChatMessage[]
@@ -16,6 +17,7 @@ const ROLE_CLASS: Record<string, string> = {
 
 export function ChatTimeline({ messages }: ChatTimelineProps) {
   const endRef = useRef<HTMLDivElement>(null)
+  const locale = useLocale()
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' })
@@ -24,7 +26,7 @@ export function ChatTimeline({ messages }: ChatTimelineProps) {
   return (
     <div className="chat-timeline">
       {messages.length === 0 && (
-        <p className="chat__empty">No messages yet.</p>
+        <p className="chat__empty">{{ en: 'No messages yet.', 'zh-CN': '暂无消息。', ja: 'メッセージはまだありません。' }[locale]}</p>
       )}
       {messages.map((m) => (
         <div key={m.id} className={`chat-msg ${ROLE_CLASS[m.role] ?? 'chat-msg--system'}`}>
@@ -33,7 +35,7 @@ export function ChatTimeline({ messages }: ChatTimelineProps) {
               {m.author_label ?? m.agent_id ?? m.role}
             </span>
             <span className="chat-msg__time">
-              {new Date(m.created_at).toLocaleTimeString()}
+              {new Date(m.created_at).toLocaleTimeString(locale)}
             </span>
           </div>
           <div className="chat-msg__body">{m.content}</div>

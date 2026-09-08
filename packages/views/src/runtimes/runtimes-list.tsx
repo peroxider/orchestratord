@@ -21,9 +21,12 @@ export function RuntimesList({ client, workspaceId }: RuntimesListProps) {
   const [hostname, setHostname] = useState('')
   const [os, setOs] = useState('')
   const [issuedToken, setIssuedToken] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const { data, isPending, isError, error } = useRuntimes(client, workspaceId)
   const register = useRegisterRuntime(client, workspaceId)
+  const { locale } = useTranslation()
+  const c = runtimeCopy[locale]
 
   function submitRegister() {
     if (!hostname.trim()) return
@@ -32,6 +35,7 @@ export function RuntimesList({ client, workspaceId }: RuntimesListProps) {
       {
         onSuccess: (runtime) => {
           setIssuedToken(runtime.token)
+          setCopied(false)
           setHostname('')
           setOs('')
         },
@@ -46,8 +50,8 @@ export function RuntimesList({ client, workspaceId }: RuntimesListProps) {
           <Input
             value={hostname}
             onChange={(e) => setHostname(e.target.value)}
-            placeholder="Hostname"
-            aria-label="Hostname"
+            placeholder={c.hostname}
+            aria-label={c.hostname}
           />
           <Input
             value={os}
@@ -61,24 +65,25 @@ export function RuntimesList({ client, workspaceId }: RuntimesListProps) {
             disabled={register.isPending || !hostname.trim()}
             onClick={submitRegister}
           >
-            Register
+            {c.register}
           </Button>
         </div>
         {issuedToken && (
-          <p className="runtimes__token">
-            One-time token (copy now): <code>{issuedToken}</code>
-          </p>
+          <div className="runtimes__token" role="status">
+            <span>{c.oneTime}: <code>{issuedToken}</code></span>
+            <Button size="sm" variant="secondary" onClick={() => void navigator.clipboard.writeText(issuedToken).then(() => setCopied(true))}>{copied ? c.copied : c.copy}</Button>
+          </div>
         )}
       </Card>
 
       {isPending ? (
-        <p className="runtimes__empty">Loading runtimes…</p>
+        <p className="runtimes__empty">{c.loading}</p>
       ) : isError ? (
         <p className="runtimes__empty">
-          Failed to load runtimes: {error?.message ?? 'unknown error'}
+          {c.failed}: {error?.message ?? 'unknown error'}
         </p>
       ) : (data ?? []).length === 0 ? (
-        <p className="runtimes__empty">No runtimes registered.</p>
+        <p className="runtimes__empty">{c.empty}</p>
       ) : (
         <div className="runtimes__grid">
           {(data ?? []).map((runtime) => (
@@ -106,18 +111,19 @@ function RuntimeCard({
 }) {
   const revoke = useRevokeRuntime(client, workspaceId, runtime.id)
   const { locale } = useTranslation()
+  const c = runtimeCopy[locale]
   return (
     <Card className="runtime-card">
       <header className="runtime-card__header">
         <span className="runtime-card__hostname">{runtime.hostname}</span>
-        <Badge tone={RUNTIME_STATUS_TONE[runtime.status]}>
+        <Badge tone={RUNTIME_STATUS_TONE[runtime.status] ?? 'neutral'}>
           {runtimeStatusLabel(runtime.status, locale)}
         </Badge>
       </header>
       <p className="runtime-card__os">{runtime.os}</p>
       {runtime.last_seen_at && (
         <p className="runtime-card__meta">
-          Last seen: {new Date(runtime.last_seen_at).toLocaleString()}
+          {c.lastSeen}: {new Date(runtime.last_seen_at).toLocaleString(locale)}
         </p>
       )}
       {runtime.probed_backends.length > 0 && (
@@ -136,12 +142,18 @@ function RuntimeCard({
             size="sm"
             variant="danger"
             disabled={revoke.isPending}
-            onClick={() => revoke.mutate()}
+            onClick={() => { if (window.confirm(`${c.revokeConfirm} “${runtime.hostname}”?`)) revoke.mutate() }}
           >
-            Revoke
+            {c.revoke}
           </Button>
         </div>
       )}
     </Card>
   )
 }
+
+const runtimeCopy = {
+  en: { hostname: 'Hostname', register: 'Register', oneTime: 'One-time token (copy now)', copied: 'Copied', copy: 'Copy token', loading: 'Loading runtimes…', failed: 'Failed to load runtimes', empty: 'No runtimes registered.', lastSeen: 'Last seen', revoke: 'Revoke', revokeConfirm: 'Revoke this Runtime and invalidate its credential' },
+  'zh-CN': { hostname: '主机名', register: '注册', oneTime: '一次性 Token（请立即复制）', copied: '已复制', copy: '复制 Token', loading: '正在加载运行时…', failed: '无法加载运行时', empty: '尚未注册运行时。', lastSeen: '最后在线', revoke: '吊销', revokeConfirm: '吊销此运行时并使其凭据失效' },
+  ja: { hostname: 'ホスト名', register: '登録', oneTime: '一度だけ表示されるトークン（今すぐコピー）', copied: 'コピー済み', copy: 'トークンをコピー', loading: 'ランタイムを読み込み中…', failed: 'ランタイムを読み込めませんでした', empty: 'ランタイムは未登録です。', lastSeen: '最終確認', revoke: '無効化', revokeConfirm: 'このランタイムと認証情報を無効化しますか' },
+} as const

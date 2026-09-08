@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RealtimeClient } from './client'
 
 class MockWebSocket {
@@ -49,6 +49,10 @@ function newClient(
 describe('RealtimeClient', () => {
   beforeEach(() => {
     MockWebSocket.instances = []
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('connects with workspace_id and token query params', () => {
@@ -137,5 +141,30 @@ describe('RealtimeClient', () => {
     const socket = lastInstance()
     client.disconnect()
     expect(socket.readyState).toBe(3)
+  })
+
+  it('reconnects after an unexpected close and restores topics', () => {
+    vi.useFakeTimers()
+    const statuses: string[] = []
+    const client = newClient({
+      reconnectDelayMs: 50,
+      onStatus: (status) => statuses.push(status),
+    })
+    client.connect()
+    const first = lastInstance()
+    client.subscribe(['session.1'])
+    first.readyState = 3
+    first.onclose?.()
+
+    vi.advanceTimersByTime(50)
+    const second = lastInstance()
+    expect(second).not.toBe(first)
+    second.readyState = 1
+    second.onopen?.()
+    expect(second.sent).toEqual([
+      JSON.stringify({ type: 'subscribe', topics: ['session.1'] }),
+    ])
+    expect(statuses).toEqual(['connecting', 'closed', 'connecting', 'open'])
+    client.disconnect()
   })
 })

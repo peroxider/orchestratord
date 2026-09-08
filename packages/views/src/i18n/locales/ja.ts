@@ -34,15 +34,11 @@ export const ja: Record<TranslationKey, string> = {
   'inbox.hint.clarification': 'エージェントが確認質問をしました。',
   'inbox.hint.failed': 'セッションの実行が失敗しました。対応が必要です。',
 
-  'members.role.owner': 'オーナー',
-  'members.role.admin': '管理者',
-  'members.role.member': 'メンバー',
-
   'runtimes.status.online': 'オンライン',
   'runtimes.status.offline': 'オフライン',
   'runtimes.status.disabled': '無効',
 
-  'audit.actor.member': 'メンバー',
+  'audit.actor.member': 'ローカル操作者',
   'audit.actor.agent': 'エージェント',
   'audit.actor.system': 'システム',
 
@@ -50,7 +46,7 @@ export const ja: Record<TranslationKey, string> = {
   'usage.dimension.backend': 'バックエンド',
   'usage.dimension.issue': 'Issue',
   'usage.dimension.day': '日',
-  'usage.dimension.workspace': 'ワークスペース',
+  'usage.dimension.workspace': 'インスタンス',
 
   'usage.metric.tokens_total': '合計トークン',
   'usage.metric.cost_usd': 'コスト (USD)',

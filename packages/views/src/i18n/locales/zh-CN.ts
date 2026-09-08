@@ -34,15 +34,11 @@ export const zhCN: Record<TranslationKey, string> = {
   'inbox.hint.clarification': '智能体提出了一个澄清问题。',
   'inbox.hint.failed': '一次会话运行失败，需要处理。',
 
-  'members.role.owner': '所有者',
-  'members.role.admin': '管理员',
-  'members.role.member': '成员',
-
   'runtimes.status.online': '在线',
   'runtimes.status.offline': '离线',
   'runtimes.status.disabled': '已禁用',
 
-  'audit.actor.member': '成员',
+  'audit.actor.member': '本地操作人',
   'audit.actor.agent': '智能体',
   'audit.actor.system': '系统',
 
@@ -50,7 +46,7 @@ export const zhCN: Record<TranslationKey, string> = {
   'usage.dimension.backend': '后端',
   'usage.dimension.issue': '任务',
   'usage.dimension.day': '日',
-  'usage.dimension.workspace': '工作区',
+  'usage.dimension.workspace': '实例',
 
   'usage.metric.tokens_total': '总 Tokens',
   'usage.metric.cost_usd': '成本 (USD)',

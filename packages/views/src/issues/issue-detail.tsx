@@ -29,15 +29,16 @@ export function IssueDetail({
   const sessions = useSessionsByIssue(client, issueId)
   const pullRequests = usePullRequests(client, issueId)
   const { locale } = useTranslation()
+  const c = issueCopy[locale]
   const [body, setBody] = useState('')
 
   if (issue.isPending) {
-    return <p className="issue-detail__empty">Loading issue…</p>
+    return <p className="issue-detail__empty">{c.loading}</p>
   }
   if (issue.isError) {
     return (
       <p className="issue-detail__empty">
-        Failed to load issue: {issue.error?.message ?? 'unknown error'}
+        {c.failed}: {issue.error?.message ?? c.unknown}
       </p>
     )
   }
@@ -47,22 +48,23 @@ export function IssueDetail({
 
   return (
     <div className="issue-detail">
+      <nav className="detail-breadcrumb" aria-label={c.breadcrumb}><a href="/issues">{c.issues}</a><span>/</span><span aria-current="page">{data.id.slice(0, 8)}</span></nav>
       <header className="issue-detail__header">
         <h2 className="issue-detail__title">{data.title}</h2>
-        <Badge tone={STATUS_TONE[data.status]}>
+        <Badge tone={STATUS_TONE[data.status] ?? 'neutral'}>
           {issueStatusLabel(data.status, locale)}
         </Badge>
       </header>
 
       <p className="issue-detail__description">
-        {data.description || 'No description.'}
+        {data.description || c.noDescription}
       </p>
 
       <div className="issue-detail__meta">
         <span className="issue-detail__assignee">
           {data.assignee_type
             ? `${data.assignee_type}:${data.assignee_id}`
-            : 'unassigned'}
+            : c.unassigned}
         </span>
         {data.labels.map((label) => (
           <Badge key={label} tone="neutral">
@@ -74,7 +76,7 @@ export function IssueDetail({
       {pullRequests.data &&
         pullRequests.data.pull_requests.length > 0 && (
           <section className="issue-detail__pull-requests">
-            <h3>Pull requests</h3>
+            <h3>{c.pullRequests}</h3>
             <ul className="pull-requests">
               {pullRequests.data.pull_requests.map((pr) => (
                 <li key={pr.id} className="pull-request">
@@ -96,7 +98,7 @@ export function IssueDetail({
 
       {sessions.data && sessions.data.length > 0 && (
         <section className="issue-detail__sessions">
-          <h3>Sessions</h3>
+          <h3>{c.sessions}</h3>
           <ul className="issue-detail__session-list">
             {sessions.data.map((session) => (
               <li key={session.id}>
@@ -110,7 +112,7 @@ export function IssueDetail({
       )}
 
       <section className="issue-detail__comments">
-        <h3>Comments</h3>
+        <h3>{c.comments}</h3>
         <ul className="comments">
           {comments.map((comment) => (
             <li key={comment.id} className="comment">
@@ -143,13 +145,19 @@ export function IssueDetail({
           <Textarea
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            placeholder="Write a comment… (@agent-name to mention)"
+            placeholder={c.commentPlaceholder}
           />
           <Button type="submit" disabled={!body.trim() || addComment.isPending}>
-            Comment
+            {c.comment}
           </Button>
         </form>
       </section>
     </div>
   )
 }
+
+const issueCopy = {
+  en: { loading: 'Loading issue…', failed: 'Could not load issue', unknown: 'unknown error', breadcrumb: 'Breadcrumb', issues: 'Issues', noDescription: 'No description.', unassigned: 'Unassigned', pullRequests: 'Pull requests', sessions: 'Sessions', comments: 'Comments', commentPlaceholder: 'Write a comment… (@agent-name to mention)', comment: 'Comment' },
+  'zh-CN': { loading: '正在加载任务…', failed: '无法加载任务', unknown: '未知错误', breadcrumb: '面包屑导航', issues: '任务', noDescription: '暂无描述。', unassigned: '未分配', pullRequests: '拉取请求', sessions: '会话', comments: '评论', commentPlaceholder: '写下评论…（使用 @agent-name 提及）', comment: '发表评论' },
+  ja: { loading: 'Issue を読み込み中…', failed: 'Issue を読み込めませんでした', unknown: '不明なエラー', breadcrumb: 'パンくず', issues: 'Issue', noDescription: '説明はありません。', unassigned: '未割り当て', pullRequests: 'プルリクエスト', sessions: 'セッション', comments: 'コメント', commentPlaceholder: 'コメントを書く…（@agent-name でメンション）', comment: 'コメント' },
+} as const

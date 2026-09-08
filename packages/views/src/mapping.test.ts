@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import type {
   AuditActorType,
   InboxItemStatus,
-  MemberRole,
   PullRequestState,
   RuntimeStatus,
   SessionEventKind,
@@ -24,12 +23,25 @@ import {
   inboxStatusLabel,
 } from './inbox/inbox-status'
 import { RUNTIME_STATUS_TONE, runtimeStatusLabel } from './runtimes/runtime-status'
-import { MEMBER_ROLES, MEMBER_ROLE_TONE, memberRoleLabel } from './members/member-roles'
 import { auditActorTypeLabel } from './audit/audit-labels'
 import { PR_STATE_TONE, prStateLabel, prStateTone } from './vcs/pr-labels'
 import { translate, type TranslationKey } from './i18n'
 import { en } from './i18n/locales/en'
 import { zhCN } from './i18n/locales/zh-CN'
+import { cronSummary } from './autopilots/schedule'
+
+describe('cronSummary', () => {
+  it('turns common schedules into readable language', () => {
+    expect(cronSummary('*/15 * * * *')).toBe('Every 15 minutes')
+    expect(cronSummary('5 * * * *')).toBe('Hourly at :05')
+    expect(cronSummary('30 8 * * *')).toBe('Daily at 08:30')
+  })
+
+  it('keeps custom schedules inspectable', () => {
+    expect(cronSummary('0 9 * * 1')).toBe('Custom schedule · 0 9 * * 1')
+    expect(cronSummary('invalid')).toBe('Invalid schedule')
+  })
+})
 
 describe('eventSummary', () => {
   it('extracts text from text events', () => {
@@ -260,32 +272,6 @@ describe('RUNTIME_STATUS_TONE / runtimeStatusLabel', () => {
   })
 })
 
-describe('MEMBER_ROLES / MEMBER_ROLE_TONE / memberRoleLabel', () => {
-  it('lists roles in selector order', () => {
-    expect(MEMBER_ROLES).toEqual(['owner', 'admin', 'member'])
-  })
-
-  it('has a tone and label for every role', () => {
-    for (const role of MEMBER_ROLES) {
-      expect(MEMBER_ROLE_TONE[role]).toBeTruthy()
-      expect(memberRoleLabel(role)).toBeTruthy()
-    }
-  })
-
-  it('labels roles in title case and Chinese', () => {
-    expect(memberRoleLabel('owner')).toBe('Owner')
-    expect(memberRoleLabel('member')).toBe('Member')
-    expect(memberRoleLabel('owner', 'zh-CN')).toBe('所有者')
-    expect(memberRoleLabel('admin', 'zh-CN')).toBe('管理员')
-  })
-
-  it('maps role tones', () => {
-    expect(MEMBER_ROLE_TONE.owner).toBe('purple')
-    expect(MEMBER_ROLE_TONE.admin).toBe('accent')
-    expect(MEMBER_ROLE_TONE.member).toBe('neutral')
-  })
-})
-
 describe('auditActorTypeLabel', () => {
   it('labels every actor type', () => {
     const types: AuditActorType[] = ['member', 'agent', 'system']
@@ -295,13 +281,13 @@ describe('auditActorTypeLabel', () => {
   })
 
   it('maps to title-case labels', () => {
-    expect(auditActorTypeLabel('member')).toBe('Member')
+    expect(auditActorTypeLabel('member')).toBe('Local operator')
     expect(auditActorTypeLabel('agent')).toBe('Agent')
     expect(auditActorTypeLabel('system')).toBe('System')
   })
 
   it('translates actor types into Chinese', () => {
-    expect(auditActorTypeLabel('member', 'zh-CN')).toBe('成员')
+    expect(auditActorTypeLabel('member', 'zh-CN')).toBe('本地操作人')
     expect(auditActorTypeLabel('agent', 'zh-CN')).toBe('智能体')
   })
 })

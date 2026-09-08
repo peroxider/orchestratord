@@ -11,6 +11,7 @@ export interface RealtimeClientOptions {
   WebSocketImpl?: typeof WebSocket
   onMessage?: (message: RealtimeMessage) => void
   onStatus?: (status: RealtimeStatus) => void
+  reconnectDelayMs?: number
 }
 
 export class RealtimeClient {
@@ -18,12 +19,21 @@ export class RealtimeClient {
   private socket: WebSocket | null = null
   private listeners = new Set<(message: RealtimeMessage) => void>()
   private topics = new Set<string>()
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private reconnectAttempt = 0
+  private stopped = true
 
   constructor(options: RealtimeClientOptions) {
     this.options = options
   }
 
   connect(): void {
+    if (!this.stopped && this.socket) return
+    this.stopped = false
+    this.openSocket()
+  }
+
+  private openSocket(): void {
     const { url, workspaceId, token = '' } = this.options
     const params = new URLSearchParams({ workspace_id: workspaceId, token })
     const wsUrl = `${url}?${params.toString()}`
@@ -33,12 +43,19 @@ export class RealtimeClient {
 
     this.options.onStatus?.('connecting')
     socket.onopen = () => {
+      if (this.socket !== socket) return
+      this.reconnectAttempt = 0
       this.options.onStatus?.('open')
       if (this.topics.size > 0) {
         this.send({ type: 'subscribe', topics: [...this.topics] })
       }
     }
-    socket.onclose = () => this.options.onStatus?.('closed')
+    socket.onclose = () => {
+      if (this.socket !== socket) return
+      this.socket = null
+      this.options.onStatus?.('closed')
+      this.scheduleReconnect()
+    }
     socket.onerror = () => this.options.onStatus?.('error')
     socket.onmessage = (event) => {
       try {
@@ -77,8 +94,23 @@ export class RealtimeClient {
   }
 
   disconnect(): void {
-    this.socket?.close()
+    this.stopped = true
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = null
+    const socket = this.socket
     this.socket = null
+    socket?.close()
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.reconnectTimer) return
+    const baseDelay = this.options.reconnectDelayMs ?? 1_000
+    const delay = Math.min(baseDelay * 2 ** this.reconnectAttempt, 5_000)
+    this.reconnectAttempt += 1
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (!this.stopped) this.openSocket()
+    }, delay)
   }
 
   private send(payload: object): void {

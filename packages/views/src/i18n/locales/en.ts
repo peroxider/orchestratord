@@ -35,15 +35,11 @@ export const en = {
   'inbox.hint.clarification': 'The agent asked a clarifying question.',
   'inbox.hint.failed': 'A session run failed and needs attention.',
 
-  'members.role.owner': 'Owner',
-  'members.role.admin': 'Admin',
-  'members.role.member': 'Member',
-
   'runtimes.status.online': 'Online',
   'runtimes.status.offline': 'Offline',
   'runtimes.status.disabled': 'Disabled',
 
-  'audit.actor.member': 'Member',
+  'audit.actor.member': 'Local operator',
   'audit.actor.agent': 'Agent',
   'audit.actor.system': 'System',
 
@@ -51,7 +47,7 @@ export const en = {
   'usage.dimension.backend': 'Backend',
   'usage.dimension.issue': 'Issue',
   'usage.dimension.day': 'Day',
-  'usage.dimension.workspace': 'Workspace',
+  'usage.dimension.workspace': 'Instance',
 
   'usage.metric.tokens_total': 'Total tokens',
   'usage.metric.cost_usd': 'Cost (USD)',

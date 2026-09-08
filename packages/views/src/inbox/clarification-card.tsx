@@ -10,9 +10,7 @@ import type { InboxKindCardProps } from './inbox-shared'
 export function ClarificationCard({
   item,
   workspaceId,
-  currentMemberId,
   busy,
-  onAssign,
   onResolve,
   onDismiss,
 }: InboxKindCardProps) {
@@ -23,16 +21,6 @@ export function ClarificationCard({
       workspaceId={workspaceId}
       actions={
         <div className="inbox-card__actions">
-          {item.status === 'open' && currentMemberId && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => onAssign(currentMemberId)}
-            >
-              {translate(locale, 'inbox.action.assign_me', 'Assign to me')}
-            </Button>
-          )}
           <Button size="sm" variant="primary" disabled={busy} onClick={onResolve}>
             {translate(locale, 'inbox.action.mark_answered', 'Mark answered')}
           </Button>

@@ -8,6 +8,8 @@ import {
   type ApiClient,
 } from '@orchestratord/core'
 import { Badge, Button, Card, Input } from '@orchestratord/ui'
+import { cronSummary } from './schedule'
+import { useLocale } from '../i18n'
 
 export interface AutopilotsListProps {
   client: ApiClient
@@ -23,6 +25,8 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
 
   const { data, isPending, isError, error } = useAutopilots(client, workspaceId)
   const create = useCreateAutopilot(client, workspaceId)
+  const locale = useLocale()
+  const c = autopilotCopy[locale]
 
   function submitCreate() {
     if (!name.trim() || !cron.trim() || !targetId.trim()) return
@@ -46,9 +50,10 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Name"
-            aria-label="Name"
+            placeholder={c.name}
+            aria-label={c.name}
           />
+          {cron.trim() && <span className="autopilots__schedule-preview">{cronSummary(cron, locale)}</span>}
           <Input
             value={cron}
             onChange={(e) => setCron(e.target.value)}
@@ -58,13 +63,13 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
           <Input
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
-            placeholder="Prompt"
-            aria-label="Prompt"
+            placeholder={c.prompt}
+            aria-label={c.prompt}
           />
           <select
             value={targetKind}
             onChange={(e) => setTargetKind(e.target.value)}
-            aria-label="Target kind"
+            aria-label={c.targetKind}
           >
             <option value="issue">issue</option>
             <option value="squad">squad</option>
@@ -72,8 +77,8 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
           <Input
             value={targetId}
             onChange={(e) => setTargetId(e.target.value)}
-            placeholder="Target id"
-            aria-label="Target id"
+            placeholder={c.targetId}
+            aria-label={c.targetId}
           />
           <Button
             size="sm"
@@ -81,19 +86,19 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
             disabled={create.isPending || !name.trim() || !cron.trim() || !targetId.trim()}
             onClick={submitCreate}
           >
-            Create
+            {c.create}
           </Button>
         </div>
       </Card>
 
       {isPending ? (
-        <p className="autopilots__empty">Loading autopilots…</p>
+        <p className="autopilots__empty">{c.loading}</p>
       ) : isError ? (
         <p className="autopilots__empty">
-          Failed to load autopilots: {error?.message ?? 'unknown error'}
+          {c.failed}: {error?.message ?? 'unknown error'}
         </p>
       ) : (data ?? []).length === 0 ? (
-        <p className="autopilots__empty">No autopilots yet.</p>
+        <p className="autopilots__empty">{c.empty}</p>
       ) : (
         <div className="autopilots__grid">
           {(data ?? []).map((autopilot) => (
@@ -106,6 +111,7 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
               cron={autopilot.cron}
               targetKind={autopilot.target_kind}
               enabled={autopilot.enabled}
+              locale={locale}
             />
           ))}
         </div>
@@ -122,6 +128,7 @@ function AutopilotCard({
   cron,
   targetKind,
   enabled,
+  locale,
 }: {
   workspaceId: string
   client: ApiClient
@@ -130,18 +137,21 @@ function AutopilotCard({
   cron: string
   targetKind: string
   enabled: boolean
+  locale: keyof typeof autopilotCopy
 }) {
   const patch = usePatchAutopilot(client, workspaceId, autopilotId)
+  const c = autopilotCopy[locale]
   return (
     <Card className="autopilot-card">
       <header className="autopilot-card__header">
         <span className="autopilot-card__name">{name}</span>
         <Badge tone={enabled ? 'good' : 'neutral'}>
-          {enabled ? 'enabled' : 'disabled'}
+          {enabled ? c.enabled : c.disabled}
         </Badge>
       </header>
-      <p className="autopilot-card__cron">{cron}</p>
-      <p className="autopilot-card__target">Target: {targetKind}</p>
+      <p className="autopilot-card__cron"><strong>{cronSummary(cron, locale)}</strong><code>{cron}</code></p>
+      <p className="autopilot-card__target">{c.target}: {targetKind}</p>
+      <p className="autopilot-card__next">{c.next}</p>
       <div className="autopilot-card__actions">
         <Button
           size="sm"
@@ -149,9 +159,15 @@ function AutopilotCard({
           disabled={patch.isPending}
           onClick={() => patch.mutate({ enabled: !enabled })}
         >
-          {enabled ? 'Disable' : 'Enable'}
+          {enabled ? c.disable : c.enable}
         </Button>
       </div>
     </Card>
   )
 }
+
+const autopilotCopy = {
+  en: { name: 'Name', prompt: 'Prompt', targetKind: 'Target kind', targetId: 'Target id', create: 'Create', loading: 'Loading autopilots…', failed: 'Failed to load autopilots', empty: 'No autopilots yet.', enabled: 'enabled', disabled: 'disabled', target: 'Target', next: 'Next run will appear when the scheduler reports it.', disable: 'Pause', enable: 'Enable' },
+  'zh-CN': { name: '名称', prompt: '提示词', targetKind: '目标类型', targetId: '目标 ID', create: '创建', loading: '正在加载自动任务…', failed: '无法加载自动任务', empty: '暂无自动任务。', enabled: '已启用', disabled: '已暂停', target: '目标', next: '调度器上报后将在此显示下次运行时间。', disable: '暂停', enable: '启用' },
+  ja: { name: '名前', prompt: 'プロンプト', targetKind: '対象タイプ', targetId: '対象 ID', create: '作成', loading: '自動タスクを読み込み中…', failed: '自動タスクを読み込めませんでした', empty: '自動タスクはまだありません。', enabled: '有効', disabled: '一時停止', target: '対象', next: 'スケジューラーから報告されると次回実行を表示します。', disable: '一時停止', enable: '有効化' },
+} as const

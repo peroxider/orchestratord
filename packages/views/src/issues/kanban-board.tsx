@@ -7,6 +7,7 @@ import {
   KeyboardSensor,
   PointerSensor,
   closestCorners,
+  useDroppable,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -34,6 +35,11 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
   const { data, isPending, isError, error } = useIssues(client, workspaceId)
   const move = useMoveIssue(client, workspaceId)
   const { locale } = useTranslation()
+  const c = {
+    en: { loading: 'Loading board…', failed: 'Failed to load board', move: 'Move', change: 'Change status for' },
+    'zh-CN': { loading: '正在加载看板…', failed: '无法加载看板', move: '移动', change: '更改状态：' },
+    ja: { loading: 'カンバンを読み込み中…', failed: 'カンバンを読み込めませんでした', move: '移動', change: '状態を変更：' },
+  }[locale]
   // Optimistic update + WS rollback are owned by ``useMoveIssue``
   // (§5.3): the mutation's ``onMutate`` snaps the card into the target
   // column via setQueryData before the PATCH resolves, and ``onError``
@@ -50,12 +56,12 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
   )
 
   if (isPending) {
-    return <p className="kanban__empty">Loading board…</p>
+    return <p className="kanban__empty">{c.loading}</p>
   }
   if (isError) {
     return (
       <p className="kanban__empty">
-        Failed to load board: {error?.message ?? 'unknown error'}
+        {c.failed}: {error?.message ?? 'unknown error'}
       </p>
     )
   }
@@ -71,7 +77,12 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
     setActiveId(null)
     if (!over) return
     const issueId = String(active.id)
-    const targetStatus = String(over.id) as IssueStatus
+    const overStatus = over.data.current?.status
+    const targetStatus = (
+      typeof overStatus === 'string'
+        ? overStatus
+        : String(over.id).replace(/^column:/, '')
+    ) as IssueStatus
     const issue = issues.find((i) => i.id === issueId)
     if (!issue || issue.status === targetStatus) return
     move.mutate({ issueId, status: targetStatus })
@@ -96,6 +107,9 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
               workspaceId={workspaceId}
               activeId={activeId}
               locale={locale}
+              moveLabel={c.move}
+              changeLabel={c.change}
+              onMove={(issueId, nextStatus) => move.mutate({ issueId, status: nextStatus })}
             />
           )
         })}
@@ -110,16 +124,26 @@ function KanbanColumn({
   workspaceId,
   activeId,
   locale,
+  onMove,
+  moveLabel,
+  changeLabel,
 }: {
   status: IssueStatus
   issues: Issue[]
   workspaceId: string
   activeId: string | null
   locale: Locale
+  onMove: (issueId: string, status: IssueStatus) => void
+  moveLabel: string
+  changeLabel: string
 }) {
   // Each column is a droppable region. The droppable id is the column
   // status so ``handleDragEnd`` can read the target column from
   // ``event.over.id`` without scanning the DOM.
+  const { setNodeRef, isOver } = useDroppable({
+    id: `column:${status}`,
+    data: { status },
+  })
   return (
     <SortableContext
       id={status}
@@ -127,12 +151,14 @@ function KanbanColumn({
       strategy={verticalListSortingStrategy}
     >
       <section
+        ref={setNodeRef}
         className="kanban-column"
         data-status={status}
+        data-over={isOver || undefined}
         aria-label={`Column ${issueStatusLabel(status, locale)}`}
       >
         <header className="kanban-column__header">
-          <Badge tone={STATUS_TONE[status]}>
+          <Badge tone={STATUS_TONE[status] ?? 'neutral'}>
             {issueStatusLabel(status, locale)}
           </Badge>
           <span className="kanban-column__count">{issues.length}</span>
@@ -144,6 +170,10 @@ function KanbanColumn({
               issue={issue}
               workspaceId={workspaceId}
               active={activeId === issue.id}
+              locale={locale}
+              onMove={onMove}
+              moveLabel={moveLabel}
+              changeLabel={changeLabel}
             />
           ))}
         </div>
@@ -156,10 +186,18 @@ function KanbanCard({
   issue,
   workspaceId,
   active,
+  locale,
+  onMove,
+  moveLabel,
+  changeLabel,
 }: {
   issue: Issue
   workspaceId: string
   active: boolean
+  locale: Locale
+  onMove: (issueId: string, status: IssueStatus) => void
+  moveLabel: string
+  changeLabel: string
 }) {
   const {
     attributes,
@@ -168,7 +206,7 @@ function KanbanCard({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: issue.id })
+  } = useSortable({ id: issue.id, data: { status: issue.status } })
 
   const style: CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -207,6 +245,19 @@ function KanbanCard({
             ))}
           </div>
         )}
+        <label className="kanban-card__move">
+          <span>{moveLabel}</span>
+          <select
+            aria-label={`${changeLabel} ${issue.title}`}
+            value={issue.status}
+            onPointerDown={(event) => event.stopPropagation()}
+            onChange={(event) => onMove(issue.id, event.target.value as IssueStatus)}
+          >
+            {ISSUE_STATUSES.map((status) => (
+              <option key={status} value={status}>{issueStatusLabel(status, locale)}</option>
+            ))}
+          </select>
+        </label>
       </Card>
     </div>
   )

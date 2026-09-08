@@ -9,10 +9,7 @@ import { INBOX_STATUS_TONE, inboxKindLabel, inboxStatusLabel } from './inbox-sta
 export interface InboxKindCardProps {
   item: InboxItem
   workspaceId: string
-  /** The signed-in member id used by "Assign to me" (dev stub until §5.7.4). */
-  currentMemberId?: string
   busy: boolean
-  onAssign: (assigneeId: string) => void
   onResolve: () => void
   onDismiss: () => void
 }
@@ -51,7 +48,7 @@ export function InboxCardShell({
       <Card className="inbox-card">
         <header className="inbox-card__header">
           <Badge tone="purple">{inboxKindLabel(item.kind, locale)}</Badge>
-          <Badge tone={INBOX_STATUS_TONE[item.status]}>
+          <Badge tone={INBOX_STATUS_TONE[item.status] ?? 'neutral'}>
             {inboxStatusLabel(item.status, locale)}
           </Badge>
         </header>

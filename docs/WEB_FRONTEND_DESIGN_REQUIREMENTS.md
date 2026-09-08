@@ -1592,16 +1592,16 @@ Multica License 将 `apps/web`、`apps/desktop`、`apps/mobile`、`packages/view
 | ID | 决策 | 状态 |
 | --- | --- | --- |
 | WEB-D1 | Web-only，不建设 Desktop/Mobile | Accepted |
-| WEB-D2 | 无浏览器登录 | Proposed |
-| WEB-D3 | 单用户，隐藏 default workspace | Proposed |
-| WEB-D4 | URL 扁平化，不含 workspace slug | Proposed |
-| WEB-D5 | 保留 workspace 数据字段和隔离 | Proposed |
+| WEB-D2 | 无浏览器登录 | Implemented |
+| WEB-D3 | 单用户，隐藏 default workspace | Implemented |
+| WEB-D4 | URL 扁平化，不含 workspace slug | Implemented |
+| WEB-D5 | 保留 workspace 数据字段和隔离 | Implemented |
 | WEB-D6 | 保留 daemon/runtime credentials | Accepted |
 | WEB-D7 | Multica 仅作设计参考，不直接派生 UI 代码 | Accepted |
-| WEB-D8 | Execution Ledger 为视觉方向 | Proposed |
-| WEB-D9 | Execution Spine 为唯一强调型视觉签名 | Proposed |
-| WEB-D10 | Dark 为默认主题，同时完整支持 Light | Proposed |
-| WEB-D11 | Sessions 升为一级导航 | Proposed |
-| WEB-D12 | 面向用户将 Audit 命名为 Activity | Proposed |
+| WEB-D8 | Execution Ledger 为视觉方向 | Implemented |
+| WEB-D9 | Execution Spine 为唯一强调型视觉签名 | Implemented |
+| WEB-D10 | Dark 为默认主题，同时完整支持 Light | Implemented |
+| WEB-D11 | Sessions 升为一级导航 | Implemented |
+| WEB-D12 | 面向用户将 Audit 命名为 Activity | Implemented |
 
-在进入 Phase 0 实现前，应由项目负责人确认所有 `Proposed` 项。确认后将状态更新为 `Accepted`，后续实现不得在没有新 ADR 的情况下偏离。
+`Implemented` 表示该决策已由当前 Web 重构落地；后续如需偏离，必须补充新的 ADR 并迁移现有界面与契约。

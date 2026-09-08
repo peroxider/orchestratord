@@ -95,14 +95,12 @@ export function useTheme(): ThemeContextValue {
 
 /**
  * Root-level providers mounted in ``apps/web/app/layout.tsx``. Kept thin on
- * purpose: workspace-scoped concerns (TanStack Query, workspace Zustand
- * store, realtime bridge) live inside ``DashboardGuard`` so the marketing
- * and login routes don't pay for them.
+ * purpose: instance-scoped concerns (TanStack Query and local UI
+ * store, realtime bridge) live inside ``DashboardGuard`` so bootstrap
+ * failures can render a focused diagnostic state.
  *
  * Order is significant: theme must wrap the tree so tokens resolve on first
- * paint; i18n wraps everything so login + marketing see translations; the
- * auth gate is outermost so a future redirect-on-401 can intercept before
- * any child provider runs its effects.
+ * paint; i18n wraps the complete single-operator application.
  */
 export function WebProviders({ children }: { children: ReactNode }) {
   return (

@@ -136,7 +136,7 @@ export function CoordinatorGantt({ events }: CoordinatorGanttProps) {
             >
               <span className="coordinator-gantt__row-label">
                 <span className="coordinator-gantt__row-title">{bar.title}</span>
-                <Badge tone={STATUS_TONE[bar.status]}>{bar.status}</Badge>
+                <Badge tone={STATUS_TONE[bar.status] ?? 'neutral'}>{bar.status}</Badge>
               </span>
               <span className="coordinator-gantt__track">
                 <span

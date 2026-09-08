@@ -25,6 +25,15 @@ orchestratord app issue-pr review --id ISSUE_ID --approve
 `server` and `issue` remain compatibility command groups. New integrations
 should use `daemon`, `run`, and `app issue-pr`.
 
+### Local Web console security
+
+`orchestratord serve` binds to `127.0.0.1` by default. The Web console is a
+single-operator control surface with no browser login and can approve tools or
+stop running agent processes. Do not expose it directly to a LAN or the public
+internet. If remote access is required, keep the daemon behind a trusted VPN or
+an authenticating reverse proxy with TLS; daemon/runtime credentials remain
+separate from the browser session.
+
 Declarative stages may use the built-in `agent`, `gate`, and `decision` kinds,
 or a namespaced action registered through the `orchestratord.actions` Python
 entry-point group:

@@ -27,6 +27,7 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
   const [from, setFrom] = useState('')
   const [to, setTo] = useState('')
   const { locale } = useTranslation()
+  const c = usageCopy[locale]
 
   const { data, isPending, isError, error } = useWorkspaceUsage(
     client,
@@ -40,7 +41,7 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `usage-${workspaceId}-${dimension}.csv`
+    a.download = `orchestratord-usage-${dimension}.csv`
     a.click()
     URL.revokeObjectURL(url)
   }
@@ -65,49 +66,49 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
-            aria-label="From"
+            aria-label={c.from}
           />
           <input
             type="date"
             value={to}
             onChange={(e) => setTo(e.target.value)}
-            aria-label="To"
+            aria-label={c.to}
           />
           <Button size="sm" variant="secondary" onClick={exportCsv}>
-            Export CSV
+            {c.export}
           </Button>
         </div>
       </div>
 
       {isPending ? (
-        <p className="usage-page__empty">Loading usage…</p>
+        <p className="usage-page__empty">{c.loading}</p>
       ) : isError ? (
         <p className="usage-page__empty">
-          Failed to load usage: {error?.message ?? 'unknown error'}
+          {c.failed}: {error?.message ?? c.unknown}
         </p>
       ) : (
         <>
           <div className="usage-page__totals">
-            <Stat label="Total tokens" value={formatTokens(data?.totals.tokens_total ?? 0)} />
-            <Stat label="Cost" value={formatUsd(data?.totals.cost_usd ?? 0)} />
-            <Stat label="Sessions" value={formatTokens(data?.totals.sessions ?? 0)} />
+            <Stat label={c.tokens} value={formatTokens(data?.totals.tokens_total ?? 0)} />
+            <Stat label={c.cost} value={(data?.totals.cost_usd ?? 0) > 0 ? formatUsd(data!.totals.cost_usd) : c.noPricing} />
+            <Stat label={c.sessions} value={formatTokens(data?.totals.sessions ?? 0)} />
           </div>
 
-          <UsageCharts groups={data?.groups ?? []} dimension={dimension} />
+          <UsageCharts groups={data?.groups ?? []} dimension={dimension} pricingConfigured={(data?.totals.cost_usd ?? 0) > 0} />
 
           {data && data.groups.length === 0 ? (
-            <p className="usage-page__empty">No usage recorded.</p>
+            <p className="usage-page__empty">{c.empty}</p>
           ) : (
             <Card className="usage-page__table-card">
               <table className="usage-table">
                 <thead>
                   <tr>
                     <th>{dimensionLabel(dimension, locale)}</th>
-                    <th>In</th>
-                    <th>Out</th>
-                    <th>Total</th>
-                    <th>Cost</th>
-                    <th>Sessions</th>
+                    <th>{c.input}</th>
+                    <th>{c.output}</th>
+                    <th>{c.total}</th>
+                    <th>{c.cost}</th>
+                    <th>{c.sessions}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -117,7 +118,7 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
                       <td>{formatTokens(g.tokens_in)}</td>
                       <td>{formatTokens(g.tokens_out)}</td>
                       <td>{formatTokens(g.tokens_total)}</td>
-                      <td>{formatUsd(g.cost_usd)}</td>
+                      <td>{g.cost_usd > 0 ? formatUsd(g.cost_usd) : c.noPricing}</td>
                       <td>{formatTokens(g.sessions)}</td>
                     </tr>
                   ))}
@@ -130,6 +131,12 @@ export function UsagePage({ client, workspaceId }: UsagePageProps) {
     </div>
   )
 }
+
+const usageCopy = {
+  en: { from: 'From', to: 'To', export: 'Export CSV', loading: 'Loading usage…', failed: 'Could not load usage', unknown: 'unknown error', tokens: 'Total tokens', cost: 'Cost', sessions: 'Sessions', noPricing: 'Pricing not configured', empty: 'No usage recorded.', input: 'Input', output: 'Output', total: 'Total' },
+  'zh-CN': { from: '开始日期', to: '结束日期', export: '导出 CSV', loading: '正在加载用量…', failed: '无法加载用量', unknown: '未知错误', tokens: 'Token 总量', cost: '成本', sessions: '会话', noPricing: '尚未配置价格', empty: '暂无用量记录。', input: '输入', output: '输出', total: '总计' },
+  ja: { from: '開始日', to: '終了日', export: 'CSV を出力', loading: '使用量を読み込み中…', failed: '使用量を読み込めませんでした', unknown: '不明なエラー', tokens: '総トークン', cost: 'コスト', sessions: 'セッション', noPricing: '価格未設定', empty: '使用量の記録はありません。', input: '入力', output: '出力', total: '合計' },
+} as const
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (

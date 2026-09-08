@@ -135,7 +135,7 @@ export function SwarmTree({ events }: SwarmTreeProps) {
               >
                 <div className="swarm-tree__subtask-row">
                   <span className="swarm-tree__subtask-title">{subtask.title}</span>
-                  <Badge tone={STATUS_TONE[subtask.status]}>{subtask.status}</Badge>
+                  <Badge tone={STATUS_TONE[subtask.status] ?? 'neutral'}>{subtask.status}</Badge>
                 </div>
                 <span className="swarm-tree__subtask-meta">
                   {subtask.events.length} event{subtask.events.length === 1 ? '' : 's'}

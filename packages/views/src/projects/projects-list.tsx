@@ -7,6 +7,7 @@ import {
   type ApiClient,
 } from '@orchestratord/core'
 import { Badge, Button, Card, Input } from '@orchestratord/ui'
+import { useLocale } from '../i18n'
 
 export interface ProjectsListProps {
   client: ApiClient
@@ -19,6 +20,12 @@ export function ProjectsList({ client, workspaceId }: ProjectsListProps) {
 
   const { data, isPending, isError, error } = useProjects(client, workspaceId)
   const create = useCreateProject(client, workspaceId)
+  const locale = useLocale()
+  const c = {
+    en: { name: 'Project name', description: 'Description', create: 'Create', loading: 'Loading projects…', failed: 'Failed to load projects', empty: 'No projects yet.', repos: 'repos', docs: 'docs', active: 'Active' },
+    'zh-CN': { name: '项目名称', description: '说明', create: '创建', loading: '正在加载项目…', failed: '无法加载项目', empty: '暂无项目。', repos: '个仓库', docs: '份文档', active: '进行中' },
+    ja: { name: 'プロジェクト名', description: '説明', create: '作成', loading: 'プロジェクトを読み込み中…', failed: 'プロジェクトを読み込めませんでした', empty: 'プロジェクトはまだありません。', repos: 'リポジトリ', docs: 'ドキュメント', active: '進行中' },
+  }[locale]
 
   function submitCreate() {
     if (!name.trim()) return
@@ -35,14 +42,14 @@ export function ProjectsList({ client, workspaceId }: ProjectsListProps) {
           <Input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Project name"
-            aria-label="Project name"
+            placeholder={c.name}
+            aria-label={c.name}
           />
           <Input
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            placeholder="Description"
-            aria-label="Description"
+            placeholder={c.description}
+            aria-label={c.description}
           />
           <Button
             size="sm"
@@ -50,31 +57,31 @@ export function ProjectsList({ client, workspaceId }: ProjectsListProps) {
             disabled={create.isPending || !name.trim()}
             onClick={submitCreate}
           >
-            Create
+            {c.create}
           </Button>
         </div>
       </Card>
 
       {isPending ? (
-        <p className="projects__empty">Loading projects…</p>
+        <p className="projects__empty">{c.loading}</p>
       ) : isError ? (
         <p className="projects__empty">
-          Failed to load projects: {error?.message ?? 'unknown error'}
+          {c.failed}: {error?.message ?? 'unknown error'}
         </p>
       ) : (data ?? []).length === 0 ? (
-        <p className="projects__empty">No projects yet.</p>
+        <p className="projects__empty">{c.empty}</p>
       ) : (
         <div className="projects__grid">
           {(data ?? []).map((project) => (
             <Card key={project.id} className="project-card">
               <header className="project-card__header">
                 <span className="project-card__name">{project.name}</span>
-                <Badge tone="neutral">{project.repos.length} repo(s)</Badge>
+                <div><Badge tone="good">{c.active}</Badge><Badge tone="neutral">{project.repos.length} {c.repos}</Badge></div>
               </header>
               {project.description && (
                 <p className="project-card__description">{project.description}</p>
               )}
-              <p className="project-card__meta">{project.docs.length} doc(s)</p>
+              <p className="project-card__meta">{project.docs.length} {c.docs}</p>
             </Card>
           ))}
         </div>

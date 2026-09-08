@@ -142,7 +142,7 @@ function StageCard({ stage, locale }: { stage: StageBucket; locale: Locale }) {
     <article className="pipeline-graph__card" data-stage-id={stage.id}>
       <header className="pipeline-graph__card-header">
         <h3 className="pipeline-graph__stage-name">{stage.label}</h3>
-        <Badge tone={STATUS_TONE[stage.status]}>{stage.status}</Badge>
+        <Badge tone={STATUS_TONE[stage.status] ?? 'neutral'}>{stage.status}</Badge>
       </header>
       <dl className="pipeline-graph__meta">
         <div className="pipeline-graph__meta-row">

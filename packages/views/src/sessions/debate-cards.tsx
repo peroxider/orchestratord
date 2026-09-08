@@ -128,7 +128,7 @@ function ProposerCard({
     <article className="debate-cards__card" data-participant-id={bucket.id}>
       <header className="debate-cards__card-header">
         <h3 className="debate-cards__name">{bucket.label}</h3>
-        <Badge tone={STATUS_TONE[bucket.status]}>{bucket.status}</Badge>
+        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{bucket.status}</Badge>
       </header>
       {bucket.lens && (
         <p className="debate-cards__lens">
@@ -173,7 +173,7 @@ function JudgeCard({
     >
       <header className="debate-cards__card-header">
         <h3 className="debate-cards__name">Judge</h3>
-        <Badge tone={STATUS_TONE[bucket.status]}>{bucket.status}</Badge>
+        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{bucket.status}</Badge>
       </header>
       <p className="debate-cards__judge-note">
         Saw both proposers' outputs verbatim and implemented the winner.

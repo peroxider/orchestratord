@@ -31,15 +31,17 @@ function chartTitle(metric: UsageMetric, dimension: UsageDimension, locale: Loca
 export interface UsageChartsProps {
   groups: UsageGroup[]
   dimension: UsageDimension
+  pricingConfigured?: boolean
 }
 
 /** §7.3 — bar chart (tokens) + line chart (cost) over the grouped usage rows. */
-export function UsageCharts({ groups, dimension }: UsageChartsProps) {
+export function UsageCharts({ groups, dimension, pricingConfigured = true }: UsageChartsProps) {
+  const { locale } = useTranslation()
   if (groups.length === 0) return null
   return (
     <div className="usage-charts">
       <UsageBarChart groups={groups} metric="tokens_total" dimension={dimension} />
-      <UsageLineChart groups={groups} metric="cost_usd" dimension={dimension} />
+      {pricingConfigured ? <UsageLineChart groups={groups} metric="cost_usd" dimension={dimension} /> : <Card className="usage-chart usage-chart--empty"><h3 className="usage-chart__title">{metricLabel('cost_usd', locale)}</h3><p>{{ en: 'Pricing not configured. Token data remains available.', 'zh-CN': '尚未配置价格，Token 数据仍可使用。', ja: '価格未設定です。トークンデータは引き続き利用できます。' }[locale]}</p></Card>}
     </div>
   )
 }
