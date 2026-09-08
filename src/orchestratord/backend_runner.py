@@ -751,6 +751,11 @@ class BackendRunner:
         total_timeout_s = self.agent_config.run_timeout_ms / 1000.0
         inactivity_timeout_s = self.agent_config.stall_timeout_ms / 1000.0
         stall_warn_s = self.agent_config.stall_warn_ms / 1000.0
+        first_turn_timeout_s = (
+            self.agent_config.first_turn_timeout_ms / 1000.0
+            if self.agent_config.first_turn_timeout_ms > 0
+            else None
+        )
         return SessionSpec(
             cwd=str(session.workspace.path),
             system_prompt=system_prompt or None,
@@ -767,6 +772,7 @@ class BackendRunner:
             resume_session_id=resume_session_id,
             max_turns=self.max_turns,
             total_timeout_s=total_timeout_s,
+            first_turn_timeout_s=first_turn_timeout_s,
             inactivity_timeout_s=inactivity_timeout_s,
             idle_watchdog_timeout_s=total_timeout_s,
             stall_warn_s=stall_warn_s,
