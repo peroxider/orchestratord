@@ -1851,9 +1851,30 @@ class BackendRunner:
             state = states.get(issue_id)
             if state is None:
                 return True
-            return state.get("active", True)
+            # ``fetch_issue_states_by_ids`` returns ``dict[str, Issue]`` —
+            # each snapshot is a normalized Issue object, not a dict.  An
+            # issue is "still active" iff its state is one of the tracker's
+            # active states; any terminal/closed state stops the loop so we
+            # never burn more tokens (or open a PR) against a closed issue.
+            active_states = [
+                s.strip().lower()
+                for s in (getattr(tracker, "active_states", None) or [])
+            ]
+            if not active_states:
+                # No active-state vocabulary known for this tracker —
+                # fall back to the legacy conservative "continue" default.
+                return True
+            issue_state = getattr(state, "state", None)
+            if not issue_state:
+                # A snapshot without a state cannot be proven inactive.
+                return True
+            return issue_state.strip().lower() in active_states
         except Exception:
-            logger.debug("should_continue check failed", exc_info=True)
+            logger.warning(
+                "should_continue check failed for issue %s — assuming active",
+                getattr(getattr(session, "issue", None), "id", None),
+                exc_info=True,
+            )
             return True
 
     # ------------------------------------------------------------------
