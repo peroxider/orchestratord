@@ -626,6 +626,12 @@ class BackendRunner:
         deliberately accepts only alphanumeric characters, ``_`` and ``-``
         for transcript directory names, so tracker punctuation (notably the
         ``#`` prefix used by GitCode issue identifiers) must not leak through.
+
+        A short random suffix is appended so two runs of the same issue
+        within the same second (manual requeue, fast retry, concurrent
+        scheduling) never collide on the transcript/session directory.
+        This mirrors the ``run_task`` path which appends
+        ``uuid4().hex[:8]`` after the task id.
         """
         ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
         identifier = str(getattr(session.issue, "identifier", None) or "")
@@ -634,7 +640,7 @@ class BackendRunner:
             for char in identifier
         )
         slug = safe_identifier.strip("-_")[:40] or "unknown"
-        return f"{ts}_{slug}"
+        return f"{ts}_{slug}-{uuid.uuid4().hex[:8]}"
 
     def _build_prompt(
         self,
