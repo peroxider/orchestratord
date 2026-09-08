@@ -107,7 +107,10 @@ def _prompt(label: str, default: str = "", secret: bool = False) -> str:
         else:
             raw = input(f"  {label} [{default}]: ")
         return raw.strip() or default
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
+        # Ctrl+D / closed stdin: fall back to the default and continue.
+        # KeyboardInterrupt (Ctrl+C) intentionally propagates so the CLI
+        # aborts instead of silently skipping to the next prompt.
         return default
 
 
@@ -125,6 +128,24 @@ def _fill_placeholders(content: str, values: dict[str, str]) -> str:
         # Also replace <KEY> style (used by workflow-local.template.md)
         content = content.replace("<" + key + ">", val)
     return content
+
+
+# ── Template ↔ tracker-kind rules ────────────────────────────────────
+#
+# Derived from the tracker registry (``orchestratord.tracker_kinds``) so
+# the CLI can never drift from the adapter layer.
+
+
+def _template_variant_for_kind(kind: str) -> str:
+    """Return the canonical workflow template variant for a tracker kind."""
+    return "workflow-local" if kind == "local" else "workflow"
+
+
+def _compatible_kinds(variant: str) -> set[str]:
+    """Return tracker kinds whose canonical template is *variant*."""
+    from orchestratord.tracker_kinds import SUPPORTED_TRACKERS
+
+    return {k for k in SUPPORTED_TRACKERS if _template_variant_for_kind(k) == variant}
 
 
 # ── Parser ───────────────────────────────────────────────────────────
@@ -158,7 +179,8 @@ def add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
         default="workflow",
         metavar="VARIANT",
         help="Template variant: workflow (default, remote tracker), "
-        "workflow-local (local file-based tracker). "
+        "workflow-local (local file-based tracker). Interactive init "
+        "selects the variant automatically from the tracker kind. "
         "Run 'list-templates' to see all available variants.",
     )
     init_parser.add_argument(
@@ -166,7 +188,8 @@ def add_workflow_parser(subparsers: argparse._SubParsersAction) -> None:
         "-k",
         default="",
         metavar="TRACKER",
-        help="Tracker kind: github, gitcode, gitee, linear, local (inferred from template)",
+        help="Tracker kind: github, gitcode, gitee, linear, local "
+        "(the template variant switches to match)",
     )
     init_parser.add_argument(
         "--owner",
@@ -300,33 +323,69 @@ def _run_init(args: argparse.Namespace) -> int:
             return _prompt(label, default)
         return default
 
-    # Auto-infer --kind from --template when not explicitly provided
-    _TEMPLATE_KIND_HINTS = {
-        "workflow-local": "local",
-        "workflow": "github",
-    }
-    kind_default = _TEMPLATE_KIND_HINTS.get(variant, "github")
-    kind = val(args.kind, "Tracker kind (github/gitcode/gitee/linear/local)", kind_default)
+    # Resolve tracker kind: flag → prompt (registry-validated) → template default
+    from orchestratord.tracker_kinds import (
+        SUPPORTED_TRACKERS,
+        TrackerConfigError,
+        normalize_tracker_kind,
+        tracker_kind_info,
+    )
 
-    # Cross-validate --template and --kind
-    _TEMPLATE_KIND_COMPAT = {
-        "workflow-local": {"local"},
-        "workflow": {"github", "gitcode", "gitee", "linear"},
-    }
-    compat = _TEMPLATE_KIND_COMPAT.get(variant)
-    if compat and kind not in compat:
-        print(
-            f"✗ Template '{variant}' is not compatible with --kind '{kind}'.\n"
-            f"  Expected one of: {', '.join(sorted(compat))}\n"
-            f"  Hint: use --template workflow-local for local tracker, "
-            f"or --template workflow for remote trackers.",
-            file=sys.stderr,
-        )
+    compat = _compatible_kinds(variant)
+    kind_default = "github" if "github" in compat else (sorted(compat)[0] if compat else "github")
+
+    if args.kind:
+        kind = args.kind
+    elif interactive:
+        # Unified interactive init: every registry kind is offered and the
+        # template variant is switched to the kind's canonical one below,
+        # so there is no separate workflow/workflow-local entry point.
+        options = sorted(SUPPORTED_TRACKERS - {"local"}) + ["local"]
+        while True:
+            raw = _prompt(f"Tracker kind ({'/'.join(options)})", kind_default)
+            kind = raw.strip().lower() or kind_default
+            if kind in SUPPORTED_TRACKERS:
+                break
+            print(
+                f"    ✗ Unknown tracker kind '{kind}' — choose one of: {', '.join(options)}",
+                file=sys.stderr,
+            )
+    else:
+        kind = kind_default
+
+    try:
+        kind = normalize_tracker_kind(kind)
+    except TrackerConfigError as exc:
+        print(f"✗ {exc}", file=sys.stderr)
         return 1
 
-    owner = val(args.owner, "Upstream repository owner")
-    repo = val(args.repo, "Repository name")
-    endpoint = val(args.endpoint, "API endpoint (leave blank for default)")
+    # A kind outside the template's compatibility set switches to the kind's
+    # canonical template instead of failing (e.g. picking `local` under the
+    # default remote-tracker template).
+    if compat and kind not in compat:
+        suggested = _template_variant_for_kind(kind)
+        try:
+            tpl = _template_path(suggested)
+        except FileNotFoundError as exc:
+            print(f"✗ {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"ℹ Template '{variant}' does not support tracker kind '{kind}' — "
+            f"using '{suggested}' instead."
+        )
+        variant = suggested
+
+    # Registry metadata drives prompts, clone domains, token env and endpoints
+    info = tracker_kind_info(kind)
+    clone_base = info.default_clone_base_url  # None for linear/local
+
+    # Repository-hosted trackers need owner/repo/endpoint; others skip them
+    if clone_base:
+        owner = val(args.owner, "Upstream repository owner")
+        repo = val(args.repo, "Repository name")
+        endpoint = val(args.endpoint, "API endpoint (leave blank for default)")
+    else:
+        owner, repo, endpoint = args.owner, args.repo, args.endpoint
     assignee = val(args.assignee, "Issue assignee (leave blank for all)")
     branch_prefix = val(args.branch_prefix, "Branch prefix", "orchestratord")
     ws_root = val(args.workspace_root, "Workspace root", "/tmp/orchestratord_workspaces/myproject")
@@ -334,20 +393,16 @@ def _run_init(args: argparse.Namespace) -> int:
     # Build clone_url
     clone_url = ""
     push_user = ""
-    if kind in ("github", "gitcode", "gitee"):
-        domains = {"github": "github.com", "gitcode": "gitcode.com", "gitee": "gitee.com"}
-        domain = domains.get(kind, "github.com")
-        if owner and repo:
-            clone_url = f"https://{domain}/{owner}/{repo}.git"
-            push_user = owner
+    if clone_base and owner and repo:
+        clone_url = f"{clone_base}/{owner}/{repo}.git"
+        push_user = owner
 
     # Fork 工作流：--owner/--repo 是上游，--fork-owner 是 fork 方
-    #   repo_clone_url    = fork 仓库 (clone/push)  → https://domain/fork_owner/repo.git
-    #   upstream_clone_url = 上游仓库 (PR 目标)      → https://domain/owner/repo.git
+    #   repo_clone_url    = fork 仓库 (clone/push)  → {clone_base}/fork_owner/repo.git
+    #   upstream_clone_url = 上游仓库 (PR 目标)      → {clone_base}/owner/repo.git
     #   --fork-owner 为空或与 --owner 相同 → 两者相同，退化为单仓库模式
     upstream_clone_url = clone_url  # 上游 URL，始终由 --owner/--repo 拼接
-    if kind in ("github", "gitcode", "gitee") and repo:
-        domain = domains.get(kind, "github.com")
+    if clone_base and repo:
         fork_owner = args.fork_owner
         if not fork_owner and interactive:
             fork_owner = _prompt(
@@ -355,26 +410,28 @@ def _run_init(args: argparse.Namespace) -> int:
                 "",
             ).strip()
         if fork_owner and fork_owner != owner:
-            clone_url = f"https://{domain}/{fork_owner}/{repo}.git"
+            clone_url = f"{clone_base}/{fork_owner}/{repo}.git"
         else:
             clone_url = upstream_clone_url  # 单仓库模式：两者相同
 
-    # Determine token env var
-    token_env_map = {
-        "github": "GITHUB_TOKEN",
-        "gitcode": "GITCODE_TOKEN",
-        "gitee": "GITEE_TOKEN",
-        "linear": "LINEAR_API_KEY",
-    }
-    token_env = token_env_map.get(kind, "TRACKER_API_KEY")
+    # Token env var: registry's first API-key env; fallback covers local trackers
+    token_env = info.api_key_env_vars[0] if info.api_key_env_vars else "TRACKER_API_KEY"
 
-    # Determine tracker endpoint
-    endpoint_defaults = {
-        "gitcode": "https://api.gitcode.com/api/v5",
-        "gitee": "https://gitee.com/api/v5",
-    }
+    # Tracker endpoint: registry default when not provided
     if not endpoint:
-        endpoint = endpoint_defaults.get(kind, "")
+        endpoint = info.default_endpoint or ""
+
+    # Local-tracker placeholders: prompt only when kind is local; remote
+    # templates don't contain these <KEY> placeholders, so defaults are no-ops
+    if kind == "local":
+        issues_path = val("", "Issues path (local tracker)", ".issues")
+        review_remote = val("", "Review remote name", "origin")
+        review_prefix = val("", "Review branch prefix", "review")
+        test_command = val("", "Test command (empty to skip)", "")
+    else:
+        issues_path, review_remote, review_prefix, test_command = (
+            ".issues", "origin", "review", "",
+        )
 
     # Build substitution map (covers both {{KEY}} and <KEY> placeholder styles)
     values = {
@@ -394,10 +451,10 @@ def _run_init(args: argparse.Namespace) -> int:
         # Keys for <KEY> style placeholders in workflow-local.template.md
         "OWNER": owner,
         "REPO": repo,
-        "ISSUES_PATH": val("", "Issues path (local tracker)", ".issues"),
-        "REVIEW_REMOTE": val("", "Review remote name", "origin"),
-        "REVIEW_PREFIX": val("", "Review branch prefix", "review"),
-        "TEST_COMMAND": val("", "Test command (empty to skip)", ""),
+        "ISSUES_PATH": issues_path,
+        "REVIEW_REMOTE": review_remote,
+        "REVIEW_PREFIX": review_prefix,
+        "TEST_COMMAND": test_command,
     }
 
     # Read and fill template

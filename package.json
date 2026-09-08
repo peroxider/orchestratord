@@ -1,0 +1,12 @@
+{
+  "name": "orchestratord-web",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @orchestratord/web dev",
+    "build": "pnpm --filter @orchestratord/web build",
+    "lint": "pnpm --filter @orchestratord/web lint",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  }
+}

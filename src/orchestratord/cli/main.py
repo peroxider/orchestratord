@@ -53,13 +53,16 @@ def app() -> None:
     from orchestratord.cli.app import add_app_parser
     from orchestratord.cli.backend import add_backend_parser
     from orchestratord.cli.dashboard import add_dashboard_parser
+    from orchestratord.cli.db import add_db_parser
     from orchestratord.cli.issue import add_issue_parser
     from orchestratord.cli.rules import add_rules_parser
+    from orchestratord.cli.run import add_run_parser
+    from orchestratord.cli.serve import add_serve_parser
     from orchestratord.cli.server import add_server_parser
     from orchestratord.cli.skills import add_skills_parser
+    from orchestratord.cli.web import add_web_parser
     from orchestratord.cli.workflow import add_workflow_parser
     from orchestratord.cli.workspace import add_workspace_parser
-    from orchestratord.cli.run import add_run_parser
 
     add_server_parser(subparsers)
     add_server_parser(subparsers, command_name="daemon", dest="daemon_subcommand")
@@ -69,6 +72,9 @@ def app() -> None:
     add_issue_parser(subparsers)
     add_workflow_parser(subparsers)
     add_dashboard_parser(subparsers)
+    add_serve_parser(subparsers)
+    add_web_parser(subparsers)
+    add_db_parser(subparsers)
     add_rules_parser(subparsers)
     add_workspace_parser(subparsers)
     add_skills_parser(subparsers)
@@ -91,6 +97,12 @@ def app() -> None:
         from orchestratord.cli.workflow import run
     elif subcommand == "dashboard":
         from orchestratord.cli.dashboard import run
+    elif subcommand == "serve":
+        from orchestratord.cli.serve import run
+    elif subcommand == "web":
+        from orchestratord.cli.web import run
+    elif subcommand == "db":
+        from orchestratord.cli.db import run
     elif subcommand == "rules":
         from orchestratord.cli.rules import run
     elif subcommand == "workspace":
@@ -114,4 +126,9 @@ def app() -> None:
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         sys.exit(0)
+    except KeyboardInterrupt:
+        # Ctrl+C aborts interactive prompts and long operations cleanly
+        # (128 + SIGINT = 130) instead of dumping a traceback.
+        print("\n✗ Interrupted.", file=sys.stderr)
+        sys.exit(130)
     sys.exit(code)

@@ -17,7 +17,7 @@ Usage (noun-verb, all using self-describing ``--id`` parameters):
 
   # Operator interaction
   orchestratord issue clarify --id <id> --answer <text> [--forward-to-author]
-  orchestratord issue inject --id <id> <hint> [--list] [--remove N]
+  orchestratord issue inject --id <id> <hint | --hint TEXT> [--list] [--remove N]
 
   # Workspace
   orchestratord issue workspace --id <id> [--ls] [--cat FILE] [--edit FILE --with CONTENT]
@@ -152,6 +152,15 @@ def add_issue_parser(
         default=None,
         metavar="N",
         help="Filter to show only events from turn number N",
+    )
+    tail_parser.add_argument(
+        "--lines",
+        "-n",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Render the last N transcript entries before following new ones "
+        "(0 = follow only from EOF, negative = full history; default: 50)",
     )
 
     # --- issue transcript ---
@@ -383,7 +392,15 @@ def add_issue_parser(
         "hint",
         nargs="?",
         default=None,
-        help="Hint text to inject (omit to just list existing hints)",
+        help="Hint text to inject positionally (omit to just list existing hints)",
+    )
+    inject_parser.add_argument(
+        "--hint",
+        dest="hint_flag",
+        default=None,
+        metavar="TEXT",
+        help="Hint text as a flag (alternative to the positional <hint>; "
+        "cannot be combined with it)",
     )
     inject_parser.add_argument(
         "--list",
@@ -1455,10 +1472,44 @@ def _run_tail(registry_path: Path | None, args: argparse.Namespace) -> int:
     label = f"run {run_id}" if not issue_id else f"issue {issue_id} (run {run_id})"
     print(f"Tailing transcript for {label} (Ctrl+C to stop)...")
     try:
-        last_size = transcript_path.stat().st_size
-        pending = ""
-        turn_counter = 0
+        # Render the recent backlog before following (like `tail -n N -f`).
+        # Starting from a bare EOF made finished runs look hung on an
+        # empty screen.
+        backlog = getattr(args, "lines", None)
+        backlog = 50 if backlog is None else int(backlog)
         pending_calls: dict[str, dict] = {}
+        turn_counter = 0
+        if backlog != 0:
+            raw = transcript_path.read_bytes()
+            if raw and not raw.endswith(b"\n"):
+                # Trailing partial line: skip here; the follow loop renders
+                # it once the writer completes it.
+                raw = raw[: raw.rfind(b"\n") + 1]
+            all_lines = raw.decode("utf-8", errors="replace").splitlines()
+            selected = all_lines if backlog < 0 else all_lines[-backlog:]
+            for line in selected:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    print(
+                        f"[tail] warning: malformed entry in {transcript_path}: {exc}",
+                        file=sys.stderr,
+                    )
+                    continue
+                _render_message(msg, turn_counter, pending_calls)
+            if selected:
+                print(
+                    f"[tail] shown last {len(selected)} of {len(all_lines)} entries — "
+                    "following new ones"
+                )
+            last_size = len(raw)
+        else:
+            last_size = transcript_path.stat().st_size
+
+        pending = ""
         while True:
             current_size = transcript_path.stat().st_size
             if current_size <= last_size:
@@ -1500,22 +1551,27 @@ def _run_tail(registry_path: Path | None, args: argparse.Namespace) -> int:
     return 0
 
 
-def _format_ts(timestamp_str: str | None) -> str:
-    """Format an ISO-8601 timestamp string to ``HH:MM:SS``.
+def _format_ts(timestamp_value: float | str | None) -> str:
+    """Format a transcript entry timestamp to ``HH:MM:SS``.
 
-    Falls back to the current local time when the transcript entry
-    has no timestamp (legacy records, session_snapshot lines, etc.).
+    SessionStorage (schema v2) writes Unix epoch floats; legacy ISO-8601
+    strings are also accepted. Falls back to the current local time when
+    the entry has no usable timestamp (legacy records, session_snapshot
+    lines, etc.).
     """
-    if timestamp_str:
-        try:
-            from datetime import datetime
-
-            dt = datetime.fromisoformat(timestamp_str)
-            return dt.strftime("%H:%M:%S")
-        except (ValueError, TypeError):
-            pass
     from datetime import datetime
 
+    if timestamp_value is not None:
+        try:
+            if isinstance(timestamp_value, (int, float)):
+                return datetime.fromtimestamp(timestamp_value).strftime("%H:%M:%S")
+            text = str(timestamp_value).strip()
+            if text.replace(".", "", 1).isdigit():
+                # Epoch seconds serialized as a string.
+                return datetime.fromtimestamp(float(text)).strftime("%H:%M:%S")
+            return datetime.fromisoformat(text).strftime("%H:%M:%S")
+        except (ValueError, TypeError, OSError, OverflowError):
+            pass
     return datetime.now().strftime("%H:%M:%S")
 
 
@@ -2215,6 +2271,15 @@ def _run_inject(args: argparse.Namespace) -> int:
         return 1
 
     hint = getattr(args, "hint", None)
+    hint_flag = getattr(args, "hint_flag", None)
+    if hint and hint_flag:
+        print(
+            "error: provide the hint either positionally or via --hint, not both",
+            file=sys.stderr,
+        )
+        return 2
+    if hint_flag:
+        hint = hint_flag
     list_hints = getattr(args, "list_hints", False)
     remove_hint = getattr(args, "remove_hint", None)
 
@@ -2623,12 +2688,17 @@ def _run_review(
         print("error: specify --approve or --reject", file=sys.stderr)
         return 2
 
+    end_reason = str(record.session_end_reason or "")
     recoverable_failed_completion = bool(
         record.status is IssueStatus.COMPLETED
         and (
             record.verification_status == "failed"
             or record.last_hook_error
-            or record.session_end_reason == "empty_branch_no_commits"
+            or end_reason == "empty_branch_no_commits"
+            # Salvaged completions clear their verification fields on the
+            # COMPLETED transition, so the salvage is only detectable via
+            # the persisted end reason.
+            or end_reason.startswith("salvaged_after_")
         )
     )
     retry_already_queued = bool(
@@ -3652,7 +3722,8 @@ def _run_init(args: argparse.Namespace) -> int:
             try:
                 raw = input(f"  {label} [{default}]: ")
                 return raw.strip() or default
-            except (EOFError, KeyboardInterrupt):
+            except EOFError:
+                # Ctrl+D falls back to the default; Ctrl+C propagates to abort.
                 return default
         return default
 

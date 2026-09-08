@@ -85,6 +85,36 @@ KNOWN_BACKEND_CLIS: tuple[BackendCLI, ...] = (
         "orchestratord-qwen",
         "spawn-per-turn Cli; qwen -p --output-format stream-json 真正流式",
     ),
+    BackendCLI(
+        "kiro",
+        "orchestratord-kiro-cli",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    BackendCLI(
+        "openclaw",
+        "orchestratord-openclaw",
+        "spawn-per-turn Cli; §8.1 HTTP/Gateway path deferred",
+    ),
+    BackendCLI(
+        "reasonix",
+        "orchestratord-reasonix",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    BackendCLI(
+        "zeroclaw",
+        "orchestratord-zeroclaw",
+        "spawn-per-turn Cli; event stream shape not yet exercised",
+    ),
+    # §8.2.1 ACP protocol family — six runtime identities sharing the
+    # JSON-RPC 2.0 stdio adapter in orchestratord-acp. Registered so the
+    # test-time CLI guard intercepts them too (§9.3: CI must never
+    # execute user-installed agent CLIs).
+    BackendCLI("grok", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
+    BackendCLI("codebuddy", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
+    BackendCLI("qwenpaw", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
+    BackendCLI("qodercli", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
+    BackendCLI("qoderclicn", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
+    BackendCLI("deveco", "orchestratord-acp", "ACP 家族；JSON-RPC 2.0 stdio"),
 )
 
 

@@ -94,6 +94,14 @@ class ClaudeSession:
         self._events: list[EventEnvelope] = []
         self._seq = 0
         self._closed = False
+        # Live handle to the current turn's subprocess (set by send(), cleared
+        # once it is reaped) so an operator can pause/resume/stop the run.
+        self._current_proc: asyncio.subprocess.Process | None = None
+
+    @property
+    def current_pid(self) -> int | None:
+        """PID of the in-flight ``claude -p`` child, or ``None`` between turns."""
+        return self._current_proc.pid if self._current_proc is not None else None
 
     # ------------------------------------------------------------------
     # helpers
@@ -172,6 +180,7 @@ class ClaudeSession:
             )
             await self._emit_terminal(reason="error")
             return
+        self._current_proc = proc
 
         # Pipe the prompt in via stdin (CLI reads it then runs non-interactively).
         assert proc.stdin is not None
@@ -236,6 +245,9 @@ class ClaudeSession:
             )
             error_emitted = True
             rc = -1
+        finally:
+            # Reaped (or killed) — the operator-control handle is dead.
+            self._current_proc = None
 
         # The CLI reports API/tool failures in the ``result`` envelope while
         # also exiting non-zero. Check the envelope first — ``stderr`` is

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from importlib.metadata import entry_points
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from orchestratord.spi.backend_descriptor import BackendDescriptor
 from orchestratord.spi.capabilities import BackendCapabilities
@@ -116,6 +116,24 @@ def _resolve_implementation_class(package_name: str) -> type | None:
     return None
 
 
+def _derive_implementation_descriptor(
+    desc: BackendDescriptor,
+) -> BackendDescriptor | None:
+    """§8.2.2 — ``omp`` → ``pi`` 这类 builtin runtime 派生回落。
+
+    当 *desc* 自身的 ``backend_package`` 没有注册实现类时，按其
+    ``runtime_id``（其次 ``protocol_family`` 同名 descriptor）指向的源
+    runtime descriptor 找实现。返回源 descriptor；无法派生时返回 ``None``。
+    """
+    target = desc.runtime_id or desc.protocol_family
+    if not target or target == desc.name:
+        return None
+    source = discover_descriptors().get(target)
+    if source is None or source.name == desc.name:
+        return None
+    return source
+
+
 def _capabilities_to_set(caps: BackendCapabilities) -> set[str]:
     """从 :class:`BackendCapabilities` dataclass 实例提取真实位集合。
 
@@ -129,6 +147,7 @@ def _capabilities_to_set(caps: BackendCapabilities) -> set[str]:
 
 def resolve_backend(
     identifier: str,
+    config: dict[str, Any] | None = None,
     *,
     strict: bool = False,
 ) -> "AgentBackend":
@@ -142,6 +161,9 @@ def resolve_backend(
        ``desc.capabilities`` 完全一致；不一致抛 :class:`BackendMismatchError`
     4. 用 :class:`DegradingBackend` 包装返回
 
+    *config* 由 :meth:`~orchestratord.backend_runner.BackendRunner.describe`
+    的按调用配置通道传入；解析目前仅以 *identifier* 为准，故此处未使用。
+
     Raises:
         BackendNotFoundError: descriptor 未注册 / 实现类缺失
         BackendMismatchError:  strict=True 且 capability 位漂移
@@ -151,18 +173,40 @@ def resolve_backend(
         raise BackendNotFoundError(identifier)
 
     impl_cls = _resolve_implementation_class(desc.backend_package)
+    impl_desc = desc
     if impl_cls is None:
-        raise BackendNotFoundError(
-            f"{identifier!r} → backend package "
-            f"{desc.backend_package!r} 未注册 AgentBackend 实现"
-        )
+        # §8.2.2 builtin-runtime derivation: a derived runtime (omp → pi)
+        # falls back to the implementation registered by the runtime its
+        # ``runtime_id`` (then ``protocol_family``) points at.
+        derived = _derive_implementation_descriptor(desc)
+        if derived is not None:
+            source_cls = _resolve_implementation_class(derived.backend_package)
+            if source_cls is not None:
+                impl_desc = derived
+                impl_cls = source_cls
+                logger.info(
+                    "backend %r derives from runtime %r (protocol_family=%r)"
+                    " — resolving implementation from %r",
+                    identifier,
+                    derived.name,
+                    derived.protocol_family,
+                    derived.backend_package,
+                )
+        if impl_cls is None:
+            raise BackendNotFoundError(
+                f"{identifier!r} → backend package "
+                f"{desc.backend_package!r} 未注册 AgentBackend 实现"
+            )
 
     # Forward descriptor-declared constructor hints (e.g. codex's
     # ``prefer`` runtime override — DESIGN_backends_hardening.md §1.2).
     # The implementation class accepts the hint only when it opts in;
     # unknown hints are ignored so third-party backends keep working.
+    # A deriving runtime's own hint wins over the source runtime's.
     impl_kwargs: dict[str, object] = {}
     prefer = desc.extra_metadata.get("prefer")
+    if prefer is None and impl_desc is not desc:
+        prefer = impl_desc.extra_metadata.get("prefer")
     if prefer is not None:
         impl_kwargs["prefer"] = prefer
     try:
@@ -229,6 +273,8 @@ def list_backends() -> list[dict[str, str]]:
                 "display_name": d.display_name,
                 "family": d.family.value,
                 "backend_package": d.backend_package,
+                "protocol_family": d.protocol_family,
+                "runtime_id": d.runtime_id,
             }
             for d in descriptors.values()
         ],

@@ -57,6 +57,22 @@ _MAX_REFERENCES = 20
 _DETAILS_MAX_CHARS = 2000
 _MAX_CHECKED_ITEMS = 10
 
+# Verb phrases that mark a line as asking for something NEW to be created.
+# When every line mentioning a missing token is a creation request, the
+# absence of that token is the expected starting state, not a broken
+# premise (see module docstring: a missing path is not a hard block).
+_CREATION_LINE_RE = re.compile(
+    r"\b(create|creates|created|implement|add|adds|added|write|writes|"
+    r"generate|produce|build|scaffold|new file|from scratch|"
+    r"创建|新建|实现|编写|生成|新增|从零)\b",
+    re.IGNORECASE,
+)
+
+
+def _line_requests_creation(line: str) -> bool:
+    """Return True when the line asks for new files to be created."""
+    return bool(_CREATION_LINE_RE.search(line))
+
 
 def extract_referenced_paths(text: str | None) -> list[str]:
     """Pull plausible repository paths out of free-form issue text.
@@ -166,7 +182,22 @@ def check_issue_premise(issue: Any, workspace_root: Path | str | None) -> list[s
     references = extract_referenced_paths(text)
     if not references:
         return []
-    return find_missing_paths(workspace_root, references)
+    missing = find_missing_paths(workspace_root, references)
+    if not missing:
+        return missing
+    # A token whose every mention sits on a creation-intent line is a file
+    # the issue asks to bring into existence — its absence is the expected
+    # starting state. Only a token cited on a non-creation line (e.g. a
+    # claimed crash site) still counts as a suspicious missing premise.
+    lines = text.splitlines()
+    return [
+        path
+        for path in missing
+        if any(
+            path in line and not _line_requests_creation(line)
+            for line in lines
+        )
+    ]
 
 
 def build_premise_block(missing: list[str]) -> str:

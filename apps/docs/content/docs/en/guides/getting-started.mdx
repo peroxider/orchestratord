@@ -1,0 +1,46 @@
+---
+title: Getting started
+description: Install, configure, and launch your first runtime.
+---
+
+orchestratord is a daemon that fronts a fleet of CLI coding agents. This guide
+walks through installing the daemon, discovering installed agent backends, and
+registering a runtime so the Web client can drive them.
+
+## Prerequisites
+
+- Python 3.11+ (the daemon is FastAPI + async SQLAlchemy).
+- One or more supported agent CLIs on `PATH` (e.g. `copilot`, `cursor`,
+  `kimi`, `qwen`).
+- Optional: PostgreSQL 17 for persistence (in-memory mode works without it).
+
+## Install
+
+```bash
+./install.sh
+```
+
+The installer probes your environment for supported binaries and reports the
+backends it found, along with their capability matrix.
+
+## Configure
+
+Copy the reference configuration and point the daemon at your workspace:
+
+```bash
+export ORCHESTRATORD_DATABASE_URL=postgresql+asyncpg://multica:multica@127.0.0.1:5432/multica
+```
+
+When `ORCHESTRATORD_DATABASE_URL` is unset, the daemon falls back to an
+in-memory store — convenient for local experimentation.
+
+## Register a runtime
+
+Run the register flow from the Web client (Runtimes page) or the CLI. On
+successful registration the daemon returns a one-time plaintext token; store
+it safely — only its hash is persisted, and it is never shown again.
+
+## Next steps
+
+- [Conventions](/en/docs/developers/conventions) — the terminology shared by the
+  Web client and these docs.

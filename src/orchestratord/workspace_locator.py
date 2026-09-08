@@ -210,6 +210,9 @@ def write_orchestrator_metadata(
     workspace_root: str | Path,
     workflow_path: str | None = None,
     started_at: float | None = None,
+    backend_name: str | None = None,
+    runtime: dict | None = None,
+    api_port: int | None = None,
 ) -> Path:
     """Write orchestrator metadata for later CLI discovery.
 
@@ -218,6 +221,12 @@ def write_orchestrator_metadata(
     Args:
         workspace_root: The orchestrator's workspace root
         workflow_path: Optional path to WORKFLOW.md (for project identification)
+        backend_name: Optional execution backend identifier (``--backend`` /
+            BackendRunner name) so ``server status`` can show what runs issues
+        runtime: Optional display summary of the agent/polling/sandbox config
+            (provider, model, permission_mode, concurrency, approval policy)
+        api_port: Optional port of the API server embedded in the daemon
+            (``--serve-api``), disclosed by ``server status``
 
     Returns:
         Path to the metadata file written
@@ -270,6 +279,14 @@ def write_orchestrator_metadata(
         "project_slug": project_slug or slug,
         "workflow_path": str(workflow_path) if workflow_path else None,
     }
+    # Optional launch context — omitted entirely for legacy callers so the
+    # metadata shape only grows when the daemon can actually fill it.
+    if backend_name is not None:
+        data["backend"] = backend_name
+    if runtime:
+        data["runtime"] = runtime
+    if api_port is not None:
+        data["api_port"] = api_port
 
     metadata_file.write_text(
         json.dumps(data, indent=2, ensure_ascii=False),

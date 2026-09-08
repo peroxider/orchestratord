@@ -52,6 +52,22 @@ class BackendDescriptor:
     """拥有此 runtime 的 orchestratord-* 包名（带连字符）。"""
     capabilities: frozenset[str]
     """声明的 capability 位名（不含 ``None`` 默认）。如 ``frozenset({"streaming_deltas"})``。"""
+    protocol_family: str | None = None
+    """协议家族（protocol family）标识 — 与 ``family``（家族分类）分离。
+
+    一个 protocol family 可承载多个 runtime id（如 ACP 家族下的 grok /
+    codebuddy / qwenpaw / qodercli / qoderclicn / deveco）。见 §8.4。
+    """
+    runtime_id: str | None = None
+    """该 runtime 派生自的**源 runtime id**（如 ``"omp"`` 派生自 ``"pi"``）。
+
+    参照 multica ``BuiltinRuntime``（``server/pkg/agent/builtin_runtimes.go:18-70``）：
+    一个 builtin runtime 身份复用既有 protocol family 的线级实现，仅覆盖
+    命令名 / skills 目录 / 模型发现等外壳。声明 ``runtime_id`` 后，
+    :func:`orchestratord.backend_registry.resolve_backend` 在本 descriptor
+    的 ``backend_package`` 未注册实现类时回落到源 runtime 的实现。
+    ``None`` 表示自身即源 runtime。见 §8.2.2。
+    """
     cli_command: str | None = None
     """若走 CLI：``subprocess.Popen`` 第一参数；``InProcess`` 留空。"""
     cli_args_probe: tuple[str, ...] = ()

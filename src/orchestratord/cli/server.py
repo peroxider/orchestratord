@@ -208,6 +208,24 @@ def add_server_parser(
         help=argparse.SUPPRESS,
     )
     start_parser.add_argument(
+        "--serve-api",
+        dest="serve_api",
+        action="store_true",
+        help=(
+            "Embed the FastAPI HTTP surface (as in `orchestratord serve`) "
+            "in this daemon process, sharing the BackendRunner with the "
+            "orchestrator (binds 127.0.0.1)"
+        ),
+    )
+    start_parser.add_argument(
+        "--api-port",
+        dest="api_port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Port for --serve-api (default: 9000)",
+    )
+    start_parser.add_argument(
         "--backend",
         type=str,
         required=True,
@@ -445,6 +463,89 @@ def _format_uptime(started_at: float) -> str:
         return f"{hours}h {minutes}m"
 
 
+_REGISTRY_COUNT_ORDER = (
+    "pending",
+    "running",
+    "pending_review",
+    "completed",
+    "verification_failed",
+    "failed",
+    "abandoned",
+    "cancelled",
+)
+
+
+def _registry_counts_line(workspace_root: str | None) -> str | None:
+    """One-line issue tally from the workspace registry, for ``server status``.
+
+    Pure read of ``<workspace_root>/.orchestratord_issue_registry.json``
+    (flat ``{issue_id: record}``, lowercase status strings). Returns None
+    when there is nothing trustworthy to show — no file, unreadable, or
+    unexpected shape — so a registry problem never breaks ``status``.
+    """
+    if not workspace_root or workspace_root == "unknown":
+        return None
+    registry_path = Path(workspace_root) / ".orchestratord_issue_registry.json"
+    if not registry_path.is_file():
+        return None
+    try:
+        data = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not data:
+        return "none registered"
+    counts: dict[str, int] = {}
+    for rec in data.values():
+        status = str(rec.get("status", "unknown")) if isinstance(rec, dict) else "unknown"
+        counts[status] = counts.get(status, 0) + 1
+    parts = [f"{s}={counts[s]}" for s in _REGISTRY_COUNT_ORDER if counts.get(s)]
+    parts += [
+        f"{s}={n}" for s, n in sorted(counts.items()) if s not in _REGISTRY_COUNT_ORDER
+    ]
+    return " · ".join(parts)
+
+
+def _runtime_lines(meta: dict) -> list[str]:
+    """Render backend / agent / concurrency / API lines from launch context.
+
+    Older daemons persist none of these fields; each line appears only
+    when its source data exists, keeping ``status`` output backward
+    compatible.
+    """
+    lines: list[str] = []
+    backend = meta.get("backend")
+    if backend:
+        lines.append(f"  Backend        : {backend}")
+    runtime = meta.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    agent_bits: list[str] = []
+    provider_model = "/".join(
+        str(p) for p in (runtime.get("provider"), runtime.get("model")) if p
+    )
+    if provider_model:
+        agent_bits.append(provider_model)
+    if runtime.get("permission_mode"):
+        agent_bits.append(f"permission_mode={runtime['permission_mode']}")
+    if runtime.get("approval_policy"):
+        agent_bits.append(f"approval={runtime['approval_policy']}")
+    if agent_bits:
+        lines.append(f"  Agent          : {' · '.join(agent_bits)}")
+    conc_bits: list[str] = []
+    if runtime.get("max_concurrent_agents") is not None:
+        conc_bits.append(f"{runtime['max_concurrent_agents']} concurrent agent(s)")
+    if runtime.get("poll_interval_ms") is not None:
+        conc_bits.append(f"poll every {runtime['poll_interval_ms']}ms")
+    if conc_bits:
+        lines.append(f"  Concurrency    : {' · '.join(conc_bits)}")
+    api_port = meta.get("api_port")
+    if api_port:
+        lines.append(f"  API            : http://127.0.0.1:{api_port}")
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # server status
 # ---------------------------------------------------------------------------
@@ -475,6 +576,11 @@ def _run_status(args: argparse.Namespace) -> int:
         print(f"  Workspace root : {workspace_root}")
         if workflow_path:
             print(f"  Workflow       : {workflow_path}")
+        for _line in _runtime_lines(meta):
+            print(_line)
+        counts_line = _registry_counts_line(workspace_root)
+        if counts_line:
+            print(f"  Issues         : {counts_line}")
         print(f"  Metadata       : {meta_path}")
     else:
         stale_age = _format_uptime(started_at) if started_at else "unknown"
@@ -844,6 +950,8 @@ def _run_start(args: argparse.Namespace) -> int:
         gateway_origin=getattr(args, "gateway_origin", None),
         gateway_sock=getattr(args, "gateway_sock", None),
         backend=getattr(args, "backend", None),
+        serve_api=getattr(args, "serve_api", False),
+        api_port=getattr(args, "api_port", None),
     )
 
 
@@ -1112,11 +1220,14 @@ def _run_orchestrator(
     gateway_origin: str | None = None,
     gateway_sock: str | None = None,
     backend: str | None = None,
+    serve_api: bool = False,
+    api_port: int | None = None,
 ) -> int:
     """Launch the orchestrator with a workflow file.
 
     This is the core launch entry point. Supports optional embedded
-    dashboard status printing.
+    dashboard status printing and an embedded FastAPI server sharing the
+    BackendRunner (``serve_api``).
     """
     import asyncio
     import logging
@@ -1230,9 +1341,24 @@ def _run_orchestrator(
     if spi_backend is not None:
         print(f"  backend={backend} ({spi_backend.display_name})")
 
+    _api_port = api_port if api_port is not None else 9000
+    if serve_api:
+        print(f"  api=http://127.0.0.1:{_api_port} (shared BackendRunner)")
+
     subsystem = IssueToPrApplication(
         config, workflow_yaml_path=workflow_yaml_path, backend=spi_backend
     )
+
+    api_server = None
+    if serve_api:
+        # Same-process API sharing the orchestrator's BackendRunner: the
+        # sessions router forwards operator decisions to the very runner
+        # executing issues instead of degrading to DB-only mode.
+        from orchestratord.api.embedded import build_embedded_server
+        from orchestratord.api.runtime import set_api_port
+
+        set_api_port(_api_port)
+        api_server = build_embedded_server(subsystem.agent_runner, _api_port)
 
     # Fix 2: write the real daemon PID to <workspace>/daemon.pid
     # so external tools (cron monitor, stop scripts) can locate the
@@ -1320,6 +1446,28 @@ def _run_orchestrator(
                 # The daemon can still run and clean up through normal
                 # cancellation/atexit paths.
                 break
+        api_task = None
+        if api_server is not None:
+            from orchestratord.api.embedded import serve_contained
+
+            api_task = asyncio.create_task(serve_contained(api_server))
+
+            def _log_api_exit(task: asyncio.Task) -> None:
+                if task.cancelled() or api_server is None:
+                    return
+                if not api_server.started:
+                    # Startup failure (e.g. port already bound) was logged
+                    # by serve_contained; stop advertising the dead surface
+                    # so the next heartbeat drops api_port from metadata.
+                    from orchestratord.api.runtime import set_api_port
+
+                    set_api_port(None)
+                    return
+                exc = task.exception()
+                if exc is not None and not api_server.should_exit:
+                    logger.error("Embedded API server exited early: %r", exc)
+
+            api_task.add_done_callback(_log_api_exit)
         im_task = None
         if im_client_wrapper is not None:
             im_task = asyncio.create_task(im_client_wrapper._heartbeat_loop())
@@ -1330,6 +1478,13 @@ def _run_orchestrator(
             await subsystem.shutdown()
             raise
         finally:
+            if api_server is not None:
+                api_server.should_exit = True
+            if api_task is not None and not api_task.done():
+                with __import__("contextlib").suppress(
+                    asyncio.CancelledError, asyncio.TimeoutError
+                ):
+                    await asyncio.wait_for(api_task, timeout=5.0)
             if im_task is not None and not im_task.done():
                 im_task.cancel()
                 with __import__("contextlib").suppress(asyncio.CancelledError):

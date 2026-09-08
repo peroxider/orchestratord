@@ -87,6 +87,8 @@ def test_descriptor_has_required_fields() -> None:
         "family",
         "backend_package",
         "capabilities",
+        "protocol_family",
+        "runtime_id",
         "cli_command",
         "cli_args_probe",
         "env_prefix",
@@ -128,6 +130,7 @@ def test_descriptor_default_values_match_design() -> None:
     )
     assert minimal.cli_command is None
     assert minimal.cli_args_probe == ()
+    assert minimal.protocol_family is None
     assert minimal.env_prefix is None
     assert minimal.launch_header is None
     assert minimal.model_discovery == "user"

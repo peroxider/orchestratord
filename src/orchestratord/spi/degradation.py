@@ -69,6 +69,17 @@ class DegradingSession:
     def capabilities(self):
         return self._inner.capabilities
 
+    @property
+    def current_pid(self) -> int | None:
+        """PID of the inner session's in-flight child process, if any.
+
+        The live-session registry (§5.2.3) resolves the operator-control
+        process tree through this attribute; the wrapper must forward it
+        or per-turn backends (e.g. ``claude -p``) become invisible to
+        pause/resume/stop forwarding.
+        """
+        return getattr(self._inner, "current_pid", None)
+
     async def send(self, content):
         await self._inner.send(content)
 

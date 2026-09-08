@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "updated_at": "2026-09-07",
+  "comment": "USD per 1M tokens. Matched by exact id, then longest prefix (model ids often carry date suffixes), then `default`. Sources: provider price sheets; refresh when providers change pricing.",
+  "default": {
+    "input_per_mtok": 3.0,
+    "output_per_mtok": 15.0
+  },
+  "models": {
+    "claude-opus-4": {
+      "input_per_mtok": 15.0,
+      "output_per_mtok": 75.0
+    },
+    "claude-sonnet-4": {
+      "input_per_mtok": 3.0,
+      "output_per_mtok": 15.0
+    },
+    "claude-haiku-4": {
+      "input_per_mtok": 1.0,
+      "output_per_mtok": 5.0
+    },
+    "gpt-5": {
+      "input_per_mtok": 1.25,
+      "output_per_mtok": 10.0
+    },
+    "gpt-5-mini": {
+      "input_per_mtok": 0.25,
+      "output_per_mtok": 2.0
+    },
+    "o4-mini": {
+      "input_per_mtok": 1.1,
+      "output_per_mtok": 4.4
+    },
+    "gemini-2.5-pro": {
+      "input_per_mtok": 1.25,
+      "output_per_mtok": 10.0
+    },
+    "gemini-2.5-flash": {
+      "input_per_mtok": 0.3,
+      "output_per_mtok": 2.5
+    },
+    "deepseek-chat": {
+      "input_per_mtok": 0.27,
+      "output_per_mtok": 1.1
+    },
+    "deepseek-reasoner": {
+      "input_per_mtok": 0.55,
+      "output_per_mtok": 2.19
+    },
+    "kimi-k2": {
+      "input_per_mtok": 0.6,
+      "output_per_mtok": 2.5
+    },
+    "glm-4.6": {
+      "input_per_mtok": 0.6,
+      "output_per_mtok": 2.2
+    },
+    "qwen3-coder": {
+      "input_per_mtok": 0.4,
+      "output_per_mtok": 1.6
+    }
+  }
+}

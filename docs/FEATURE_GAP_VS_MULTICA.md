@@ -1,8 +1,10 @@
 # orchestratord vs multica — 特性缺口开发文档
 
-> 状态：草案 v1  
-> 作者：orchestratord 团队  
-> 范围：在保留 orchestratord 现有架构优势（能力矩阵 / SPI / agent-callable Skills / in-process 多 agent 模式）的前提下，补齐 multica 已成熟的产品化形态。客户端形态仅补 Web，Desktop 与 Mobile 暂不实现。
+> 状态：v2（实测同步 + 单用户模式决策）
+> 作者：orchestratord 团队
+> 取代：v1（2026-09-04 草案，§14 变更记录）
+> 配套：`docs/FEATURE_GAP_VS_MULTICA_DETAILED.md`（实测文件/行数/路由/能力对照）
+> 范围：在保留 orchestratord 现有架构优势（能力矩阵 / SPI / agent-callable Skills / in-process 多 agent 模式）的前提下，**以单用户模式**补齐 multica 重要的可视化与实时特性。客户端形态仅 Web；Desktop 与 Mobile 暂不实现（D5）。
 
 ---
 
@@ -10,87 +12,135 @@
 
 ### 0.1 文档目的
 
-orchestratord 已完成 M0–M5，6 个后端（clawcodex / claude / codex / dsh / hermes / opencode），463 测试通过；但当前形态是"开发者向的 Python 编排内核"，缺少产品化外壳。multica 是"产品向的 AI 任务管理平台"，完整支撑团队协作。本文档定义**如何把 multica 的产品形态以 Web 客户端的方式嫁接到 orchestratord 上**，同时**严格保留 orchestratord 的架构优势**。
+v1 是"空地规划"——草案阶段 describe 一个完整产品形态。v2 同步了**当前代码实际状态**：Phase 0–2 的 FastAPI / PostgreSQL / WebSocket / Next.js 骨架、15 个 backend 包、`packages/{core,ui,views}` 视图层已落地，但实现深度仅是路由级 stub，Phase 3–5（chat / Slack-Lark OAuth / 调度器 / 拖拽看板 / 多 agent 模式可视化 / 真 ACP 适配）几乎未动工。v2 重新划定单用户模式下的优先级，把"Realtime + session control core"作为 Phase A，把其他维度排到后续 Phase。
 
 ### 0.2 与既有文档的关系
 
-- 本文档**不替代** 既有 SPI 设计（已冻结的能力位 / 5-family taxonomy）
-- 本文档**是** 产品层补充，专门解决"如何让团队用户在不放弃底层架构优势的前提下使用 orchestratord"
-- 涉及的 backend 覆盖（缺口 20 个）会与 `DESIGN_backends_hardening.md` 中的 dsh / codex / opencode / hermes 演进保持锁步
+- **本文件** = 单用户模式下的产品规划；含范围、保留约束、阶段路线、验收
+- `docs/FEATURE_GAP_VS_MULTICA_DETAILED.md` = v1 同期实测对比（文件 / 行数 / 路由 / backend 协议族覆盖率）
+- `docs/FEATURE_UNIFIED_CONVERSATION_ID.md` = 跨后端 conversation 同一性方案
+- 涉及的 backend 覆盖（缺口）会与 `DESIGN_backends_hardening.md` 保持锁步
 
-### 0.3 同期决策
+### 0.3 v2 同期决策
 
-**D5 — Web 客户端形态选型**：仅 Web，不补 Desktop / Mobile（社区自建或后续评估）。  
-**D6 — 数据库选型**：PostgreSQL 17（与 multica 同主版本，复用生态：`pgcrypto`、`pg_trgm`）。  
-**D7 — Web 后端框架**：FastAPI（与现有 Python 一致，原生 OpenAPI + WebSocket + SSE）。  
-**D8 — Web 前端框架**：Next.js 16 App Router + TanStack Query + Zustand（与 multica 共享心智模型，但不分 desktop / mobile 包）。  
+| ID | 决策 | 理由 |
+| --- | --- | --- |
+| **D5** | 仅 Web 客户端；Desktop / Mobile 不做 | electron-builder 与 Expo + App Store 发布链路另立专项 |
+| **D6** | PostgreSQL 17（含 `pgcrypto` / `pg_trgm`） | 与 multica 同主版本，扩展生态一致 |
+| **D7** | Web 后端框架 = FastAPI | 与 Python 一致；原生 OpenAPI + WebSocket + SSE |
+| **D8** | Web 前端框架 = Next.js 16 App Router + TanStack Query + Zustand | 与 multica 共享心智模型 |
+| **D9** | **单用户模式**为当前阶段基线 | 多租户 / 多用户场景暂不补（见 §4） |
+| **D10** | 多租户**数据层**保留，**UI 不暴露** | 后续切换多用户时不需要数据迁移 |
+| **D11** | Phase A = Realtime + session control core | 用户在 2026-09-07 选定 |
+
+### 0.4 v2 优先级（单用户模式）
+
+| 优先级 | 维度 | 来源（multica） | 章节 |
+| --- | --- | --- | --- |
+| **Phase A** | 真 WebSocket pub/sub + 会话控制（approve / deny / pause / resume / stop）+ 拖拽看板 + 多 agent 模式可视化 | §5.4 / §5.2.3 / §5.2.1 | §5 |
+| Phase B | 通讯层：workspace-level chat + mention 路由 + Slack/Lark 真 OAuth + 通知推送 | §7.4 / §7.5 | §6 |
+| Phase C | 调度与可观测：autopilot scheduler + token cost 估算 + 用量聚合 + inbox 详情 | §7.3 / §5.2.4 / §5.2.6 | §7 |
+| Phase D | 后端协议覆盖：落地 `orchestratord-acp` 通用适配 + `protocol_family` / `runtime_id` 分离 + 5 个 stub backend 补齐 | §8 | §8 |
+| Phase E | 文档站深耕 + i18n 三语 + 测试烟囱 | §5.6 | §9 |
 
 ---
 
 ## 1. 范围与非目标
 
-### 1.1 In scope
+### 1.1 In scope（本期 v2 周期）
 
-| 项 | 内容 |
+| 项 | 内容 | 章节 |
+| --- | --- | --- |
+| 单用户模式开关 | Web 端默认进入唯一 workspace，URL `slug` 与 `workspace_id` 一致 | §4.1 |
+| 真 WebSocket pub/sub | topic-based 转发 daemon → server → browser，in-process `asyncio.Queue` 单实例 | §5.1 |
+| 会话控制（端到端） | `POST /api/sessions/{id}/{approve,deny,pause,resume,stop}` 接 `BackendRunner` + capability 校验 | §5.2 |
+| 拖拽看板 | `@dnd-kit` 在 kanban 列间拖动触发 `PATCH /issues/{id} { status }` 乐观更新 | §5.3 |
+| 多 agent 模式可视化 | pipeline / debate / swarm / coordinator / single 各自专属渲染 | §5.4 |
+| 工具调用卡片 | `TOOL_CALL` + `TOOL_RESULT` 染色卡片、4KB 截断、`transcript-dialog` 浮层 | §5.5 |
+| Web provider tree 补全 | `QueryClientProvider` + `I18nProvider` + `ThemeProvider` + `AuthGate` | §5.6 |
+| **Runtime 机器接入** | daemon PATH 探测 + 自定义运行时配置 + task env 注入（5 个集成契约）+ `workspaces_root` + 私有/公开 visibility + 并发上限 | §4.4 |
+| 多租户数据层保留 | `workspaces / members / squads / projects / tokens / audit` 表与 router 保留，**路由层不暴露** | §4.2 |
+| 测试烟囱 | 真 agent CLI 烟雾测试走 `agentintegration` build tag；CI drift detector 锁住 `BackendCapabilities` | §11 |
+
+### 1.2 Out of scope（v2 明确不做）
+
+| 项 | 不做的理由 | 章节 |
+| --- | --- | --- |
+| **多租户 / 多用户 UI** | D9；多租户数据层已建好但本期 UI 不暴露 | §4 |
+| Desktop 客户端 | D5 | — |
+| Mobile 客户端 | D5 | — |
+| SaaS / 商业化 / billing | 仅做自托管；`entitlement` 表预留 | §4.3 |
+| 全部 20 个剩余 CLI | 只补 5 个 stub backend 真翻译 + 落地 ACP 通用包 | §8 |
+| 自定义 runtime profile 协议白名单 | 复用 `SupportedTypes` 内置集合 | §8.4 |
+| 多 VCS 后端 | GitHub only；GitLab / Gitea / Forgejo 后置 | §7.5 |
+| 通知渠道 ≥ 3 | Slack / Lark 起步；DingTalk / WeCom / Telegram 后置 | §6.5 |
+**multica 独占 / orchestratord v2 明确放弃的可视化能力**（Phase E 之后逐项评估）：
+
+| 能力 | multica 实现位置 |
 | --- | --- |
-| Web 客户端 | Next.js 16 单端应用，含完整路由组与设计系统 |
-| Web 后端 API | FastAPI app，复用现有 Python 模块（daemon / workflow / SPI / skills），不重写 |
-| 持久化 | PostgreSQL 17 引入；事件日志 + run/session/event 三表起步 |
-| 实时 | WebSocket 为主，SSE 保留为单用户 / 内网降级 |
-| 多租户 | workspaces + member / agent assignee + 角色（owner/admin/member） |
-| 协作层 | squads / projects / skills / autopilots / mentions 的后端实体 + Web 页面 |
-| 后端覆盖 | 把 6 个后端补到 12 个（再补 6 个最常用的） |
-| VCS 集成 | GitHub / GitLab（multica 的 Gitea / Forgejo 留作后置） |
-| 通知渠道 | Slack / Lark 适配器；DingTalk / WeCom / Telegram 留作后续 |
-| 文档 | Fumadocs 风格的 Web 文档站点（中英双语） |
+| Gantt 视图 | `packages/views/issues/components/gantt-view.tsx` |
+| 批量操作工具栏 | `packages/views/issues/components/batch-action-toolbar.tsx` + `.confirm.test.tsx` |
+| Task transcript 浮层对话框（含 diff-highlight） | `packages/views/common/task-transcript/{agent-transcript-dialog,build-timeline,run-timeline,diff-highlight}.{ts,tsx}` |
+| 多态 assignee picker（member / agent 单选组件） | `packages/views/issues/components/board-card-assignee-picker.tsx` |
+| Comment-trigger-chips（评论触发器） | `packages/views/issues/components/comment-trigger-chips.tsx` |
+| Tiptap 富文本编辑器 + 扩展 | `packages/views/editor/{extensions,hooks,styles,utils}/` |
+| Onboarding 多步编排（templates / steps / components） | `packages/views/onboarding/{steps,templates,components}/` |
+| Command palette + Floating chat | `packages/views/search/` + `packages/views/chat/floating-chat.tsx` |
+| Inbox 三类子视图（APPROVAL_REQUEST / failure / clarification） | `packages/views/inbox/components/` |
+| Runtime daily/weekly charts | `packages/views/runtimes/components/charts/{daily,weekly}-tasks-chart.tsx` |
+| Audit 页（web 专属，与 sessions/agents 等共享域不同） | `apps/web/app/[workspaceSlug]/(dashboard)/audit/` |
+| 富文本 attachments / labels / invitations / invite 域 | `packages/views/{attachments,labels,invitations,invite}/` |
 
-### 1.2 Out of scope（明确不做）
+v2 周期内不补这些 —— 单用户模式（D9）+ Realtime/session-control（Phase A）+ 后端协议覆盖（Phase D）已是 v2 全部投入；multica 形态上的体验特性留到 Phase E 之后或社区自建。
 
-| 项 | 不做的理由 |
-| --- | --- |
-| Desktop 客户端 | D5；electron-builder 与平台签名不在本期投入产出比之内 |
-| Mobile 客户端 | D5；Expo + App Store 发布链路另立专项 |
-| SaaS / 商业化 | 仅做自托管；计费 / 配额不实现，留接口（entitlement 表预留） |
-| 全部 20 个剩余 CLI | 只补 6 个最常用；剩下按"每个 backend 一个 PR"的节奏滚动 |
-| 自定义 runtime profile | Multica 的 `runtime_profile.protocol_family` 自定义白名单功能本期不做，复用 `SupportedTypes` 内置集合 |
-| 多 VCS 后端 | GitHub / GitLab 二选一，先做 GitHub |
-| 通知渠道 ≥ 3 个 | Slack / Lark 起步；DingTalk / WeCom / Telegram 后置 |
+| `apps/desktop` / `apps/mobile` | D5 | — |
 
 ---
 
-## 2. 缺口总览
+## 2. 缺口总览（v2 实测基线）
 
-| 维度 | 当前 orchestratord | multica 形态 | 缺口 |
-| --- | --- | --- | --- |
-| Web 客户端 | 单文件嵌入式 LiveView（`cli/dashboard.py`，2306 行） | Next.js 16 完整应用 | 严重 |
-| 多客户端形态 | 单进程同端口 | Web + Desktop + Mobile | 严重（Web 优先） |
-| 多租户 | 单进程单工作区 | workspaces + 角色 + access scopes | 严重 |
-| 持久化 | 事件日志 + control socket | PostgreSQL 17 + Redis relay | 严重 |
-| 实时 | SSE 单向 | WebSocket 双向 | 半缺 |
-| 后端覆盖 | 6 个 | 26 个 | 中等 |
-| 协作抽象 | 5 个 in-process 模式 | Squads / Projects / Autopilots | 中等 |
-| 多 VCS | 单一 issue→PR（Linear） | GitHub / GitLab / Gitea / Forgejo | 中等 |
-| 通知渠道 | 通用 HTTP 桥 | Slack / Lark / DingTalk / WeCom / Telegram | 中等 |
-| 计费 / 配额 | 无 | 完整 SaaS | 不做（D5） |
-| 文档站点 | `*.md` | Fumadocs + i18n | 半缺 |
+> 与 v1 §2 的差异：用"已落地"vs"未落地"重新打分。
 
-详细差距见 §5（Web）、§6（后端）、§7（协作）、§8（后端覆盖）。
+| 维度 | 当前 orchestratord（v2 实测） | multica 形态 | 缺口 | 章节 |
+| --- | --- | --- | --- | --- |
+| Web 客户端 | `apps/web` 14 个 stub 页面（每页 ≤ 61 行） + `packages/views` 35 个文件 | `apps/web` 28 个 .tsx/.tsx（含 `issues/[id]`） + `packages/views` 1050 个文件 | 严重 | §5 |
+| **多客户端形态** | 仅 Web | Web + Desktop + Mobile | 严重（仅 Web 优先） | D5 |
+| **多租户** | 数据层已建（24 张表含 `workspaces`/`members`/`squads`/`projects`/`tokens`/`audit`），API router 18 个，UI **不暴露**（D10） | workspaces + 角色 + access scopes | 单用户模式（D9）下不补 | §4 |
+| 持久化 | PostgreSQL 17（已就位）+ 42 个 alembic migrations | PostgreSQL 17 + 120+ migrations + sqlc | **持平** | §4.3 |
+| **Runtime（机器/守护进程）** | 仅 Runtime 实体 + WS heartbeat 30s 骨架（`domain/runtime.py` 87 行 + `runtime/live_registry.py` 86 行 + `api/routers/runtimes.py` 149 行）；**无 daemon 端 PATH 扫描、自定义运行时配置、task env 注入、`workspaces_root`、私有/公开 visibility、并发上限** | daemon 启动 PATH 扫描 26 个 CLI + 自定义运行时配置（协议族 + 固定参数 + 命令转义 + 协议 flag 剔除 + 模型覆盖）+ 5 个集成契约 env var（`MULTICA_TOKEN` / `MULTICA_TASK_ID` / `MULTICA_AGENT_ID` / `MULTICA_WORKSPACE_ID` / `MULTICA_SERVER_URL`）+ `workspaces_root` 三级覆盖（flag > `MULTICA_WORKSPACES_ROOT` env > profile）+ 私有/公开 runtime + 15s 心跳 / 3min 离线宽限 / 7 天自动清理 + daemon 全局并发默认 20 / 单 agent 默认 6 | **严重** | §4.4 |
+| **实时** | WS 路由 stub（`/ws` heartbeat + subscribe/unsubscribe）；SSE 旧 LiveView 1464 行仍可用 | WebSocket + topic-based pub/sub + 30s 心跳 | **严重** —— pub/sub backbone 未落地 | §5.1 |
+| **会话控制** | router stub（ack 响应，未接到 BackendRunner） | approve / deny / pause / resume / stop 全链路 | **严重** | §5.2 |
+| 后端覆盖 | 15 包（含 `orchestratord-acp`）；其中 5 个 stub（copilot/cursor/kimi/openclaw/reasonix/zeroclaw，296~302 行）；`kiro-cli` 仅 pyproject | 26 protocol family + 1 builtin runtime (`omp` → `pi`)；每个 family 平均深度 ~600 行 + 完整 test | 中等 | §8 |
+| 协作抽象 | 5 in-process modes（single/coordinator/pipeline/debate/swarm） | Squads / Projects / Autopilots | 单用户模式（D9）下 squads/projects 不补 UI；autopilots 保留 | §4 |
+| **多 VCS** | Linear + GitHub（router stub） | GitHub / GitLab / Gitea / Forgejo | GitHub only；其余后置 | §7.5 |
+| 通知渠道 | Slack / Lark adapter 已写（`notifications/adapters.py`），无 OAuth handshake | Slack / Lark / DingTalk / WeCom / Telegram 五件 | 中等 | §6.5 |
+| **chat** | ❌ 无 chat 域 | multica 完整 chat 模块（含 floating chat + mention 触发） | **严重** | §6.1 |
+| **mention 路由** | `parse_mentions()` 已写；`/mention` route 仅 ack | mention → 触发 agent session | **严重** | §6.2 |
+| **autopilot scheduler** | CRUD 已写；无调度循环 | APScheduler 周期触发 → 启动 workflow | **严重** | §7.1 |
+| **拖拽看板** | kanban toggle 在 UI，但列间拖动未实装 | `@dnd-kit` 拖动 + 乐观更新 | 中等 | §5.3 |
+| **多 agent 模式可视化** | 仅扁平 `event-timeline` | pipeline / debate / swarm / coordinator 各自拓扑 | 中等 | §5.4 |
+| **工具调用卡片** | `event-timeline` 通用渲染；无 4KB 截断、无 diff 着色、无 transcript 浮层 | transcript dialog + build-timeline + diff-highlight | 中等 | §5.5 |
+| Web provider tree | `CoreProvider` + `I18nProvider` 已挂；缺 `QueryClientProvider` / `ThemeProvider` / `AuthGate` | `web-providers.tsx` 三件套完整 | 中等 | §5.6 |
+| 计费 / 配额 | 无 | 完整 SaaS + entitlement | 不做（D5） | — |
+| 文档站点 | Fumadocs 骨架（`apps/docs`） | Fumadocs + i18n | 半缺（Phase E） | §9 |
+
+详细差距见 `docs/FEATURE_GAP_VS_MULTICA_DETAILED.md` §1、§2。
 
 ---
 
 ## 3. 必须保留的 orchestratord 优势特性
 
-> 这一节是约束，不是建议。任何"补 multica 的形态"不得削弱下列属性。
+> 约束。任何"补 multica 的形态"不得削弱下列属性。
 
 ### 3.1 SPI 与插件机制
 
 保留对象：
 
-- `src/orchestratord/spi/` 下的 `AgentBackend`、`AgentSession`、`BackendCapabilities`、`EventEnvelope`、`ApprovalPolicy` 五个文件
+- `src/orchestratord/spi/` 下的 `AgentBackend` / `AgentSession` / `BackendCapabilities` / `EventEnvelope` / `ApprovalPolicy`
 - `importlib.metadata` 解析 `orchestratord.backends` + `orchestratord.backend_descriptors` 双层 entry point
-- CI 强制 core 不直接 import 任何 backend 包
+- CI 强制 core 不直接 import 任何 backend 包（`tests/test_capability_drift.py` 守门）
 
-Web 层不能绕过 SPI：所有 agent 交互必须经过 `BackendRunner` → `AgentSession.events()` 流；不允许 Web 直接 fork agent 进程或读 backend 私有协议。
+Web 层不能绕过 SPI：所有 agent 交互必须经过 `BackendRunner` → `AgentSession.events()` 流；**不允许** Web 直接 fork agent 进程或读 backend 私有协议。
 
 ### 3.2 能力矩阵 + 中央强制降级
 
@@ -100,16 +150,19 @@ Web 层不能绕过 SPI：所有 agent 交互必须经过 `BackendRunner` → `A
 - `spi/degradation.py` 的 8 条降级路径
 - "backend 不得自降"原则
 
-Web 前端必须忠实呈现能力位：UI 上能展示"此 backend 当前不支持 streaming，是否降级为整段渲染"，而不是假设所有 backend 都流式输出。
+Web 前端必须忠实呈现能力位：
+
+- UI 上能展示"此 backend 当前不支持 streaming，是否降级为整段渲染"，而不是假设所有 backend 都流式输出
+- `CapabilityMatrix` 组件（已在 `packages/views/src/agents/`）继续作为权威渲染入口，**不**改为 multica 的可选项 token 字典
 
 ### 3.3 agent-callable Skills + 可验证引用
 
 保留对象：
 
-- `skills/builtin/*/SKILL.md` 的 YAML frontmatter（`name` / `description` 必需）
+- `src/orchestratord/skills/builtin/*/SKILL.md` 的 YAML frontmatter（`name` / `description` 必需）
 - `skills/builtin/*/references/source-map.md` 的 SHA256 锚点
-- `skills verify` CLI 与 `scripts/regen_source_map.py`
-- BackendRunner 在 session start 注入一行 / skill 索引到 system prompt
+- `skills verify` CLI + `scripts/regen_source_map.py`
+- `BackendRunner` 在 session start 注入一行 / skill 索引到 system prompt
 
 Web 前端的 Skills 页面**必须**显示每条 skill 的 source-map 引用状态（`verified` / `stale`），并提供"refresh hashes"按钮（在线调用 `scripts/regen_source_map.py` 或对应 Python 函数）。
 
@@ -117,18 +170,18 @@ Web 前端的 Skills 页面**必须**显示每条 skill 的 source-map 引用状
 
 保留对象：
 
-- `modes/` 下 5 个 `ModeRunner` 实现（`single` / `coordinator` / `pipeline` / `debate` / `swarm`）
+- `src/orchestratord/modes/` 下 5 个 `ModeRunner`（`single` / `coordinator` / `pipeline` / `debate` / `swarm`）
 - `ModeDecision` dataclass + `ModeSelector` 路由
 - `swarm_checkpoint.json` 检查点恢复机制
 - debate 模式的独立性约束（proposer 不得读对方输出）
 
-Web 前端的 Sessions 页面需要把"模式"作为 first-class 维度展示，并提供 pipeline / debate 的可视化（见 §5.4）。
+Web 前端的 Sessions 页面把"模式"作为 first-class 维度展示（见 §5.4），并提供 pipeline / debate / swarm / coordinator 各自的可视化。
 
 ### 3.5 一键 install.sh + 后端探测
 
 保留对象：
 
-- `install.sh` 的 6 backend 探测表（`clawcodex`/`claude`/`codex`/`dsh`/`hermes`/`opencode`）+ `auto-detect` 逻辑
+- `install.sh` 的 backend 探测表（当前 15 个 entry）+ `auto-detect` 逻辑
 - `--backends X,Y` / `--no-backends` / `--all-backends` / `--dry-run` 模式
 - `~/.orchestratord/venv` + `activate.sh` 隔离
 
@@ -142,280 +195,131 @@ Web 部署时 install.sh 需要扩展到：
 
 保留对象：
 
-- `cli/dashboard.py` 作为"零依赖开发者模式"继续可用
+- `src/orchestratord/cli/dashboard.py` 作为"零依赖开发者模式"继续可用
 - 内置事件 feed、SSE、chat UI
 
 Web 上线后这个 LiveView 仍要保留 1 个 release cycle（标记 deprecated），避免强制迁移破坏开发者机器。后续随 Web 稳定逐步下线。
 
 ---
 
-## 4. 必须从 multica 借鉴的优势特性
+## 4. 单用户模式决策（D9 / D10）
 
-multica 已经实现的、本期 orchestratord 要补齐的产品能力（按优先级）：
+> v2 关键决策。
 
-| 优先级 | 能力 | 来源（multica） | 实施位置 |
+### 4.1 单用户模式语义
+
+- Web 端**不暴露** `/workspaces/{slug}/...` URL 切换器；登录后默认进入 `default` workspace，URL 形如 `/default/...`
+- Web 端**不暴露** members / tokens / audit / squads / projects / invitations 路由
+- 多租户 API router（`members` / `tokens` / `audit` / `squads` / `projects`）**保留在 FastAPI app 内**，可被 CLI 或脚本调用，但**不进入** Web 侧菜单
+- 一个 install 默认创建一个 `default` workspace，单一 owner 角色（内部 marker，无 UI 暴露）
+
+### 4.2 多租户数据层保留清单
+
+| 表 / 路由 | 是否保留 | 理由 |
+| --- | --- | --- |
+| `workspaces` | 保留 | 后续切多用户不需要 schema migration |
+| `members` / `member_agent_scopes` | 保留（**仅种子 default owner**） | 同上 |
+| `auth_tokens` | 保留（**仅 daemon runtime token**，无 UI 暴露） | 同上；`/ws` token gate 用此表 |
+| `audit_log` | 保留（**Web 不暴露**，但 backend mutation 仍写） | 多用户切换时直接可用 |
+| `squads` / `squad_members` | 保留（**仅 Phase B 评估是否暴露**） | in-process modes 已覆盖单用户场景 |
+| `projects` / `project_repos` / `project_docs` | 保留（**仅 Phase B 评估是否暴露**） | 同上 |
+| `members` / `tokens` router | 保留 | 同上 |
+| `audit` / `vcs` router | 保留 | 同上 |
+
+**Web UI 不渲染的元素**（在 `apps/web/app/[workspaceSlug]/(dashboard)/layout.tsx` 中通过路由级白名单控制）：
+
+- `/members` → 不渲染入口（router 仍注册）
+- `/audit` → 不渲染入口
+- `/projects` → 不渲染入口（除非 Phase B 决策改）
+- `/squads` → 不渲染入口（同上）
+- workspace 切换器 → 不渲染
+
+**单用户数据种子**（在 `orchestratord serve` 首次启动时执行）：
+
+- 一个 `default` workspace（slug = `default`）
+- 一个 owner member（id = 固定 UUID `00000000-0000-0000-0000-000000000001`）
+- 一条 daemon runtime token（hash 存储，plaintext 仅一次性返回）
+
+### 4.3 数据层已就位（无需迁移）
+
+v2 周期开始时**已落地**的清单：
+
+- 42 个 alembic migrations（`0001_create_tables.py` 至 `0042_index_integrations_workspace_provider.py`）
+- DB 模型（`src/orchestratord/db/models/`）：`tenancy / agents / sessions / skills / inbox / collab / audit_auth / integrations / issues / vcs`
+- 域模型（`src/orchestratord/domain/`）：`workspace / member / agent / runtime / session / issue / skill / inbox / channel / project / squad / audit / auth_token / autopilot / integration / usage / mention`
+- 18 个 FastAPI router（`agents / audit / autopilots / channels / dashboard / inbox / integrations / issues / members / projects / realtime / runtimes / sessions / skills / squads / tokens / usage / vcs`，不含 `__init__.py`）
+- WebSocket `/ws` 协议骨架（heartbeat + subscribe/unsubscribe + ack）
+
+v2 周期**不重写**上述层，只在 Phase A–E 内填实现深度。
+
+### 4.4 Runtime 接入（multica `daemon-runtimes` 对齐）
+
+> **v2 周期新增章节**。multica 把"一台电脑 + 该电脑上的一款 AI 编程工具（或自定义运行时配置）"作为 first-class 抽象 —— **runtime**（守护进程文档 [`daemon-runtimes`](https://multica.ai/docs/zh/daemon-runtimes)）。runtime 与 agent 协议后端是两层独立抽象：协议后端决定"用什么 CLI 协议通信"，runtime 决定"在哪台机器、用哪条配置跑这个 CLI"。orchestratord 在协议层（SPI / entry-points / 26 SupportedTypes 对齐）已就绪，runtime/daemon 层几乎全缺；这是团队场景（多机器、多 workspace、wrapper 工具、固定版本 CLI）能否落地的关键。
+
+**v2 周期起点**（已落地）：
+
+- `src/orchestratord/domain/runtime.py`（87 行）：Runtime 实体 + 3 状态 enum（`ONLINE` / `OFFLINE` / `DISABLED`）+ token 合同（`issue_runtime_token` / `hash_runtime_token` / `verify_runtime_token`）
+- `src/orchestratord/runtime/live_registry.py`（86 行）：进程内 registry
+- `src/orchestratord/api/routers/runtimes.py`（149 行）：FastAPI 路由（含 token issue / heartbeat / 列表 / 详情）
+- WS heartbeat 30s（§5.1）
+
+**multica runtime 形态 / orchestratord v2 缺口**：
+
+| 维度 | multica | orchestratord v2 | 缺口 |
 | --- | --- | --- | --- |
-| P0 | workspaces + 角色 + 成员管理 | `apps/web/app/[workspaceSlug]/(dashboard)/members` | §6.1 |
-| P0 | issues 看板 / 列表 / 详情 / 评论 / 活动 timeline | `(dashboard)/issues` | §5.2.1 |
-| P0 | agent 实体（命名 / provider / runtime 绑定） | `(dashboard)/agents` | §6.2 |
-| P0 | runtime 机器接入 | `(dashboard)/runtimes` | §6.3 |
-| P0 | assignee 多态（member / agent） | `issue.assignee_type` + `assignee_id` | §5.2.1 |
-| P0 | execution log 时间线 + 工具调用重放 | `(dashboard)/tasks` 与 `tasks/[id]` | §5.2.3 |
-| P1 | token 用量聚合（按 agent / 按 issue / 按 workspace） | `(dashboard)/usage` | §5.2.4 |
-| P1 | squads（leader 路由 work 到 members） | `(dashboard)/squads` | §7.1 |
-| P1 | projects（关联 repo + docs 的工作集） | `(dashboard)/projects` | §7.2 |
-| P1 | skills 浏览（在 board 上展示，复用 §3.3 源） | `(dashboard)/skills` | §5.2.5 |
-| P1 | autopilots（cron-like 周期任务） | `(dashboard)/autopilots` | §7.3 |
-| P1 | Slack / Lark 通知 + mention 触发 | `apps/web/app/{slack,lark}` | §7.5 |
-| P2 | inbox（被 ping 才通知） | `(dashboard)/inbox` | §5.2.6 |
-| P2 | 文档站点（Fumadocs，中英双语） | `apps/docs` | §5.6 |
-| P2 | GitHub PR 视图 | `server/internal/integrations/github` | §6.5 |
-| P3 | GitLab VCS | multica 的 GitLab 适配器 | §6.5 |
-| P3 | DingTalk / WeCom / Telegram | multica 对应适配器 | §7.5 |
+| **守护进程启动 PATH 探测** | daemon 启动扫描 26 个 CLI；为有权 workspace 注册 runtime | ❌ 无（`install.sh` 一次性探测；无运行时重扫） | **严重** |
+| **自定义运行时配置** | 创建时选协议族 + 固定参数（命令、引号转义、协议 flag `-p` / `--output-format` / `--input-format` / `--permission-mode` 剔除、模型覆盖、参数禁管道/重定向/`&&`/`;`/反引号/env 展开） | ❌ 无（仅 entry-points 机制） | **严重** |
+| **Task env 集成契约（5 个不可覆盖）** | `MULTICA_TOKEN` / `MULTICA_TASK_ID` / `MULTICA_AGENT_ID` / `MULTICA_WORKSPACE_ID` / `MULTICA_SERVER_URL` —— agent 自定义环境无法覆盖 | ❌ 无 env 注入机制 | **严重** |
+| **Task env 仅供参考（5+ 个）** | `MULTICA_TASK_CONFIG_ROOT` / `MULTICA_TASK_WORKSPACES_ROOT` / `MULTICA_AGENT_NAME` / `MULTICA_DAEMON_PORT` / `MULTICA_TASK_SLOT` / `TMPDIR` 等 | ❌ 无 | 中等 |
+| **`workspaces_root` 三级覆盖** | flag > `MULTICA_WORKSPACES_ROOT` env > profile 配置；修改根目录不迁移已有执行目录 | ❌ 无 workspaces 根概念 | **严重** |
+| **心跳 / 离线宽限期** | 15s 心跳；3 分钟内显示离线；7 天无 agent 绑定自动清理 | 30s WS heartbeat 骨架；无宽限期 / 自动清理 | 中等 |
+| **并发上限** | daemon 全局默认 20 + 单 agent 默认 6（取较小）；env `MULTICA_DAEMON_MAX_CONCURRENT_TASKS` 可调 | ❌ 无运行时配额 | 中等 |
+| **私有 / 公开 visibility** | 私有 = 仅 owner 能用其建 agent（admin 也不行）；公开 = 成员可路由但不分享登录凭据 | ❌ 无 visibility 概念（D9 单用户模式下不显现，但数据层需保留 `visibility` 字段） | 中等 |
+| **离线排队恢复** | runtime 离线时 queue 不失败；宽限期满 + 仍排队满才失败 | ❌ 无 | 中等 |
+| **Runtime UI** | Multica Desktop 列出 hostname + 在线状态 + 各 CLI 探测结果 + 自定义配置入口 | `packages/views/src/runtimes/runtimes-list.tsx` + `runtimes/{id}/page.tsx` 路由已占位但 stub | 中等（v2 §7.4 之后评估） |
+
+**v2 周期取舍**：
+
+| 子节 | 落地时机 | 范围 |
+| --- | --- | --- |
+| §4.4.1 **必做 / Phase A 同期** | daemon 启动 PATH 扫描（CLI 列表 → backend dispatch 映射）+ 5 个 Task env 集成契约注入（参考 multica `MULTICA_*` 命名空间）+ `workspaces_root` 三级覆盖 + daemon 全局并发默认 20（单 agent 并发走 `parallel_sessions` capability 已有机制） |
+| §4.4.2 **必做 / Phase A 同期** | 自定义运行时配置（协议族 + 命令字段 + 引号 / 反斜杠转义 + 协议 flag 剔除 + 模型覆盖；参数语义限制同 multica）—— 这正是企业部署的核心场景；不补等于把"团队内部 wrapper / 固定版本可执行文件 / 兼容工具追加参数"挡在门外 |
+| §4.4.3 **后置 / Phase D 同期** | 私有/公开 `visibility` 字段（单用户模式 D9 下不显现，但数据层 alembic migration 必加，便于多用户切换直接启用） |
+| §4.4.4 **后置 / Phase C 同期** | 离线排队恢复 + 7 天自动清理（依赖 Phase C 调度器 + autopilot scheduler 落地） |
+
+**§4.4 验收**：
+
+- `orchestratord daemon start` 启动时打印"已探测到 N 个 CLI：claude, codex, dsh, ..."清单，缺哪个明示探测命令（multica `command -v <工具>` 风格）
+- 新建 task 时 agent 子进程环境包含 `ORCHESTRATORD_TASK_ID` / `ORCHESTRATORD_WORKSPACE_ID` / `ORCHESTRATORD_AGENT_ID` / `ORCHESTRATORD_SERVER_URL` / `ORCHESTRATORD_TOKEN`（命名沿用 `ORCHESTRATORD_*` 与 multica `MULTICA_*` 区分；待讨论是否对齐）
+- `orchestratord config set workspaces_root /var/lib/orchestratord/ws` 后新建 task 工作目录落在此根下；改根目录不迁移已有目录
+- `orchestratord runtime profile create --family codex --command "/usr/local/bin/codex-wrapper --region cn"` 创建自定义 runtime，wrapper 启动后 multica 协议 flag（`-p` 等）由 daemon 注入而非 wrapper 硬编码
+- 单台 daemon 同时跑满 20 个 task 后第 21 个进入排队（不入失败）
 
 ---
 
-## 5. Web 前端特性缺口（独立章节）
+## 5. Phase A — Realtime + session control core
 
-> 这一节是本期投入最重的部分。所有 Web 工作必须遵守下列约束：
-> - 不得破坏 §3 任何保留特性
-> - 路由、组件、状态层与 multica 心智模型一致，方便跨项目借鉴
-> - 后端依赖 FastAPI，**不绕过 `orchestratord` 包**直接调 backend 私有 API
+> v2 优先级最高的一组（D11）。本节是 v2 实施清单。
 
-### 5.1 整体定位
+### 5.1 真 WebSocket pub/sub backbone
 
-**Next.js 16 App Router 单端应用**，目录结构：
+**当前**：`_ws_token_valid()` 仅校验非空 + 非 `bogus`；`subscribe/unsubscribe` 仅存 topic 集合；`session.approve` 只 ack。
 
-```
-apps/web/                              # Next.js
-  app/                                 # App Router
-    (landing)/                         # 未登录 / 营销页
-    (auth)/                            # 登录、找回、SSO
-    [workspaceSlug]/                   # 工作区 shell（路由级 layout.tsx）
-      layout.tsx                       # 工作区守卫（DashboardGuard）
-      (dashboard)/                     # 路由组：所有工作区内页面
-        issues/                        # 看板 / 列表 / 详情 / 评论
-        agents/                        # agent 列表 / 详情 / 新建
-        runtimes/                      # 已接入的 runtime 机器
-        squads/                        # 团队配置
-        projects/                      # 项目工作集
-        skills/                        # skill 目录 + source-map 验证状态
-        autopilots/                    # 周期任务
-        sessions/                      # in-process 模式（pipeline/debate/swarm）实时视图
-        inbox/                         # 通知
-        members/                       # 成员与角色
-        usage/                         # token / 成本聚合
-        settings/                      # 工作区设置
-  platform/                            # 仅放 Next.js / Router 平台适配
-  components/                          # 只放路由级 / 跨页面 UI
-packages/
-  ui/                                  # 原子组件（Button / Dialog / Tabs...）
-  views/                               # 业务视图（按 domain 拆，与 multica 一致）
-  core/                                # headless 业务逻辑（API client + React Query + Zustand）
-  tsconfig/                            # 共享 tsconfig
-  eslint-config/                       # 共享 eslint
-```
+**目标**：topic-based 转发 + 进程内 pub/sub。
 
-> 与 multica 的差别：**不输出 `apps/desktop` / `apps/mobile`，不输出 `packages/desktop-views`**。`packages/views/` 只面向 Web，platform/ 仅做 Next.js 适配。
+**实现要点**：
 
-### 5.2 必补页面与路由
-
-#### 5.2.1 Issues（看板 / 列表 / 详情）
-
-源参考：multica `(dashboard)/issues/[id]/page.tsx`
-
-页面组成：
-
-- 列表视图（默认）：状态分组列（queued / pending / running / pending_review / completed / failed / abandoned / verification_failed，复用 orchestratord 现有 9 个 status）+ assignee 多态头像（member 或 agent）+ 最后活动
-- 看板视图：拖拽切换 status；右键菜单支持 assign / move / abandon / reopen
-- 详情视图（`/issues/[id]`）：
-  - 元信息：title / description（markdown）/ status / assignee / labels / linked PR
-  - 活动 timeline：`Comment` + `StatusChange` + `RunStart` + `RunEnd` + `ToolCall` + `ApprovalRequest`
-  - 评论区（支持 `@agent-name` 触发 mention，见 §7.4）
-  - 执行日志 tab（链接到 §5.2.3）
-  - 关联 run（pipeline / debate / swarm 各 stage 的子 run）
-- 数据契约：复用 `assignee_type` + `assignee_id` 多态
-
-API：
-
-- `GET /api/workspaces/{ws}/issues?status=&assignee_type=&assignee_id=&q=`
-- `POST /api/workspaces/{ws}/issues`（创建）
-- `PATCH /api/workspaces/{ws}/issues/{id}`（状态 / assignee / labels）
-- `POST /api/workspaces/{ws}/issues/{id}/comments`
-- `POST /api/workspaces/{ws}/issues/{id}/mention`（`{ agent_id | member_id }`）
-
-#### 5.2.2 Agents
-
-源参考：multica `(dashboard)/agents/{[id],new}/page.tsx`
-
-页面组成：
-
-- 列表：所有 agent 卡片（avatar / name / provider / runtime 引用）
-- 详情：能力矩阵可视化（来自 §3.2 的 8 位降级图）、绑定 runtime、关联 skills、最近 runs、token 用量
-- 新建（multica "Build with AI" 功能本期不复制——改为表单 + YAML 导入两路）
-
-复用：
-
-- 能力位渲染必须**忠实**反映 `BackendCapabilities`（不得假设所有 backend 都流式 / 都支持 resume）
-- skill 列表渲染必须显示 source-map 验证状态
-
-API：
-
-- `GET /api/workspaces/{ws}/agents`
-- `POST /api/workspaces/{ws}/agents`
-- `GET /api/agents/{id}/capabilities`（直出 `BackendCapabilities` JSON）
-- `POST /api/agents/{id}/doctor`（调用现有 `orchestratord backend doctor <name>` 的逻辑）
-
-#### 5.2.3 Sessions（执行日志 / 工具调用重放）
-
-源参考：multica `(dashboard)/tasks` 时间线
-
-页面组成：
-
-- session 列表：按 issue 维度聚合，列出该 issue 下的所有 session + run
-- session 详情：
-  - 时间轴：每个事件一条（按 `EventEnvelope.kind` 分色：TEXT_DELTA / TOOL_CALL / TOOL_RESULT / APPROVAL_REQUEST / TURN_COMPLETE / PHASE_COMPLETE / SESSION_COMPLETE / ERROR）
-  - 重放模式：从某一事件开始，按原始顺序 replay（同会话内可调速 0.5x / 1x / 2x）
-  - approval 区：列出 `APPROVAL_REQUEST` 事件并提供 approve / deny 按钮（调用现有 approval policy）
-  - 暂停 / 恢复 / 停止按钮
-- 多 agent 模式专属视图：
-  - **Pipeline**：垂直链路，stage 间箭头 + 上下文注入标注
-  - **Debate**：左 / 右 proposer 并列卡片 + judge 卡片；强调"独立思考"标签
-  - **Swarm**：动态任务分解图（`task_decomposition.json` 渲染为 wave 树）+ 已完成 / 进行中 / 待办
-  - **Coordinator**：任务分发甘特图
-  - **Single**：纯时间轴
-
-API：
-
-- `GET /api/sessions/{id}/events?from=&to=`（带 cursor）
-- `GET /api/sessions/{id}/events/stream`（SSE，保留为单用户降级；Web 主用 `/ws`）
-- `POST /api/sessions/{id}/approve` / `/deny`（复用 `ApprovalPolicy`）
-- `POST /api/sessions/{id}/pause` / `/resume` / `/stop`（复用现有 IPC）
-- `POST /api/sessions/{id}/messages`（复用 chat gateway）
-
-#### 5.2.4 Usage（token / 成本聚合）
-
-源参考：multica `(dashboard)/usage/page.tsx`
-
-页面组成：
-
-- 概览：今日 / 本周 / 本月 / 自定义区间的 token 与 USD 聚合
-- 维度切换：按 workspace / agent / issue / backend
-- 图表：折线（每日）+ 表格（每 agent）
-- 导出：CSV（保留 CLI 兼容：`orchestratord run logs --export csv`）
-
-复用：
-
-- token 数据从 `EventEnvelope` 中 `SESSION_COMPLETE` 携带的 `usage` 字段汇总（与 README 中 dsh 的 cost_reporting 路径一致）
-- USD 字段：clawcodex / claude 报告的 `total_cost_usd`；其他 backend 走 token estimator（与 `degradation.py` 中的 `cost_reporting=False` 路径一致）
-
-API：
-
-- `GET /api/workspaces/{ws}/usage?from=&to=&group_by=`
-- `GET /api/agents/{id}/usage`
-
-#### 5.2.5 Skills
-
-源参考：multica `(dashboard)/skills` + orchestratord `src/orchestratord/skills/builtin/`
-
-页面组成：
-
-- 目录视图：每个 skill 一张卡（name / description / source-map verified 状态 / 最后更新）
-- 详情：渲染 `SKILL.md` markdown；显示 source-map 引用（每行引用 = 文件路径 : 行范围 : SHA256 前缀）
-- 操作：
-  - `Refresh hashes`（调用 Python 端 regen）
-  - `Verify all`（调用 `orchestratord skills verify`）
-- 状态徽标：
-  - `verified` — 全部引用通过 SHA256 校验
-  - `stale` — 至少一项漂移（显示具体哪一行引用对不上）
-  - `missing` — 引用文件已不存在
-
-API：
-
-- `GET /api/skills`
-- `GET /api/skills/{name}`
-- `GET /api/skills/{name}/source-map`
-- `POST /api/skills/{name}/verify`
-- `POST /api/skills/refresh-hashes`（受限，仅 admin）
-
-#### 5.2.6 Inbox
-
-源参考：multica `(dashboard)/inbox/page.tsx`
-
-页面组成：
-
-- "被 ping 时"流：APPROVAL_REQUEST / clarification / failure 需要人工介入的事件
-- 每条 inbox item：链接到对应 issue / session / event
-- 操作：resolve / assign / dismiss
-
-实现：
-
-- 复用 `inbox` 表 + worker（listen `APPROVAL_REQUEST` + `clarification` + `failed` 事件写入 inbox）
-- WebSocket 推送新 inbox item
-
-#### 5.2.7 其余页面
-
-| 页面 | multica 参考 | 实现要点 |
-| --- | --- | --- |
-| Runtimes | `(dashboard)/runtimes` | runtime 接入用两段式：server 给 token，runtime 端 `orchestratord daemon start --workspace-token ...`；Web 上展示 runtime card（机器名 / OS / 已注册 backend 列表 / 心跳） |
-| Squads | `(dashboard)/squads` | 见 §7.1 |
-| Projects | `(dashboard)/projects` | 见 §7.2 |
-| Autopilots | `(dashboard)/autopilots` | 见 §7.3 |
-| Members | `(dashboard)/members` | owner / admin / member 角色矩阵；access scopes per member |
-| Settings | `(dashboard)/settings` | workspace 设置 / backend 启用 / 通知渠道 / VCS 接入 |
-| Landing | `(landing)` | 营销页；登录后路由进工作区 |
-
-### 5.3 设计系统 / 视觉规范
-
-#### 5.3.1 主题与色板
-
-复用 `cli/dashboard.py` 已定义的 CSS 变量（暗色为默认），迁移到 Tailwind 配置：
-
-```
---bg-0  #0b0f17   --accent     #58a6ff
---bg-1  #11161f   --accent-2   #79c0ff
---bg-2  #161c26   --good       #3fb950
---bg-3  #1d2532   --warn       #d29922
---line  #232c3a   --bad        #f85149
-                     --purple    #a371f7
-                     --vermillion #db6d28
-```
-
-亮色主题另出 `:root[data-theme="light"]`，避免色板硬编码。
-
-#### 5.3.2 组件库选型
-
-`shadcn` + Radix Primitives + Tailwind CSS（与 multica `packages/ui` 一致）。
-
-不引入 `@reui` 商业组件库（避免 license 复杂度）。
-
-具体组件优先级：
-
-1. Button / Dialog / Tabs / Card / Tooltip / Dropdown / Toast
-2. DataTable（基于 `@tanstack/react-table`，用于 issues / sessions / usage）
-3. 看板：自实现 `KanbanBoard`，列 = status，行 = issue
-4. 时间线：自实现 `EventTimeline`，复用 multica 的 `execution-log` 心智模型
-
-#### 5.3.3 Token
-
-复用 multica `packages/ui/styles/tokens.css` 的 role-named `--text-*` scale（如 `text-caption` / `text-body` / `text-title`），不引入 Tailwind 默认 `text-sm` / `text-base`。
-
-### 5.4 实时与状态层
-
-#### 5.4.1 协议选型
-
-Web 主用 WebSocket（FastAPI 原生）；SSE 仅作为单机 / 内网降级（避免 WS 代理配置）。
-
-WebSocket 路径：`/ws?workspace_id=&token=`（token 经 query 传，不要进 cookie 因为 WS upgrade 不带 cookie）。
-
-消息形态（参考 multica `server/internal/realtime`）：
+- 在 `src/orchestratord/api/realtime.py` 抽出 `RealtimeBroker` 单例：`asyncio.Queue` 多生产者单消费者拓扑
+- topic 形如 `issue.{id}` / `session.{id}` / `agent.{id}.capability` / `inbox.{workspace_id}`
+- `BackendRunner` 在每次 `events()` 产出 `EventEnvelope` 时调用 `broker.publish(topic, payload)`
+- WebSocket handler 维护 `set[str]` 已订阅 topic，**心跳 + 广播**使用长循环协程
+- 单实例足够（multica `server/internal/realtime` 也是同结构）；多实例时再上 Redis pub/sub
+- 协议（参考 multica `server/internal/realtime`）：
 
 ```jsonc
 // server → client
-{ "type": "event", "topic": "issue.{id}", "payload": <EventEnvelope> }
 { "type": "event", "topic": "session.{id}", "payload": <EventEnvelope> }
 { "type": "inbox.created", "payload": {...} }
-{ "type": "inbox.resolved", "payload": {...} }
 { "type": "agent.capability.changed", "payload": {...} }
 
 // client → server
@@ -424,395 +328,316 @@ WebSocket 路径：`/ws?workspace_id=&token=`（token 经 query 传，不要进 
 { "type": "session.approve", "session_id": "...", "tool_call_id": "..." }
 ```
 
-#### 5.4.2 状态归属
+**保留**：30s 心跳（同 multica `HeartbeatInterval`）；首次连接 0.5s liveness probe 后再 30s 节奏。
 
-复用 multica 的 "server state via TanStack Query + client state via Zustand" 分层：
+**验收**：3 个订阅者订阅同一 `session.{id}`，daemon 1 个 `TEXT_DELTA` 事件触达全部连接（fan-out）。
 
-- server state：issues / agents / sessions / events / inbox / usage → TanStack Query
-- client state：filter / draft / modal / 当前 workspace / tab 布局 → Zustand
-- workspace identity：`useWorkspaceId()` 走 React Context；`packages/core` 暴露 `setCurrentWorkspace(slug, uuid)`（仅镜像，不参与路由）
-- 不允许 React Context 复制 server 数据
-- 不允许把 server payload 镜像到 Zustand
+### 5.2 会话控制端到端（approve / deny / pause / resume / stop）
 
-#### 5.4.3 WebSocket ↔ TanStack Query 桥接
+**当前**：router stub 仅 ack；`APPROVAL_REQUEST` 事件尚未流回 `BackendRunner`。
 
-复用 multica 心智模型：
+**目标**：用户点击 approve 后，daemon 端 `BackendRunner` 的 pending-approval waiter 被释放；backend capability 校验决定哪些按钮在 UI 渲染。
 
-- WS 消息触达 → 调用 `queryClient.invalidateQueries(...)` 或 `queryClient.setQueryData(...)`
-- 不在 WS handler 内手写缓存合并，避免与 React Query 的 stale-while-revalidate 冲突
-- 乐观更新：仅用于"结果可预测 + 不跳转 + 失败罕见 + 回滚简单"的场景（assignee / status / label 切换）
+**实现要点**：
 
-### 5.5 工程化（前后端拆分 / API / 构建）
+- 新增 `src/orchestratord/api/routers/sessions.py` 路由：
+  - `POST /api/sessions/{id}/approve { tool_call_id, decision }` → 通过 `ipc` 调用 `BackendRunner.approve(session_id, tool_call_id)`
+  - `POST /api/sessions/{id}/deny { tool_call_id, reason }` → 同上但传 deny
+  - `POST /api/sessions/{id}/pause` → 仅在 `interrupt` capability 启用时存在
+  - `POST /api/sessions/{id}/resume` → 同上
+  - `POST /api/sessions/{id}/stop` → 同上
+- 每条调用先查 `Session` + `BackendCapabilities`；capability 不支持时返回 409
+- 调用结果经 `RealtimeBroker` 广播 `session.control.applied` topic
+- Web UI：`<SessionDetail>` 收到 `APPROVAL_REQUEST` 事件渲染 approve/deny 按钮；点击走 `useSessionControl` mutation
+- 多 agent 模式下，`decision` 还需要带 `proposer_id`（debate 模式独立思考约束）
 
-#### 5.5.1 后端 API 拆分
+**验收**：clawcodex session 触发 `APPROVAL_REQUEST`，Web UI 看到按钮；点 approve 后 daemon 端 waiter 释放，session 继续产出 `TEXT_DELTA`（端到端延迟 < 200ms 同区域）。
 
-现状：`cli/dashboard.py` 一个 `BaseHTTPRequestHandler` 包揽所有路由（2306 行）。Web 上线前必须拆分：
+### 5.3 拖拽看板
 
-- 引入 FastAPI app（`apps/api/main.py`），保留 Typer CLI 作为 compat
-- 路由按 domain 拆 router：`routers/issues.py` / `routers/agents.py` / `routers/sessions.py` / `routers/skills.py` / `routers/usage.py` / `routers/inbox.py` / `routers/runtimes.py` / `routers/squads.py` / `routers/projects.py` / `routers/autopilots.py` / `routers/channels.py`
-- `/dashboard` 旧路由继续以 compat shim 存在，1 release cycle 后 deprecated
-- OpenAPI 自动生成（FastAPI 原生），落地到 `/docs`（开发态）
+**当前**：`apps/web/app/[workspaceSlug]/(dashboard)/issues/page.tsx` 渲染 `<IssuesBoard>`（含 list/kanban toggle），但 kanban 列间拖动未实装。
 
-#### 5.5.2 Web 构建
+**目标**：用 `@dnd-kit/core` + `@dnd-kit/sortable` 实现拖拽 status 切换，乐观更新 + WS 回流校正。
 
-- Next.js 16 App Router（不用 Pages Router）
-- Turborepo 编排（同 multica），新增 `apps/api` 与 `apps/web`
-- 包管理：与 multica 一致用 `pnpm`（与现有 Python `uv` 不冲突）
+**实现要点**：
 
-#### 5.5.3 测试
+- 新增 `packages/views/src/issues/kanban-column.tsx` + `kanban-card.tsx`
+- `useIssueStatusChange` mutation 调用 `PATCH /issues/{id} { status }`
+- 乐观更新：`queryClient.setQueryData(...)` 立刻反映；WS 回流 `event topic=issue.{id}` 携带最新 status 时覆盖乐观
+- 失败回滚：HTTP 4xx/5xx → `queryClient.invalidateQueries` + toast
+- DnD context：`<DndContext onDragEnd>` 监听列间落点
 
-按 multica 测试分层：
+**验收**：把 issue 从 `pending` 拖到 `running`，UI 立即反映；daemon 在 100ms 内接收到 status 变更事件。
 
-| 层 | 工具 | 范围 |
+### 5.4 多 agent 模式可视化
+
+**当前**：`event-timeline.tsx` 仅扁平时间轴。
+
+**目标**：根据 `session.mode` 字段分派到不同渲染器。
+
+**实现要点**（在 `packages/views/src/sessions/` 下新增）：
+
+| 模式 | 渲染器 | 数据源 |
 | --- | --- | --- |
-| Python 单元 | pytest | orchestrator / SPI / skills / modes / backend_registry |
-| Python 集成 | pytest + httpx | FastAPI router（接真实 DB） |
-| TS 业务逻辑 | Vitest（`node` 环境） | `packages/core` 纯逻辑、Zustand store、API client 解析 |
-| TS UI | Vitest + Testing Library | `packages/views` 业务组件 |
-| 平台 wiring | Vitest（`jsdom` 环境） | `apps/web` 仅做 Next.js 路由 / cookies / search params |
-| E2E | Playwright | 关键路径（创建 issue → assign agent → 实时看 session → 评论） |
+| `single` | `event-timeline`（扁平） | `events[seq]` |
+| `pipeline` | `pipeline-graph.tsx` —— 垂直链路 stage + 上下文注入标注 | `runs[stage_id].events[]` |
+| `debate` | `debate-cards.tsx` —— 左/右 proposer 并列卡片 + judge 卡片 + 独立思考徽标 | `runs[proposer_id].events[]` |
+| `swarm` | `swarm-tree.tsx` —— `task_decomposition.json` 渲染为 wave 树 + 完成/进行中/待办着色 | `swarm_checkpoint.json` |
+| `coordinator` | `coordinator-gantt.tsx` —— 任务分发甘特图 | `runs[].events[]` 时间窗 |
 
-复用 multica 的真 agent smoke 测试规范：
+- `SessionDetail` 顶部 `mode` 徽标 + 切换子视图
+- 每个 renderer 只读 `events` + `runs`，**不**重复事件合并逻辑（合并在 `BackendRunner` 已做）
 
-- 默认测试**绝不** resolve / execute 用户安装的 agent CLI
-- 真实 agent 烟雾测试必须放 `agentintegration` build tag 后，**仅**当 `ORCHESTRATORD_RUN_REAL_AGENT_SMOKE=1`
-- 新增 default agent 命令必须写入 `scripts/agent-cli-command-names.txt`
+**验收**：在 `modes/pipeline` 测试场景下，`SessionDetail` 渲染 3 stage 链路，每个 stage 显示自己的 `TEXT_DELTA` 流。
 
-### 5.6 i18n 与文案规范
+### 5.5 工具调用卡片 + transcript 浮层
 
-复用 multica 的 i18n 基础设施：
+**当前**：`event-timeline` 通用渲染；无 4KB 截断、无 diff 着色、无 transcript 浮层。
 
-- 文案 source of truth：`apps/docs/content/docs/developers/conventions.mdx`（含中英文术语对照表）
-- 翻译文件位置：`packages/views/locales/{en,zh-CN}/...`
-- 中文产品文案规范：动词优先（"添加"、"分配"、"触发"），不用"进行 XX 操作"
-- 路由命名规范：单段（`/login`、`/inbox`）或 `/{noun}/{verb}`（`/workspaces/new`）；禁止 `/new-workspace` 这种连字符根路由
-- Reserved slugs：`server/internal/handler/reserved_slugs.json`，编辑后 `pnpm generate:reserved-slugs` 重新生成 `packages/core/paths/reserved-slugs.ts`
+**目标**：
 
-### 5.7 安全 / 权限 / 多工作区
+- `TOOL_CALL` / `TOOL_RESULT` 渲染为折叠卡片，超过 4KB 时 `truncated: true` + "view full" 链接
+- transcript 浮层：会话列表点 "transcript" 打开 dialog，呈现完整 timeline
+- diff 着色：暂不做（multica `diff-highlight.ts` 复杂，Phase E）
 
-#### 5.7.1 角色矩阵
+**实现要点**：
 
-| 角色 | 可做 |
+- 新增 `packages/views/src/sessions/tool-call-card.tsx` + `tool-result-card.tsx`
+- 新增 `packages/views/src/common/task-transcript/transcript-dialog.tsx`
+- 4KB 截断：复用 `chat_gateway.py` 的 `_MAX_TOOL_RESULT_CHARS = 4096`
+
+**验收**：session 触发 `TOOL_CALL("bash", "ls -la")` + `TOOL_RESULT(stdout=12KB)`，UI 渲染为卡片 + 截断提示。
+
+### 5.6 Web provider tree 补全
+
+**当前**：`apps/web/app/layout.tsx` 17 行；`DashboardGuard` 仅挂 `CoreProvider` + `I18nProvider`。
+
+**目标**：补 `QueryClient` / `Theme` / `Auth` 三件套。
+
+**实现要点**（`apps/web/app/web-providers.tsx`）：
+
+```tsx
+<QueryClientProvider client={queryClient}>
+  <ThemeProvider attribute="data-theme" defaultTheme="dark">
+    <AuthGate>
+      <I18nProvider>
+        {children}
+      </I18nProvider>
+    </AuthGate>
+  </ThemeProvider>
+</QueryClientProvider>
+```
+
+- `QueryClient`：复用 `packages/core/src/query-client.ts`
+- `ThemeProvider`：`next-themes`（multica 已用）
+- `AuthGate`：D9 单用户模式 → 单一 `dev` session（替代 §3.4 cookie session）。`AuthGate` 仅渲染 default member identity，**不**渲染登录页
+- 登录页 `apps/web/app/login/page.tsx`：单用户模式下重定向到 `/default`
+
+### 5.7 Phase A 验收
+
+| 项 | 验收产物 |
 | --- | --- |
-| owner | 所有 + 删除工作区 + 转移所有权 |
-| admin | 成员管理 / agent 管理 / VCS 接入 / 通知渠道配置 |
-| member | 创建 issue / 评论 / 触发 autopilots / 看自己的 usage |
-
-multica 的 access scopes（per member 能跑哪些 agent）按 multica 实现：members 表 + `member_agent_scopes` 多对多表。
-
-#### 5.7.2 多工作区切换
-
-路由：`/{workspaceSlug}/...`，layout.tsx 中 `DashboardGuard` 校验成员资格，未通过跳 `/login` 或 `/workspaces/new`。
-
-跨工作区导航必须走 `useNavigation().push()` 或 `<AppLink>`（同 multica），不直接 `<a href>`。
-
-`setCurrentWorkspace(slug, uuid)` 由路由 layout 触发，不要在组件内手动调用。
-
-#### 5.7.3 审计
-
-每条 Web 触发的 mutation（创建 issue / 重派 / approve）必须写 `audit_log` 表：
-
-- `id` / `workspace_id` / `actor_type`（member / agent / system）/ `actor_id` / `action` / `target_type` / `target_id` / `payload_jsonb` / `created_at`
-- Web 端的"管理员审计"页面提供筛选与导出
-
-#### 5.7.4 凭证与认证
-
-- Web 端 cookie-based session（httpOnly + Secure + SameSite=Lax）
-- daemon 端 runtime token：long-lived bearer，用于 WS 连接与 daemon → server 的反向心跳
-- API token：multica 风格的 `auth_tokens` 表（name / token_hash / scopes / expires_at）
-- 用户安装的 agent CLI 默认**不可**直连 server API；只能由 daemon 中转
+| §5.1 WebSocket pub/sub | 3 个浏览器订阅同一 session，daemon 1 个事件 fan-out 全部可见 |
+| §5.2 会话控制 | clawcodex session `APPROVAL_REQUEST` 端到端 approve < 200ms |
+| §5.3 拖拽看板 | kanban 拖动 issue 改 status 乐观更新 + WS 校正 |
+| §5.4 多 agent 模式 | pipeline / debate / swarm / coordinator / single 5 个模式各自渲染器至少跑通 1 个测试场景 |
+| §5.5 工具调用卡片 | 4KB 截断 + transcript 浮层可用 |
+| §5.6 Provider tree | QueryClient / ThemeProvider / AuthGate / I18nProvider 全栈接通 |
 
 ---
 
-## 6. 后端 / 数据层缺口（支撑 Web 所必需）
+## 6. Phase B — 通讯层（chat + Slack/Lark）
 
-### 6.1 PostgreSQL 引入
+### 6.1 Workspace-level chat
 
-数据库版本：PostgreSQL 17，扩展 `pgcrypto` + `pg_trgm`。
+- 新增 `apps/web/app/[workspaceSlug]/(dashboard)/chat/page.tsx` + `packages/views/src/chat/`
+- 不创建 issue 也能发 prompt → 启动 session
+- 数据模型：复用 `sessions` 表（不带 `issue_id`）+ `messages` 表（新增 migration）
+- 复用 `RealtimeBroker`（§5.1）做流式推送
 
-**Schema 迁移规则**（沿用 multica `CLAUDE.md`）：
+### 6.2 Mention 路由
 
-- 不加 FK / cascading delete / cascading update（用应用层解决）
-- 每个索引必须 `CREATE INDEX CONCURRENTLY` 或 `CREATE UNIQUE INDEX CONCURRENTLY`
-- 每次 `CREATE INDEX CONCURRENTLY` 单独一个迁移文件（不能放进事务）
-- runner 在迁移文件外执行以支持非事务场景
-- 条件性跳过的迁移也记入 `schema_migrations`，后续引用条件对象的迁移必须用 `IF EXISTS` / `IF NOT EXISTS`
+- `parse_mentions()` 已写（`src/orchestratord/domain/mention.py`）
+- 在 `/api/workspaces/{ws}/issues/{id}/mention` 接 `BackendRunner`：根据 `agent_id` / `member_id` 启动 session
+- member mention 在单用户模式下等价于 self-mention
 
-#### 6.1.1 起步 schema
+### 6.3 Slack / Lark OAuth handshake
 
-```
-workspaces
-members
-member_agent_scopes
-agents
-agent_capabilities_cache    -- 缓存 BackendCapabilities，backend 启动时刷新
-runtimes                    -- 已接入的机器
-runtime_backends            -- runtime 上探测到的 CLI 列表
-issues
-issue_comments
-issue_labels
-issue_status_history
-sessions                    -- 一次会话 = 一次 BackendRunner.run
-runs                        -- 一次 run = workflow 的一次执行
-events                      -- EventEnvelope 持久化（按时间序 + run_id + session_id 索引）
-skills
-skill_source_maps
-skill_references            -- 每条 source-map 的 (file, line_range, sha_prefix)
-approvals
-inbox
-usage_aggregates             -- 按 (workspace_id, agent_id, day) 聚合
-squads
-squad_members
-projects
-project_repos
-project_docs
-autopilots
-autopilot_runs
-audit_log
-auth_tokens
-```
+**当前**：`integrations` router 接收 `webhook_url` 字符串存储；无 OAuth 流程。
 
-#### 6.1.2 事件持久化策略
+**目标**：标准 OAuth 2.0 授权码 + 状态校验 + token exchange。
 
-- `events` 表水平拆分：按 `created_at` 月分区（partition by range）
-- 单条事件 payload：`jsonb`，索引用 `gin (payload jsonb_path_ops)` 仅用于排查
-- 典型查询索引：`(session_id, sequence)` 升序、`(workspace_id, created_at desc)`、`(issue_id, created_at desc)`
-- 不在 DB 层做重活：聚合查询走 materialized view，按小时刷新
+**实现要点**：
 
-### 6.2 Agent 实体化
+- 新增 `orchestratord.integrations.oauth` 子模块：`SlackOAuth` / `LarkOAuth` 各自实现 `authorize_url()` / `exchange_code()` / `refresh_token()`
+- `GET /api/workspaces/{ws}/integrations/slack/authorize` → 重定向到 Slack OAuth
+- `GET /api/workspaces/{ws}/integrations/slack/callback?code=&state=` → `exchange_code()` + 写 `integrations` 表 + 通知 `channels` router
+- `client_id` / `client_secret` 从环境变量读（`ORCHESTRATORD_SLACK_CLIENT_ID` 等）
 
-multica 的 agent 是 DB 实体（`agents` 表）+ 运行时 backend 解耦。orchestratord 当前 backend 是 entry point 直接返回 `AgentBackend`，没有"实例"概念。
+### 6.4 Inbound webhook
 
-需要新增的概念：
+- `POST /api/integrations/slack/events` 接 Slack Events API（URL verification + event_callback）
+- `event.text` 含 `@orchestratord <text>` → 复用 `channels.trigger()`（已写）
+- 单用户模式：`channel_id` 通过 `external_id` 反查
 
-- `Agent`（持久化）：`id` / `workspace_id` / `name` / `provider`（= backend 名）/ `runtime_id` / `capabilities_cache_jsonb` / `created_at`
-- 启动时（daemon 启动 / agent 新建 / backend 重连）：调用 `BackendRunner.describe()` → 写入 `agent_capabilities_cache`
-- Web 前端读 `capabilities_cache_jsonb` 渲染能力矩阵
+### 6.5 多 VCS
 
-### 6.3 Runtime 机器接入
+- **GitHub**：`vcs.py` router 已写（installations + pull_requests + webhook），仅需补 GitHub App 真实 OAuth handshake（与 §6.3 同构）
+- GitLab / Gitea / Forgejo：后置；v2 不补
 
-- server 生成一次性 token（`runtime_id` + `token`）
-- runtime 端执行 `orchestratord daemon start --workspace-token $TOKEN --workspace-id $WS`
-- runtime 周期性心跳（30s）→ server 端更新 `runtime.last_seen_at`
-- runtime 探测本机 CLI 列表 → 上报 `runtime_backends`（哪些 CLI 装在哪些 runtime 上）
-- Web 上"runtimes"页显示每个 runtime 的 backend 覆盖
+### 6.6 Phase B 验收
 
-### 6.4 WebSocket 服务
-
-- 复用 `server/internal/realtime` 形态：topic-based pub/sub
-- 单实例：进程内 asyncio.Queue；多实例：Redis pub/sub 中继
-- daemon → server 上行心跳与事件走同一 WS
-- 心跳间隔 30s（与 multica `HeartbeatInterval` 默认一致）
-
-### 6.5 VCS 集成
-
-本期 GitHub only；GitLab 后置。
-
-复用 multica `server/internal/integrations/github` 的契约：
-
-- `installations` 表：每工作区一份 GitHub App 安装
-- `pull_requests` 表：每个 issue 关联的 PR 列表
-- webhook handler：处理 `issues` / `pull_request` / `check_run` / `push` 事件
-- Web 上 PR 视图：在 issue 详情页内嵌 PR 状态 / checks / review
-
-issue→PR 应用（`applications/issue_pr.py`）保持现有形态，作为 `pull_requests` 表的写入入口；不重写。
+- workspace-level chat 跑通：发 prompt → 流式接收 → 落库
+- mention `@agent-name` 触发 session
+- Slack OAuth authorize → callback → integration 落库，webhook 接收事件
 
 ---
 
-## 7. 协作 / 产品抽象缺口
+## 7. Phase C — 调度与可观测
 
-### 7.1 Squads
+### 7.1 Autopilot scheduler loop
 
-数据模型：
+**当前**：CRUD 已写；无调度循环。
 
-```
-squads           id / workspace_id / name / leader_type / leader_id / created_at
-squad_members    squad_id / member_type / member_id
-```
+**目标**：asyncio task + croniter（不引入 APScheduler 重依赖），周期触发 workflow。
 
-行为：
+**实现要点**：
 
-- leader（member 或 agent）路由 issue 到 members
-- leader 可以是 agent（基于其能力：goal_mode=True 的 backend）
-- Web 上 squad 详情页：成员列表 + 最近被 leader 路由的 issue
+- 新增 `src/orchestratord/scheduler/autopilot.py`：
+  - `class AutopilotScheduler`：`asyncio.create_task(self._loop())`
+  - 每分钟轮询 `enabled=True` 的 autopilot → 计算下次触发时间 → 写 `autopilot_runs` → 启动 workflow
+- `orchestratord serve` 启动时 `await scheduler.start()`
+- 优雅关闭：`SIGTERM` 时 `await scheduler.stop()`
 
-API：
+### 7.2 Token cost 估算
 
-- `POST /api/squads`
-- `POST /api/squads/{id}/assign`（leader 主动分配）
-- `POST /api/squads/{id}/route`（自动路由请求）
+- `cost_reporting=False` 的 backend 走 token estimator：`@orchestratord/cost/estimator.py`
+- 输入：token 数 + 模型；输出：USD
+- 模型价格表：`pricing.json`（在 `packages/core/src/pricing/`）
 
-### 7.2 Projects
+### 7.3 Usage 聚合 + 图表
 
-数据模型：
+- `usage_aggregates` 表已建
+- 新增 `packages/views/src/usage/usage-charts.tsx`（折线 + 柱状）
 
-```
-projects         id / workspace_id / name / description
-project_repos    project_id / repo_url / default_branch
-project_docs     project_id / doc_url / doc_type (md|html|pdf)
-```
+### 7.4 Inbox 详情
 
-行为：
+- `inbox-list.tsx` 单文件 stub
+- 拆 `inbox/{clarification,approval,failure}` 三个子组件
 
-- 创建 issue 时可选关联 project
-- 关联后 agent 在 session start 时自动注入 project 内的 repo 路径 + docs 摘要（multica 的 "attach the repos and docs agents need as context"）
+### 7.5 Phase C 验收
 
-### 7.3 Autopilots
-
-数据模型：
-
-```
-autopilots       id / workspace_id / name / cron / prompt / target_kind / target_id / enabled
-autopilot_runs   autopilot_id / scheduled_at / started_at / finished_at / status / run_id
-```
-
-实现：
-
-- 复用 `apscheduler` 或 asyncio task loop（轻量）
-- schedule → 启动对应 workflow（autopilot 即一个声明式 workflow）
-- Web 上 autopilots 列表 + run 历史
-
-### 7.4 Mention / Chat
-
-mention 解析：
-
-- 评论文本扫描 `@agent-name` 与 `@member-name`
-- 触发：派发 inbox item + 写 mention event
-- agent 收到 mention 触发新 session（复用 `intent.py` 与 `mode_selector.py`）
-
-chat（multica 的 chat 模式）：workspace-level chat，不建 issue 也能触发 session。本期做最小版本（一次 prompt 一次 session），不引入 MCP。
-
-### 7.5 通知渠道（Slack / Lark）
-
-复用 multica 的 `apps/web/app/{slack,lark}` 设计：
-
-- 每工作区一套 OAuth 接入
-- `channels` 表：每工作区 N 个 channel 绑定
-- channel 触发：在 channel 内 `@orchestratord <issue-id 或自然语言>` → 创建 / 派发 issue
-- channel 推送：session 状态变化（running → pending_review）→ 推送到对应 channel
-- mention 同 §7.4
-
-DingTalk / WeCom / Telegram 后置：
-
-- adapter interface 预留（multica 的 `apps/web/app/{dingtalk,wecom,telegram}` 是参考）
+- autopilot 每 5 分钟触发一次，产 issue + 落 run
+- 无 `cost_reporting` 的 backend 在 usage 页有估算 USD
+- inbox 三类事件各自差异化视图
 
 ---
 
-## 8. Agent 后端覆盖缺口
+## 8. Phase D — 后端协议覆盖
 
-### 8.1 缺口矩阵
+### 8.1 已落地 backend 现状（v2 实测）
 
-multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级 + 实施难度排序：
+| backend | 真实深度 | 缺口 |
+| --- | --- | --- |
+| clawcodex (1653 LOC) | 完整 SDK worker + approval | — |
+| dsh (1440 LOC) | SDK 包装 + agent.cordis 补丁 | — |
+| codex (987 LOC) | app-server + Cli 双路径 | — |
+| claude (631 LOC) | SDK 包装 | — |
+| opencode (594 LOC) | SSE 翻译 | — |
+| qwen (441 LOC) | stream-json | — |
+| hermes (220 LOC) | 简单 CLI | — |
+| copilot / cursor / kimi / openclaw / reasonix / zeroclaw (296-302 LOC) | **stub**（仅 descriptor） | 补真 session 翻译 |
+| kiro-cli (0 LOC) | **仅 pyproject** | 补 `backend.py` + `session.py` |
+| orchestratord-acp (811 LOC) | 部分 | 落地 ACP 通用抽象 |
 
-| # | backend | 优先级 | 难度 | 协议 | 备注 |
-| --- | --- | --- | --- | --- | --- |
-| 1 | `cursor` | P1 | 中 | CLI | spawn `cursor-agent`，JSON 输出解析 |
-| 2 | `copilot` | P1 | 中 | CLI | `copilot` CLI；事件流需实验 |
-| 3 | `kimi` | P1 | 中 | CLI | `kimi`；中文 prompt 友好 |
-| 4 | `qwen` | P1 | 中 | CLI（stream-json） | multica：`qwen -p --output-format stream-json` |
-| 5 | `grok` | P2 | 中 | ACP | `grok agent --always-approve stdio` |
-| 6 | `kiro-cli` | P2 | 中 | CLI | |
-| 7 | `openclaw` | P2 | 中 | HTTP | `openclaw agent --local ...` vs Gateway 路由 |
-| 8 | `agy` (antigravity) | P3 | 高 | 私有 | |
-| 9 | `codebuddy` | P3 | 高 | ACP | |
-| 10 | `qodercli` / `qoderclicn` | P3 | 高 | ACP | |
-| 11 | `deveco` | P3 | 高 | ACP | |
-| 12 | `codearts` | P3 | 高 | 私有 | |
-| 13 | `pi` / `omp` (oh-my-pi) | P3 | 中 | Pi 协议 JSON | |
-| 14 | `qwenpaw` | P3 | 中 | ACP | per-task workspace |
-| 15 | `reasonix` | P3 | 中 | CLI | |
-| 16 | `mcode` | P3 | 高 | 私有 | |
-| 17 | `dim` | P3 | 高 | 私有 | |
-| 18 | `traecli` | P3 | 中 | 私有 | |
-| 19 | `zeroclaw` | P3 | 中 | CLI | |
+### 8.2 Phase D 三件事
 
-### 8.2 实施模板（每个新 backend 的标准流程）
+1. **落地 `orchestratord-acp` 通用包**（草案 §8.3）：
+   - 实现通用 ACP backend（基于 `@agentclientprotocol/sdk` 或自写 JSON-RPC stdio）
+   - 优先覆盖 3 个高频 ACP backend：codebuddy / deveco / qoderclicn
+2. **`protocol_family` / `runtime_id` 分离**（草案 §8.4）：
+   - `spi/backend_descriptor.py` 新增 `protocol_family` 字段
+   - `backend_registry._classify_family()` 同时支持 id 与 family 两层
+   - 允许 `omp` → `pi` 这类 builtin runtime 派生
+3. **5 个 stub backend 真翻译**：
+   - copilot / cursor / kimi / reasonix / zeroclaw 各自补真 session 翻译（参照 multica 各 `_invocation.go` 拆分）
 
-1. 新建 `backends/orchestratord-<name>/` 包
-2. pyproject.toml：`[project.entry-points."orchestratord.backends"]` + `"orchestratord.backend_descriptors"`
-3. `backend.py` 实现 `AgentBackend` Protocol + 能力位如实报告
-4. `session.py` 翻译 backend 原生事件到 `EventEnvelope`
-5. `descriptor.py` 实现 `BackendDescriptor`（family / score / notes）
-6. `tests/`：复用 `tests/contracts/` 的 T1–T9 contract tests + 防真实 CLI 调用守门
-7. 更新 `tests/test_capability_drift.py`：新增 backend 必须通过 CI 守门
-8. `install.sh`：加入新 backend 的 runtime 探测表
-9. `_backend_cli_registry`：CLI 名加入
-10. `scripts/agent-cli-command-names.txt`：加入 daemon 端默认命令清单
-11. README 能力矩阵 + 事件流表更新
+### 8.3 multica 完整 26 family 全清单与 v2 覆盖决策
 
-### 8.3 ACP 适配器
+multica `SupportedTypes`（`server/pkg/agent/agent.go:312`）列出的 26 个 protocol family，加 1 个 builtin runtime 派生（`omp` → `pi` family）。下表给出 v2 周期内 orchestrator / Phase D / 后置的三档决策：
 
-为降低 §8.1 中 7 个 ACP backend 的实现成本，本期一次性抽出 `orchestratord-acp` 包：
+| # | family | multica 文件 | v2 状态 |
+| --- | --- | --- | --- |
+| 1 | `claude` | `claude.go` + 4 个 _test | ✅ orchestratord-claude（631 LOC）已硬实现 |
+| 2 | `codex` | `codex.go` + cleanup_unix_test | ✅ orchestratord-codex（987 LOC）app-server + Cli 双路径 |
+| 3 | `copilot` | `copilot.go` + `_invocation.go` + windows 分支 | 🟡 Phase D 补真翻译（stub 296 LOC） |
+| 4 | `cursor` | `cursor.go` + 4 个 _test | 🟡 Phase D 补真翻译（stub 296 LOC） |
+| 5 | `opencode` | `opencode.go` + session | ✅ orchestratord-opencode（594 LOC）SSE 翻译 |
+| 6 | `dsh` | `dsh.go` | ✅ orchestratord-dsh（1440 LOC）SDK + agent.cordis 补丁 |
+| 7 | `hermes` | `hermes.go` | ✅ orchestratord-hermes（220 LOC）简单 CLI |
+| 8 | `kimi` | `kimi.go` | 🟡 Phase D 补真翻译（stub 297 LOC） |
+| 9 | `qwen` | `qwen.go` + windows 分支 | ✅ orchestratord-qwen（441 LOC）stream-json |
+| 10 | `reasonix` | `reasonix.go` + 3 个 _test | 🟡 Phase D 补真翻译（stub 300 LOC） |
+| 11 | `zeroclaw` | `zeroclaw.go` + 840 行 _test | 🟡 Phase D 补真翻译（stub 300 LOC） |
+| 12 | `openclaw` | `openclaw.go` | ⚪ 后置（stub 302 LOC） |
+| 13 | `pi` | `pi.go` + session_lock + stdin + _test | ⚪ 后置（multica 完整 builtin，v2 不补） |
+| 14 | `omp`（builtin runtime）| `builtin_runtimes.go` 派生 `pi` | ⚪ 后置（v2 protocol_family 落地后开路） |
+| 15 | `codebuddy` | `codebuddy.go` + discovery fallback | 🔵 ACP 通用包覆盖 |
+| 16 | `deveco` | `deveco.go` | 🔵 ACP 通用包覆盖 |
+| 17 | `qoder` / `qoderclicn` | `qoder.go` (449) + 1041 行 _test | 🔵 ACP 通用包覆盖（qoderclicn 优先） |
+| 18 | `qwenpaw` | `qwenpaw.go` (369) + integration _test | 🔵 ACP 通用包覆盖（per-task workspace） |
+| 19 | `antigravity (agy)` | `antigravity.go` + _test | ⚪ 后置（私有协议） |
+| 20 | `codearts` | `codearts.go` + cancel/integration _test | ⚪ 后置（私有协议 + Windows 取消特殊） |
+| 21 | `grok` | `grok.go` | ⚪ 后置 |
+| 22 | `kiro` | `kiro.go` | ⚪ 后置（orchestratord-kiro-cli 仅 pyproject） |
+| 23 | `mcode` | `mcode.go` | ⚪ 后置（私有协议） |
+| 24 | `dim` | `dim.go` | ⚪ 后置（私有协议） |
+| 25 | `traecli` | `traecli.go` (448) + integration _test | ⚪ 后置（私有协议） |
 
-- 实现通用 ACP backend（基于 `@agentclientprotocol/sdk` Python 版或自写 JSON-RPC stdio）
-- 新增 ACP backend 时只填 descriptor + per-id 默认值（如 qoderclicn 的 `MULTICA_QODERCLICN_PATH` 风格）
-- 优先支持 `session/request_permission` + `session/cancel`（与 multica 一致）
+**说明**：multica 完整 26 family 中 v2 周期落地 9 个（1-9 + qwen），Phase D 落地 6 个（3-4-8-10-11 stub backend 真翻译 + ACP 通用包覆盖 4 个 family），后置 11 个（私有协议 / Windows 特殊 / multica 完整 builtin 派生）。v2 周期后 orchestrator 仍缺 14 个 family。
 
-### 8.4 multica 风格 runtime 身份与协议家族分离
+### 8.4 协议基础设施后置清单（multica 已沉淀 / orchestratord 缺）
 
-借鉴 multica 的 `BuiltinRuntime` 模式：
+multica 在 `server/pkg/agent/` 已沉淀 9 项跨 family 的协议基础设施。v2 仅补 ACP（§8.2.1），其余 8 项列入后置清单：
 
-- `protocol_family` 与 `runtime_id` 分离
-- 一个 protocol family 可承载多个 runtime id（如 multica 的 `omp` → `pi`）
-- orchestratord 的实现路径：在 `spi/backend_descriptor.py` 增加 `protocol_family` 字段，`backend_registry._classify_family()` 同时支持 id 与 family 两层
+| 抽象 | multica 文件 | orchestratord 状态 | 后置阶段 |
+| --- | --- | --- | --- |
+| ACP deliverable / effort / terminal / usage | `acp_{deliverable,effort,terminal,usage}.go` | §8.2.1 落地 | — |
+| Stream-JSON 通用解析 | `stream_json_result.go` + `stream_scanner.go` + `stream_json_final_output_test.go` | 无（每 backend 各自解析） | Phase D 后置 |
+| app-server JSON-RPC 通用适配 | `codex.go` 复用 codex app-server | `orchestratord-codex` 自有，未抽 | Phase D 后置 |
+| session lock（POSIX / Windows） | `pi_session_lock_unix.go` / `_windows.go` | 无 | 后置（多 backend 落地后） |
+| proc 组管理（POSIX / Windows） | `proc_windows.go` (295) / `proc_other.go` (77) | 仅 clawcodex / dsh 各自实现 | 后置（统一 cancel 接口） |
+| thinking 抽象 | `thinking.go` (999) | 无 | 后置 |
+| run_collect 生命周期 | `run_collect.go` (501) + `run_collect_quiet.go` + lifecycle _test | 无（每 backend 自定义 SESSION_COMPLETE） | 后置 |
+| version 协商 | `version.go` (178) + _test | 仅 `clawcodex` 有版本断言 | 后置 |
+| Browser MCP 配置注入 | `browser_mcp_config.go` | 无 | 后置 |
+
+**单一架构原则**：ACP 通用包落地后，仍在每个 backend 里散落的协议适配会让"协议位能否补齐"的成本无法摊薄。8 项后置清单按依赖关系排序：stream-json → app-server → proc 组 → run_collect → thinking → version → session lock → browser MCP。
+
+### 8.5 Phase D 验收
+
+- ACP 通用包至少覆盖 3 个 backend（codebuddy / deveco / qoderclicn）
+- 5 个 stub backend 有真 session 翻译（不再仅 ack）
+- `protocol_family` / `runtime_id` 字段在 `BackendDescriptor` 落地
 
 ---
 
-## 9. 实施路线图（Phase 0–5）
+## 9. Phase E — 文档站深耕 + i18n + 测试烟囱
 
-### Phase 0 — 基础兼容（2 周）
+### 9.1 文档站
 
-- 拆 `cli/dashboard.py` 为 FastAPI app（保留 compat shim）
-- 引入 PostgreSQL（最小 schema：workspaces / members / agents / sessions / runs / events）
-- 迁移事件日志为 DB 持久化（保留磁盘 JSONL 作为审计 fallback）
-- 保留 `install.sh` + `cli/dashboard.py` LiveView 不动
+- `apps/docs` 已 Fumadocs 骨架，补内容深度（中英双语 `conventions.mdx` 术语对照表）
 
-验收：`orchestratord dashboard --port 8080` 仍可用；新增 `orchestratord serve --port 9000` 启动 FastAPI。
+### 9.2 i18n
 
-### Phase 1 — Web 雏形（3 周）
+- 当前 `packages/views/src/i18n/locales/{en,zh-CN}.ts` 两份小字典
+- 扩到三语：`en` / `zh-CN` / `ja`
 
-- Next.js 16 项目脚手架（apps/web + packages/core + packages/ui + packages/views）
-- 主题色板迁移（来自 §5.3.1）
-- 路由骨架：登录 / 工作区 layout / issues 列表（只读）
-- FastAPI router：issues / agents / sessions
-- WebSocket 接入 + TanStack Query 桥接
+### 9.3 测试烟囱
 
-验收：能在浏览器看到 issues 列表与详情；实时事件能从 daemon 推过来。
-
-### Phase 2 — 核心交互（4 周）
-
-- 看板视图 + drag-drop status 切换
-- 评论 + mention
-- session 时间线 + 重放
-- 能力矩阵渲染（§5.2.2）
-- skills 页面（§5.2.5）+ source-map verify
-
-验收：能在浏览器跑通 "创建 issue → assign agent → 看 session 时间线 → 评论 → 触发 autopilots"。
-
-### Phase 3 — 协作层（3 周）
-
-- Squads / Projects / Autopilots 实体 + 页面 + API
-- Runtimes 接入 + 两段式 token
-- Inbox
-- Usage 聚合视图
-
-验收：能组成 5 个 agent 的 squad，autopilots 周期触发并产出 issue。
-
-### Phase 4 — 后端覆盖扩展（持续）
-
-- 按 §8.1 优先级补 backend
-- 抽出 `orchestratord-acp` 通用包
-- 引入 `protocol_family` / `runtime_id` 分离
-
-验收：backends 总数从 6 增至 ≥ 12；ACP 通用包至少覆盖 3 个 ACP backend。
-
-### Phase 5 — 通知 + 多 VCS（2 周）
-
-- Slack / Lark 接入
-- GitHub VCS 集成（issues / PR / webhook）
-- 文档站点（Fumadocs，中英双语）
-
-验收：Slack 内 `@orchestratord` 创建 issue；issue 详情页内嵌 GitHub PR 状态；文档站点可访问。
+- 真 agent CLI 烟雾测试走 `agentintegration` build tag（同 multica）
+- CI 默认 **绝不** resolve / execute 用户安装的 agent CLI
+- `scripts/agent-cli-command-names.txt` 锁住 daemon 默认命令清单
 
 ---
 
@@ -821,29 +646,44 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 ### 10.1 CLI 兼容
 
 - 保留所有现有 `orchestratord` 子命令语义
-- `dashboard` 子命令保留 ≥ 1 个 release cycle
+- `dashboard` 子命令保留 ≥ 1 个 release cycle（§3.6）
 - `run` / `workflow` / `skills` / `backend` / `app` 子命令不变
 - 新增 `serve` / `web` 子命令（不替换 `dashboard`）
 
-### 10.2 数据库迁移
+### 10.2 单用户模式下的数据种子
 
-- 旧磁盘事件日志：一次性脚本 `scripts/migrate_eventlog_to_db.py` 导入
+- `orchestratord serve` 首次启动时执行 seed：
+  - 1 个 `default` workspace
+  - 1 个 owner member（UUID 固定）
+  - 1 条 daemon runtime token（hash 存储，plaintext 仅一次性返回）
+
+### 10.3 多用户切换路径（未来）
+
+- 数据层已就位（§4.2）；切换多用户只需：
+  - 在 `apps/web/app/[workspaceSlug]/(dashboard)/layout.tsx` 恢复 workspace 切换器
+  - 解开 `apps/web/app/login/page.tsx` 的重定向
+  - 在 `apps/web` 渲染 `/members` `/tokens` `/audit` `/projects` `/squads` 入口
+- 不需要数据迁移
+
+### 10.4 数据库迁移
+
+- 旧磁盘事件日志：一次性脚本 `scripts/migrate_eventlog_to_db.py` 导入（草案 §10.2）
 - 单工作区用户：自动迁移到 default workspace
-- 多工作区：手工创建 + 导入
+- 多工作区用户：手工创建 + 导入
 
-### 10.3 后端包兼容
+### 10.5 后端包兼容
 
-- 现有 6 个 backend 包（`orchestratord-clawcodex` 等）**保持 ABI 兼容**
+- 现有 15 个 backend 包**保持 ABI 兼容**
 - 新增 `agent_capabilities_cache` 字段对老 backend 无影响（启动时探测失败也能启动）
 - 测试守门：`tests/test_capability_drift.py` 任何 backend 改动必须通过 CI
 
-### 10.4 Skills 兼容
+### 10.6 Skills 兼容
 
 - `SKILL.md` + `references/source-map.md` 格式不变
 - `skills verify` CLI 保留
 - Web 上 `/api/skills/{name}/source-map` 仅做只读视图
 
-### 10.5 部署兼容
+### 10.7 部署兼容
 
 - `install.sh` 加 `--with-web` / `--with-db` flag
 - 默认 `--no-web --no-db`（开发者模式，与现状一致）
@@ -857,12 +697,12 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 
 | 选择 | 理由 |
 | --- | --- |
-| FastAPI | 与现有 Python 一致；原生 OpenAPI + WebSocket + SSE；类型注解与 Pydantic 已用 |
+| FastAPI | 与现有 Python 一致；原生 OpenAPI + WebSocket + SSE |
 | SQLAlchemy 2.x | 异步支持成熟；与现有 `pydantic` 数据契约对接 |
 | Alembic | 与 FastAPI 集成；支持 non-transactional migrations（multica 风格） |
-| asyncpg | 高性能 PostgreSQL 驱动 |
+| asyncpg | 高性能 PostgreSQL 驱动；**`asyncpg<0.30.0`**（项目硬约束） |
 | Redis | 多实例部署时 WS 中继；单实例可省 |
-| APScheduler | autopilot cron（与 Python 异步集成） |
+| croniter | autopilot 调度（不引入 APScheduler 重依赖） |
 
 ### 11.2 前端
 
@@ -874,20 +714,20 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | shadcn + Radix | 不引入商业 license |
 | @tanstack/react-table | DataTable 基础 |
 | Tailwind CSS | 与 multica 一致；CSS 变量语义化 |
-| react-flow | session 时间线 / pipeline / debate / swarm 可视化 |
+| react-flow | pipeline / debate / swarm / coordinator 模式可视化 |
+| @dnd-kit | 拖拽看板 |
+| next-themes | ThemeProvider（multica 已用） |
 
 ### 11.3 工程化
 
 | 选择 | 理由 |
 | --- | --- |
 | pnpm | 与 multica 一致；与 Python `uv` 不冲突 |
-| Turborepo | 与 multica 一致 |
-| Playwright | E2E；与 multica 一致 |
-| pytest | Python 单元 / 集成 |
 | Vitest | TS 单元 / 组件 |
+| pytest | Python 单元 / 集成（含 `tests/contracts/` T1–T9 + `test_capability_drift.py` + `test_backend_cli_guard.py`） |
 | ruff | Python lint（已有） |
 | ESLint + Prettier | TS lint |
-| GitHub Actions | CI；与 multica 一致 |
+| GitHub Actions | CI |
 
 ---
 
@@ -897,18 +737,19 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 
 | 风险 | 缓解 |
 | --- | --- |
-| 多租户引入复杂度破坏单进程简洁 | 默认单工作区模式可用；多租户是 opt-in |
-| 数据库 schema 演进失控 | 严守 multica 迁移规则（concurrent index / 无 FK / 单文件迁移） |
-| WebSocket 反向心跳与现有 control socket 重复 | control socket 是 daemon 本机；WS 是 daemon → server，作用不同 |
-| 嵌入式 LiveView 与 Web 长期共存造成双前端维护成本 | 1 release cycle 后 dashboard 子命令 deprecated；之后彻底移除 |
+| 单用户模式默认 + 数据层多租户可能让初次接触者困惑 | README + ONBOARDING 明确"数据层为多用户预留，UI 仅单用户" |
+| WebSocket pub/sub backbone 单实例瓶颈 | v2 不引入 Redis；多实例时再加 |
+| daemon token 在单用户模式下泄露面更大 | token 仍然单向 hash；rotate 流程 + audit 保留 |
+| 旧 LiveView 与 Web 长期共存 | 1 release cycle 后 dashboard 子命令 deprecated；之后彻底移除 |
 
 ### 12.2 产品层面
 
 | 风险 | 缓解 |
 | --- | --- |
-| squads / projects / autopilots 是 multica 强项但 orchestratord 缺工程积淀 | Phase 3 拆分独立子项目；先做最小可用版本 |
-| 补 backend 数量时 backend 作者质量参差 | 严守 contract tests + 守门测试；CI 强制 `BackendCapabilities` 报告完整 |
-| Slack / Lark 通知反向要求 Web 路由可达 | 自托管默认端口固定（9000 / 3000）；提供 webhook 内网穿透指引 |
+| 拖拽看板 + 多 agent 模式可视化是 UX 重投入 | Phase A 内拆 PR；先做 single + pipeline，跑通再扩 |
+| Slack/Lark OAuth 状态校验与 state token 表 | 复用 `audit_log`（D10 数据层保留） |
+| stub backend 真翻译工作量不均 | 5 个 stub 各拆 PR；按使用频率排序：zeroclaw / copilot / cursor / kimi / reasonix |
+| ACP 通用包协议复杂度 | 仅覆盖 3 个高频 backend（codebuddy / deveco / qoderclicn），其余 stub backend 各走自己的 protocol family |
 
 ### 12.3 安全层面
 
@@ -916,7 +757,7 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | --- | --- |
 | daemon token 泄露 | token 单向 hash 存储；rotate 流程 + 审计日志 |
 | 用户安装的 agent CLI 被 Web 直连 | 物理隔离：agent CLI 仅 daemon 中转；server 不接受 agent CLI 直连 |
-| 多工作区数据越权 | 严守 `X-Workspace-ID` 头 + `workspace_id` 过滤（multica 规则） |
+| 单用户数据越权（虽然无多用户，但防止环境逃逸） | 严守 `X-Workspace-ID` 头 + `workspace_id` 过滤 |
 | Skills source-map 漂移被忽略 | `skills verify` 在 daemon 启动时强制执行；CI 守门；Web 端显示 verified 状态 |
 
 ### 12.4 工程纪律
@@ -924,23 +765,22 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | 风险 | 缓解 |
 | --- | --- |
 | 默认测试真实调用 agent CLI | 复用 multica 的 `agentintegration` build tag + 默认不可 resolve |
-| backend 数量增加后 install.sh 探测表膨胀 | 探测逻辑统一（`detect_runtime` helper）；6 → 26 探测代码量线性增长 |
-| 与 clawcodex 的 strangler-fig 迁移未完成 | 严守 §3.1；新 Web 不绕过 `orchestratord` 直接调 backend 私有 API |
+| backend 数量增加后 install.sh 探测表膨胀 | 探测逻辑统一（`detect_runtime` helper） |
+| 与 clawcodex 的 strangler-fig 迁移未完成 | 严守 §3.1；新 Web 不绕过 `orchestratord` 直接调 backend 私有协议 |
 
 ---
 
 ## 13. 验收标准
 
-### 13.1 功能验收（每个 Phase 完成后）
+### 13.1 功能验收
 
-| Phase | 验收产物 |
+| 阶段 | 验收产物 |
 | --- | --- |
-| Phase 0 | `orchestratord serve` 启动；旧 `dashboard` 仍可用；DB schema 初始化脚本通过 |
-| Phase 1 | 浏览器能看到 issues 列表与详情；WS 实时推送 1 个 backend 的真实事件 |
-| Phase 2 | 端到端走通 "创建 issue → assign agent → 看 session → 评论 → 触发 autopilots" |
-| Phase 3 | squad leader 路由 work；autopilots cron 触发；inbox 通知到位；usage 聚合准确 |
-| Phase 4 | backend 数 ≥ 12；ACP 通用包至少覆盖 3 个 backend |
-| Phase 5 | Slack 创建 issue；GitHub PR 视图嵌入；文档站点可访问；i18n 中英双语完整 |
+| **Phase A** | 真 WebSocket pub/sub；端到端会话控制；拖拽看板；5 个模式可视化；工具调用卡片；provider tree 全栈 |
+| Phase B | chat 域；mention 路由；Slack/Lark OAuth + inbound webhook |
+| Phase C | autopilot scheduler；cost estimator；usage 图表；inbox 三类视图 |
+| Phase D | ACP 通用包覆盖 ≥ 3 backend；5 个 stub backend 真翻译；`protocol_family` 落地 |
+| Phase E | 文档站中英双语；i18n 三语；测试烟囱守门 |
 
 ### 13.2 性能验收
 
@@ -959,8 +799,8 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 
 ### 13.4 安全 / 合规验收
 
-- 多工作区数据隔离：跨工作区访问被拒
-- audit_log 覆盖所有 mutation
+- 单用户数据隔离：default workspace 数据不被外部越权
+- audit_log 覆盖所有 mutation（即使 UI 不暴露）
 - daemon token 不可逆 hash 存储
 - agent CLI 仅 daemon 中转，server 无直连入口
 
@@ -980,8 +820,18 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | LiveView (compat) | `src/orchestratord/cli/dashboard.py` |
 | Status (TUI) | `src/orchestratord/status_dashboard.py` |
 | Workflow engine | `src/orchestratord/workflow_engine/` |
-| Backend packages | `backends/orchestratord-{clawcodex,claude,codex,dsh,hermes,opencode}/` |
+| Backend packages | `backends/orchestratord-{clawcodex,claude,codex,dsh,hermes,opencode,copilot,cursor,kimi,qwen,kiro-cli,openclaw,reasonix,zeroclaw,acp}/` |
+| FastAPI app | `src/orchestratord/api/app.py` |
+| API routers | `src/orchestratord/api/routers/*.py` |
+| DB models | `src/orchestratord/db/models/` |
+| Domain models | `src/orchestratord/domain/` |
+| Migrations | `alembic/versions/0001_*.py` ~ `0042_*.py` |
 | Install | `install.sh` |
+| Web app | `apps/web/` |
+| Views | `packages/views/src/` |
+| Core (TS) | `packages/core/src/` |
+| UI | `packages/ui/src/` |
+| Docs | `apps/docs/` |
 
 ### 14.2 参考来源（multica）
 
@@ -1000,13 +850,18 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | VCS | `server/internal/integrations/` |
 | 通知渠道 | `apps/web/app/{slack,lark,dingtalk,wecom,telegram}/` |
 | i18n 规范 | `apps/docs/content/docs/developers/conventions.mdx` |
+| ACP 抽象 | `server/pkg/agent/acp_{deliverable,effort,terminal,usage}.go` |
+| Stream-JSON | `server/pkg/agent/stream_json_result.go` + `stream_scanner.go` |
+| Proc 组管理 | `server/pkg/agent/proc_{windows,other}.go` |
+| Run lifecycle | `server/pkg/agent/run_collect.go` |
 
-### 14.3 文档演进
+### 14.3 配套文档
 
-- v1（当前）：草案，Phase 0–5 路线图
-- v2：Phase 0 完成时补充实际 schema 与 FastAPI router 列表
-- v3：Phase 2 完成时补充 WS 协议样例
-- v4：Phase 5 完成时总结"Web 上线后 multica vs orchestratord 对比"
+| 文档 | 内容 |
+| --- | --- |
+| `docs/FEATURE_GAP_VS_MULTICA_DETAILED.md` | v2 同期实测对比（文件 / 行数 / 路由 / backend 协议族覆盖率） |
+| `docs/FEATURE_UNIFIED_CONVERSATION_ID.md` | 跨后端 conversation 同一性方案 |
+| `DESIGN_backends_hardening.md` | backend 协议族深化（含 dsh / codex / opencode / hermes） |
 
 ---
 
@@ -1015,3 +870,4 @@ multica 注册的 26 个 CLI 中，orchestratord 当前缺 20 个。按优先级
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
 | v1 | 2026-09-04 | 初稿；范围 §1.1–§1.2 划定；Phase 0–5 路线图 |
+| v2 | 2026-09-07 | 同步实测基线；新增 D9 单用户模式 / D10 数据层保留 / D11 Phase A 优先；Phase 0–2 标记"已落地"；Phase 3–5 重新拆分为 Phase A–E；新增 §4 单用户模式决策、§5 Phase A 详化、§5.1–§5.7 实施清单；删除原 §5.7 多工作区章节（v2 不做） |

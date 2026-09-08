@@ -80,3 +80,37 @@ def test_inject_parser_accepts_workspace_arg() -> None:
     assert args.workspace == "/tmp/somewhere"
     assert args.hint == "hint text"
     assert args.no_wait is False
+
+
+def test_inject_parser_accepts_hint_flag_and_positional() -> None:
+    """Both the positional <hint> and the --hint TEXT flag must parse."""
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    add_issue_parser(subparsers)
+
+    positional = parser.parse_args(["issue", "inject", "--id", "5", "run pytest first"])
+    assert positional.hint == "run pytest first"
+    assert positional.hint_flag is None
+
+    flagged = parser.parse_args(
+        ["issue", "inject", "--id", "5", "--hint", "用 math.gcd 不算实现"]
+    )
+    assert flagged.hint_flag == "用 math.gcd 不算实现"
+    assert flagged.hint is None
+
+
+def test_inject_hint_flag_form_persists_hint(workspace: Path, capsys) -> None:
+    args = _args(workspace)
+    args.hint = None
+    args.hint_flag = "flag-delivered hint"
+    assert _run_inject(args) == 0
+    hints_file = workspace / "ISSUE-5" / ".operator_hints.md"
+    assert "flag-delivered hint" in hints_file.read_text()
+    assert "hint injected" in capsys.readouterr().out
+
+
+def test_inject_rejects_positional_and_flag_hint_together(workspace: Path, capsys) -> None:
+    args = _args(workspace)
+    args.hint_flag = "other hint"
+    assert _run_inject(args) == 2
+    assert "not both" in capsys.readouterr().err

@@ -22,7 +22,11 @@ from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
+
+from orchestratord.backend_registry import resolve_backend
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
+from orchestratord.runtime import LiveSessionRegistry
 from orchestratord.spi.approval import ApprovalDecision
 from orchestratord.spi.backend import AgentBackend, SessionSpec
 from orchestratord.spi.events import EventEnvelope, EventKind
@@ -32,7 +36,7 @@ from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEvent
 from .approval_policy import (
     ApprovalPolicy,
     ToolCallEvent,
-    get_approval_policy,
+    resolve_approval_policy,
 )
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
 from .control_socket import ControlSocket
@@ -207,6 +211,29 @@ async def _poll_events(
             next_event_task.cancel()
 
 
+class BackendDescription(BaseModel):
+    """Pure-data description of a backend for the ``agent_capabilities_cache``.
+
+    ``BackendRunner.describe()`` snapshots the backend's capability bits,
+    its advertised version, and (when ``cost_reporting=True``) a model
+    pricing table, without invoking any external CLI. The result is
+    JSON-serializable so it can be stored verbatim in
+    ``agent_capabilities_cache.capabilities_jsonb`` /
+    ``model_pricing_jsonb`` (§6.2).
+    """
+
+    streaming_deltas: bool = False
+    resumable: bool = False
+    interrupt: bool = False
+    approval_hooks: bool = False
+    parallel_sessions: bool = False
+    cost_reporting: bool = False
+    tool_filtering: bool = False
+    takeover: bool = False
+    backend_version: str | None = None
+    model_pricing: dict[str, Any] | None = None
+
+
 class BackendRunner:
     """Execute an issue via an AgentBackend (SPI Protocol).
 
@@ -220,25 +247,74 @@ class BackendRunner:
 
     def __init__(
         self,
-        backend: AgentBackend,
-        agent_config: AgentConfig,
-        sandbox_config: SandboxConfig,
+        backend: AgentBackend | None = None,
+        agent_config: AgentConfig | None = None,
+        sandbox_config: SandboxConfig | None = None,
         workspace_cfg: WorkspaceConfig | None = None,
+        *,
+        backend_name: str | None = None,
+        config: dict[str, Any] | None = None,
     ) -> None:
         self.backend = backend
         self.agent_config = agent_config
         self.sandbox_config = sandbox_config
         self.workspace_cfg: WorkspaceConfig = workspace_cfg or WorkspaceConfig()
-        self.max_turns = agent_config.max_turns
-        self._approval_policy: ApprovalPolicy = get_approval_policy(
-            getattr(sandbox_config, "approval_policy", "never") or "never"
+        # Lazy form: ``BackendRunner(backend_name=..., config=...)`` resolves
+        # the backend on demand (used by ``describe()``, which never runs a
+        # session). ``config`` is carried through to ``resolve_backend``.
+        self.backend_name = backend_name
+        self.config = config or {}
+        self.max_turns = agent_config.max_turns if agent_config is not None else 0
+        # resolve_approval_policy honors an explicit sandbox.approval_policy
+        # and otherwise bridges agent.permission_mode (e.g. bypassPermissions
+        # → auto-approve) instead of silently failing closed to 'ask'.
+        self._approval_policy: ApprovalPolicy = resolve_approval_policy(
+            sandbox_config, agent_config
         )
         self._sleep: Callable[..., Any] = asyncio.sleep
+        # In-process map of active AgentSession handles keyed by session id
+        # (§5.2.3). ``_run_with_backend`` registers every SPI session here
+        # (mirrored by a ``sessions`` DB row) and unregisters it when the
+        # run ends, so the API layer can forward approve / deny / pause /
+        # resume / stop to the live backend.
+        self.registry = LiveSessionRegistry()
 
     def get_task_registry(self) -> Any | None:
         """Return the optional registry supplied by the configured backend."""
         getter = getattr(self.backend, "get_task_registry", None)
         return getter() if callable(getter) else None
+
+    def describe(self) -> BackendDescription:
+        """Snapshot the backend's capabilities, version, and pricing (§6.2).
+
+        Resolves the backend lazily when constructed via ``backend_name``
+        (otherwise reuses the injected ``self.backend``) and reads its
+        ``capabilities`` — a bound method on real backends, a plain
+        ``BackendCapabilities`` instance on test doubles — without
+        shelling out to any external CLI.
+        """
+        backend = self.backend or resolve_backend(self.backend_name, self.config)
+        caps = backend.capabilities
+        if callable(caps):
+            caps = caps()
+        pricing = getattr(backend, "model_pricing", None)
+        if caps.cost_reporting and pricing is None:
+            # Cost reporting is advertised but the backend ships no pricing
+            # table. Carry an empty table rather than ``None`` so the Web
+            # usage page can distinguish "no pricing" from "not reported".
+            pricing = {}
+        return BackendDescription(
+            streaming_deltas=caps.streaming_deltas,
+            resumable=caps.resumable,
+            interrupt=caps.interrupt,
+            approval_hooks=caps.approval_hooks,
+            parallel_sessions=caps.parallel_sessions,
+            cost_reporting=caps.cost_reporting,
+            tool_filtering=caps.tool_filtering,
+            takeover=caps.takeover,
+            backend_version=getattr(backend, "version", None),
+            model_pricing=pricing if caps.cost_reporting else None,
+        )
 
     # ------------------------------------------------------------------
     # Public API — AgentTaskRunner Protocol
@@ -805,6 +881,9 @@ class BackendRunner:
         owns_control_socket = await self._start_control_socket(
             session, pausable=bool(getattr(getattr(spi_session, "capabilities", None), "pausable", False))
         )
+        live_session_id = await self._expose_live_session(
+            session, spi_session, backend_caps
+        )
         try:
             # Send the prompt and start processing events.
             prompt = getattr(session, "_user_prompt", "") or ""
@@ -826,6 +905,7 @@ class BackendRunner:
                 diagnostics_callback=diagnostics_callback,
             )
         finally:
+            await self._retire_live_session(live_session_id, session)
             try:
                 await spi_session.close()
             except Exception:
@@ -854,6 +934,160 @@ class BackendRunner:
                     )
             except Exception:
                 logger.debug("conversation manifest completion update failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Live-session exposure (§5.2.3 — sessions-router reachability)
+    # ------------------------------------------------------------------
+
+    async def _expose_live_session(
+        self,
+        session: AgentSession,
+        spi_session: Any,
+        backend_caps: Any,
+    ) -> str | None:
+        """Register the running session so the API layer can operate it.
+
+        Two halves, both best-effort: an in-process ``LiveSession`` in
+        ``self.registry`` (the pause/resume/stop forwarding target) and a
+        ``sessions`` DB row (the router's ``_session_or_404`` requires
+        one). The registry key doubles as the row primary key. Failures
+        log and return ``None`` — operator control degrades to the
+        DB-only path, never breaks the run itself.
+        """
+        live_id = str(uuid.uuid4())
+        try:
+            from .control_socket import ControlCommand
+            from .process_control import TurnProcessControl
+            from .runtime import LiveSession
+
+            control_socket = session.control_socket
+
+            def _enqueue_stop() -> None:
+                if control_socket is not None:
+                    control_socket._command_queue.put_nowait(
+                        ControlCommand("stop")
+                    )
+
+            process_tree = TurnProcessControl(
+                pid_provider=lambda: getattr(spi_session, "current_pid", None),
+                stop_command=_enqueue_stop,
+            )
+            await self.registry.register(
+                live_id,
+                LiveSession(
+                    spi_session=spi_session,
+                    capabilities=backend_caps,
+                    process_tree=process_tree,
+                    metadata={
+                        "issue_id": getattr(session.issue, "id", None),
+                        "run_id": session.run_id,
+                        "workspace_path": str(session.workspace.path),
+                    },
+                ),
+            )
+            logger.info(
+                "live session registered: id=%s run=%s spi=%s#%s "
+                "pid_support=%s",
+                live_id,
+                session.run_id,
+                type(spi_session).__module__,
+                type(spi_session).__name__,
+                hasattr(spi_session, "current_pid"),
+            )
+        except Exception:
+            logger.exception(
+                "live-session registration failed; API control unavailable "
+                "for run %s",
+                session.run_id,
+            )
+            return None
+        try:
+            await self._create_session_row(live_id, session)
+        except Exception:
+            logger.exception(
+                "sessions DB row creation failed for run %s — the API "
+                "will not list this session",
+                session.run_id,
+            )
+        return live_id
+
+    async def _retire_live_session(
+        self, live_id: str | None, session: AgentSession
+    ) -> None:
+        """Drop the live handle and finalize the DB row once the run ends."""
+        if live_id is None:
+            return
+        try:
+            await self.registry.unregister(live_id)
+        except Exception:
+            logger.debug("live-session unregister failed", exc_info=True)
+        try:
+            await self._finalize_session_row(live_id, session)
+        except Exception:
+            logger.debug("sessions DB row finalize failed", exc_info=True)
+
+    async def _create_session_row(
+        self, live_id: str, session: AgentSession
+    ) -> None:
+        """Mirror the running session into the API's ``sessions`` table.
+
+        Rows hang off a dedicated ``daemon`` workspace so the orchestrator
+        path also works on deployments that never seeded one.
+        """
+        from .api.db import _get_session_factory
+        from .db import models as orm
+        from .db.repository import Repositories
+
+        def _as_uuid(value: Any) -> uuid.UUID | None:
+            try:
+                return uuid.UUID(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        slug = "daemon"
+        async with _get_session_factory()() as db:
+            repos = Repositories(db)
+            workspace = await repos.workspaces.by_slug(slug)
+            if workspace is None:
+                workspace = orm.Workspace(
+                    id=uuid.uuid4(),
+                    slug=slug,
+                    name="Daemon",
+                    created_at=datetime.now(UTC),
+                )
+                await repos.workspaces.add(workspace)
+            await repos.sessions.add(
+                orm.Session(
+                    id=uuid.UUID(live_id),
+                    workspace_id=workspace.id,
+                    issue_id=_as_uuid(getattr(session.issue, "id", None)),
+                    run_id=_as_uuid(session.run_id),
+                    mode="single",
+                    status="running",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+    async def _finalize_session_row(
+        self, live_id: str, session: AgentSession
+    ) -> None:
+        """Flip the DB row to its terminal status unless already terminal.
+
+        An operator stop marks the row ``stopped`` from the API side; that
+        must not be overwritten by the runner's own end-of-run status.
+        """
+        from .api.db import _get_session_factory
+        from .db import models as orm
+
+        async with _get_session_factory()() as db:
+            row = await db.get(orm.Session, uuid.UUID(live_id))
+            if row is None or row.status in {"completed", "stopped", "failed"}:
+                return
+            row.status = (
+                "completed" if session.status == "completed" else "failed"
+            )
+            await db.commit()
 
     @staticmethod
     async def _start_control_socket(session: AgentSession, *, pausable: bool = False) -> bool:

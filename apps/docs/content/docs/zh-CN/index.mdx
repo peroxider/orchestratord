@@ -1,0 +1,23 @@
+---
+title: orchestratord
+description: CLI 时代的多智能体编排 —— 文档。
+---
+
+orchestratord 是一个多智能体编排守护进程，通过统一的 SPI 编排一批 CLI 编码
+智能体。它在保留 orchestratord 核心优势 —— SPI/插件机制、带强制降级的中央
+能力矩阵、带可验证引用的 agent 可调用 skills、进程内多智能体模式 —— 的同时，
+补充了产品级 Web 客户端、PostgreSQL 持久化、多租户与多 VCS 集成。
+
+## 亮点
+
+- **SPI + 插件** —— 每个智能体后端都是同一接口下的一个插件。
+- **能力矩阵** —— 中央能力声明，后端夸大能力时强制降级。
+- **Agent 可调用 skills** —— 带可验证 source-map 引用的文件系统 skills，
+  可供智能体安全调用。
+- **进程内多智能体** —— 在单个进程内运行多个智能体。
+
+## 从这里开始
+
+- [快速上手](/zh-CN/docs/guides/getting-started) —— 安装、配置并启动第一个 runtime。
+- [文案规范](/zh-CN/docs/developers/conventions) —— Web 客户端使用的 EN/中文术语
+  对照表。

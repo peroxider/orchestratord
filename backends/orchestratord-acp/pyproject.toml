@@ -1,0 +1,23 @@
+[project]
+name = "orchestratord-acp"
+version = "0.1.0"
+description = "Generic ACP (Agent Client Protocol) stdio backend for orchestratord"
+requires-python = ">=3.11"
+dependencies = [
+    "orchestratord",
+]
+
+[project.entry-points."orchestratord.backends"]
+acp = "orchestratord_acp:AcpBackend"
+
+[project.entry-points."orchestratord.backend_descriptors"]
+grok = "orchestratord_acp.descriptor:GROK_DESCRIPTOR"
+codebuddy = "orchestratord_acp.descriptor:CODEBUDDY_DESCRIPTOR"
+qwenpaw = "orchestratord_acp.descriptor:QWENPAW_DESCRIPTOR"
+qodercli = "orchestratord_acp.descriptor:QODERCLI_DESCRIPTOR"
+qoderclicn = "orchestratord_acp.descriptor:QODERCLICN_DESCRIPTOR"
+deveco = "orchestratord_acp.descriptor:DEVECO_DESCRIPTOR"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
