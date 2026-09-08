@@ -232,11 +232,29 @@ def _gather_metadata(workspace: Path) -> dict[str, Any]:
     }
 
 
+def _strip_run_entropy(run_id: str) -> str:
+    """Strip a trailing ``-<8 hex>`` entropy suffix from a run id, if present.
+
+    ``_build_run_id`` (issue path) yields ``{ts}_{slug}-<8 hex>`` and the
+    workflow ``run_task`` path yields ``{task.id}-<8 hex>``; both append
+    ``uuid.uuid4().hex[:8]`` after a ``-``.  Old-format ids without the
+    suffix are returned unchanged, so callers can group all runs of one
+    issue by their shared ``{ts}_{slug}`` prefix.
+    """
+    if (
+        len(run_id) > 9
+        and run_id[-9] == "-"
+        and all(c in "0123456789abcdef" for c in run_id[-8:])
+    ):
+        return run_id[:-9]
+    return run_id
+
+
 def _related_session_run_ids(run_id: str) -> list[str]:
     """Return current and older session IDs that belong to one issue."""
     from ..paths import SESSIONS_DIR
 
-    parts = run_id.split("_", 2)
+    parts = _strip_run_entropy(run_id).split("_", 2)
     if len(parts) < 3 or not SESSIONS_DIR.exists():
         return []
     issue_suffix = "_" + parts[2]
@@ -245,7 +263,7 @@ def _related_session_run_ids(run_id: str) -> list[str]:
             entry.name
             for entry in SESSIONS_DIR.iterdir()
             if entry.is_dir()
-            and entry.name.endswith(issue_suffix)
+            and _strip_run_entropy(entry.name).endswith(issue_suffix)
             and entry.name <= run_id
         )
     except OSError as exc:

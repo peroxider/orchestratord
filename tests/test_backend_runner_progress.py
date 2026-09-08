@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -208,7 +209,41 @@ def test_run_id_sanitizes_tracker_punctuation_for_backend_transcripts() -> None:
     assert all(char.isalnum() or char in "_-" for char in run_id)
     assert "#" not in run_id
     assert "/" not in run_id
-    assert run_id.endswith("66---修复")
+    assert "66---修复" in run_id
+
+
+def test_run_id_has_entropy_for_same_second_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two runs of the same issue within the same second must not collide.
+
+    Regression for the issue-path ``_build_run_id`` which used to return a
+    second-precision ``{ts}_{slug}`` with no entropy — a manual requeue or
+    fast retry in the same second produced the same run_id and the stage
+    transcript / session directory overwrote each other.
+    """
+    from orchestratord import backend_runner
+
+    # Freeze time so the timestamp portion of both calls is identical.
+    frozen = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
+
+    class _FrozenDT:
+        UTC = UTC
+
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(backend_runner, "datetime", _FrozenDT)
+
+    session = SimpleNamespace(issue=SimpleNamespace(identifier="issue-42"))
+    run_id_1 = BackendRunner._build_run_id(session)
+    run_id_2 = BackendRunner._build_run_id(session)
+
+    assert run_id_1 != run_id_2, (
+        "same-second run_ids must differ; "
+        "entropy suffix is missing from _build_run_id"
+    )
+    assert run_id_1.startswith("20260908_120000_issue-42-")
+    assert run_id_2.startswith("20260908_120000_issue-42-")
 
 
 async def _changed() -> bool:
