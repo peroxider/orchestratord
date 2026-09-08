@@ -30,6 +30,7 @@ AGENTS.md
 /node_modules/
 /node_modules/.pnpm/
 .playwright-cli/
+output/
 /apps/docs/node_modules/
 /apps/web/node_modules/
 /packages/eslint-config/node_modules/
