@@ -74,6 +74,20 @@ class StateMachineMixin:
         """Return all records currently in the RUNNING state."""
         return [record for record in self._records.values() if record.status == IssueStatus.RUNNING]
 
+    def pending_retry_records(self) -> list[IssueRecord]:
+        """Return all records with a persisted retry plan (``next_retry_at`` set).
+
+        A non-``None`` ``next_retry_at`` means :meth:`_schedule_retry` was
+        called in a previous daemon lifetime and the retry has not yet been
+        consumed.  These records are recovered on startup so the retry
+        queue is rebuilt and the retry is not silently dropped.
+        """
+        return [
+            record
+            for record in self._records.values()
+            if record.next_retry_at is not None
+        ]
+
     def has_processed_feedback(self, issue_id: str, feedback_id: str) -> bool:
         """Whether a feedback id has already been processed for the issue."""
         record = self._records.get(issue_id)

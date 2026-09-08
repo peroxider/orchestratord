@@ -961,6 +961,9 @@ class Orchestrator:
         # Clean up terminal workspaces on startup
         await self.workspace.run_terminal_workspace_cleanup()
         await self._recover_stale_running_records()
+        # Rebuild the retry queue from persisted retry plans so a
+        # scheduled retry survives daemon restarts.
+        self._recover_pending_retries()
 
         # Start metadata heartbeat for CLI discovery
         heartbeat_task = asyncio.create_task(self._metadata_heartbeat_loop())
@@ -1070,6 +1073,56 @@ class Orchestrator:
             logger.warning(
                 "Recovered stale running issue_id=%s on orchestrator startup",
                 record.issue_id,
+            )
+
+    def _recover_pending_retries(self) -> None:
+        """Rebuild the retry queue from persisted retry plans.
+
+        ``_schedule_retry`` persists ``next_retry_at`` on the registry
+        record so a waiting retry survives daemon restarts.  Nothing
+        read that field back, so after a restart the retry silently
+        evaporated — the record kept ``next_retry_at`` (non-terminal
+        planning) but the in-memory ``retry_queue`` was rebuilt empty
+        and the issue hung forever.
+
+        This startup path scans the registry for records with a pending
+        retry plan and reconstructs their ``RetryItem`` entries.  The
+        items are then consumed by the normal ``_process_retry_queue``
+        dispatch, which applies the existing guards unchanged
+        (concurrency slots, tracker active-state check, requeue
+        ceiling).  No launch happens here — a full queue at startup
+        still respects ``max_concurrent_agents``.
+        """
+        recovered = self._registry.pending_retry_records()
+        if not recovered:
+            return
+        now = time.time()
+        for record in recovered:
+            remaining = max(0.0, record.next_retry_at - now)
+            attempt = record.retry_count or 1
+            retry = RetryItem(
+                issue_id=record.issue_id,
+                attempt=attempt,
+                # Remaining wait until the persisted due time; overdue
+                # plans (``next_retry_at`` in the past, e.g. the daemon
+                # was down while the retry came due) become due
+                # immediately (delay 0).
+                delay_seconds=remaining,
+                identifier=record.issue_identifier,
+                error="recovered persisted retry plan on orchestrator startup",
+            )
+            self._state.retry_queue.append(retry)
+            # Restore the attempt counter so the retry-limit guard in
+            # ``_schedule_retry`` (``max_retry_attempts``) is not
+            # bypassed by a restart resetting it to zero.
+            self._state.retry_attempts[record.issue_id] = attempt
+            logger.info(
+                "Recovered pending retry issue_id=%s attempt=%s "
+                "next_retry_at=%s remaining=%.0fs",
+                record.issue_id,
+                attempt,
+                record.next_retry_at,
+                remaining,
             )
 
     async def _metadata_heartbeat_loop(self) -> None:
