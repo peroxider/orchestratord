@@ -112,7 +112,7 @@ function SquadCard({
   return (
     <Card className="squad-card">
       <header className="squad-card__header">
-        <span className="squad-card__name">{name}</span>
+        <a className="squad-card__name" href={`/squads/${squadId}`}>{name}</a>
         <Badge tone="accent">{copy.badge}</Badge>
       </header>
       <p className="squad-card__leader">{copy.coordinator}: {coordinator}</p>

@@ -30,11 +30,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from .mode_router import RoutingSubject
 from .modes.base import DEFAULT_MODE, ModeDecision
 
 if TYPE_CHECKING:
     from .mode_router import Router
-    from .issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,7 @@ class ModeSelector:
     # Public entry point
     # ------------------------------------------------------------------
 
-    def choose(self, issue: "Issue") -> ModeDecision:
+    def choose(self, issue: RoutingSubject) -> ModeDecision:
         """Return the chosen mode for ``issue``.
 
         Never raises — failures fall back to ``DEFAULT_MODE`` and log a
@@ -139,7 +139,7 @@ class ModeSelector:
             )
         return None
 
-    def _choose_via_router(self, issue: "Issue", *, fallback_reason: str) -> ModeDecision:
+    def _choose_via_router(self, issue: RoutingSubject, *, fallback_reason: str) -> ModeDecision:
         """Ask the router which mode to use, with full error containment.
 
         Failure modes (all → fallback decision with a useful ``reason``):

@@ -29,6 +29,18 @@ import { translate, type TranslationKey } from './i18n'
 import { en } from './i18n/locales/en'
 import { zhCN } from './i18n/locales/zh-CN'
 import { cronSummary } from './autopilots/schedule'
+import { redactSensitive } from './sessions/redact-sensitive'
+
+describe('redactSensitive', () => {
+  it('redacts sensitive keys at every nesting level without mutating safe evidence', () => {
+    expect(redactSensitive({ command: 'deploy', token: 'abc123', nested: { api_key: 'key', value: 3 } })).toEqual({ command: 'deploy', token: '[REDACTED]', nested: { api_key: '[REDACTED]', value: 3 } })
+  })
+
+  it('redacts common inline credential forms', () => {
+    expect(redactSensitive('Authorization: Bearer abcdefghijk token=secret-value sk-proj_abcdefgh')).not.toContain('abcdefghijk')
+    expect(redactSensitive('Authorization: Bearer abcdefghijk token=secret-value sk-proj_abcdefgh')).toContain('[REDACTED]')
+  })
+})
 
 describe('cronSummary', () => {
   it('turns common schedules into readable language', () => {

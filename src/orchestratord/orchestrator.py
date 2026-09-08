@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,15 +38,26 @@ from .git.sync import (
 )
 from .issue_registry.issue import Issue
 from .issue_registry import IssueRegistry, IssueStatus
-from .mode_router import HeuristicRouter, LLMRouter, Router
+from .kernel.dispatch import (
+    FAILURE_RETRY_BASE_MS,
+    NON_RETRYABLE_END_REASONS,
+    OrchestratorState,
+    compute_retry_delay,
+    requeue_retry_item,
+    split_ready_retries,
+)
+from .kernel.mode_dispatcher import build_mode_selector, register_collaboration_modes
+from .kernel.sink_router import attach_asciicast_sink, build_base_session_sink
+from .kernel.telemetry import (
+    derive_session_id,
+    metadata_extras,
+    metadata_heartbeat_loop,
+    report_telemetry,
+    shutdown_cleanup,
+)
 from .mode_selector import ModeSelector
 from . import modes as _modes
 from .modes.base import DEFAULT_MODE, ModeDecision
-from .modes.coordinator import CoordinatorModeRunner
-from .modes.debate import DebateModeRunner
-from .modes.pipeline import PipelineModeRunner
-from .modes.single import SingleModeRunner
-from .modes.swarm import SwarmModeRunner
 from .failure_messages import (
     FailureContext,
     empty_branch_message,
@@ -64,7 +74,11 @@ from .failure_messages import (
     verification_failed_message,
 )
 from .premise_check import format_cannot_proceed_comment, read_cannot_proceed
-from .prompt_builder import PromptBuilder
+from .business_prompts import (
+    render_feedback_summary,
+    render_rebase,
+    render_review_feedback,
+)
 from .repro_gate import (
     ReproGateResult,
     append_repro_hint,
@@ -100,27 +114,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _CONTINUATION_RETRY_DELAY_MS = 1_000
-_FAILURE_RETRY_BASE_MS = 10_000
 # End reasons that mean SUCCESS — the failure-guidance block must skip
 # them (they are not in the failure guidance table and would otherwise
 # fall back to the generic "未知错误" fallback).
 _SUCCESS_END_REASONS = frozenset({"success"})
-
-# End reasons produced by explicit operator action. They are
-# terminal states — the auto-retry loop must not revive them.
-_NON_RETRYABLE_END_REASONS = frozenset({
-    "operator_stop",
-    "operator_takeover",
-    "operator_stopped",
-})
-
-# End reasons produced by explicit operator action. They are
-# terminal states — the auto-retry loop must not revive them.
-_NON_RETRYABLE_END_REASONS = frozenset({
-    "operator_stop",
-    "operator_takeover",
-    "operator_stopped",
-})
 
 
 def _operator_failure_detail(exc: BaseException) -> str:
@@ -183,35 +180,6 @@ def _extract_error_message(payload: Any) -> str | None:
                 if nested:
                     return nested
     return None
-
-
-@dataclass
-class OrchestratorState:
-    """Runtime state for the orchestrator polling loop."""
-
-    poll_interval_ms: int = 30_000
-    max_concurrent_agents: int = 10
-    next_poll_due_at_ms: float | None = None
-    poll_check_in_progress: bool = False
-    running: dict[str, AgentSession] = field(default_factory=dict)
-    completed: set[str] = field(default_factory=set)
-    failed: set[str] = field(default_factory=set)
-    pending_review: set[str] = field(default_factory=set)  # awaiting human review
-    claimed: set[str] = field(default_factory=set)
-    retry_queue: list[RetryItem] = field(default_factory=list)
-    retry_attempts: dict[str, int] = field(default_factory=dict)
-    # Throttle marker for the optional PR conflict scan. Wall-clock
-    # seconds (not ms) of the last scan — compared against
-    # ``time.monotonic()`` so a backwards clock jump is benign.
-    pr_conflict_scan_last_run: float = 0.0
-    codex_totals: dict[str, int] = field(
-        default_factory=lambda: {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
-            "seconds_running": 0,
-        }
-    )
 
 
 class Orchestrator:
@@ -471,30 +439,15 @@ class Orchestrator:
     def _build_session_sink(self, task_id: str) -> Any:
         """Build a fresh :class:`CompositeProgressSink` for one session.
 
-        The returned sink is bound to ``task_id`` and owns a private
-        :class:`ToolContextProgressSink` instance. Two sinks built for
-        different task ids share the underlying ``ToolContext`` (so
-        progress stages land in the right place) but have independent
-        phase counters, eliminating the legacy single-instance
-        cross-talk.
-
-        Future issues (PR review auto-fix sink, retry label sink)
-        can register additional sinks on the returned composite via
-        :meth:`CompositeProgressSink.add` without touching
-        :class:`AgentRunner` or ``progress_reporter.py``.
+        基础组装与 Asciicast 挂载已迁 kernel/sink_router.py（DESIGN §5）；
+        IM/channel sink 挂载段为宿主钩子接缝（KernelHooks
+        ``on_session_sink_build``，DESIGN §4.7，P4 步骤 5 正式化）。
         """
-        from .sinks.progress import (
-            CompositeProgressSink,
-            ToolContextProgressSink,
-        )
-
-        inner = ToolContextProgressSink(
+        composite = build_base_session_sink(
             task_id=task_id,
-            workflow_phases=self.workflow.agent.phases,
-            fallback_to_phase_step=bool(self.workflow.agent.fallback_to_phase_step),
-            context=getattr(self, "_progress_context", None),
+            workflow=self.workflow,
+            progress_context=getattr(self, "_progress_context", None),
         )
-        composite = CompositeProgressSink([inner])
         # P3: attach the IM event emitter when a deliver callback is wired.
         if getattr(self, "im_event_deliver", None) is not None:
             from .sinks.channel import ChannelProgressSink
@@ -548,35 +501,12 @@ class Orchestrator:
                 phases_total=phases_total,
             )
             composite.add(activity_sink)
-        # F-REC: when a capture handle is wired (typically by the
-        # the report CLI or by ``report_writer.write`` dual-
-        # write), attach an :class:`AsciicastSink` so phase / session
-        # markers land in the .cast. Defensive try/except mirrors the
-        # IM-sink block above — recording failures must never block
-        # the live orchestrator.
-        capture = getattr(self, "asciicast_capture", None)
-        if capture is not None:
-            try:
-                from .sinks.asciicast import AsciicastSink
-
-                phases_total = (
-                    len(self.workflow.agent.phases)
-                    if getattr(self.workflow.agent, "phases", None)
-                    else None
-                )
-                composite.add(
-                    AsciicastSink(
-                        capture,
-                        task_id=task_id,
-                        phases_total=phases_total,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "asciicast sink attach failed (task_id=%s): %s",
-                    task_id,
-                    exc,
-                )
+        attach_asciicast_sink(
+            composite,
+            capture=getattr(self, "asciicast_capture", None),
+            task_id=task_id,
+            phases=self.workflow.agent.phases,
+        )
         return composite
 
     def _emit_im_event(
@@ -704,184 +634,12 @@ class Orchestrator:
     def _register_collaboration_modes(
         self, workflow: WorkflowConfig, agent_runner: BackendRunner
     ) -> None:
-        """Register the ``ModeRunner`` instances that match ``modes.enabled``.
-
-        ``single`` is always registered (it's the safe fallback). Other
-        modes are registered only when listed in ``workflow.modes.enabled``
-        so an operator can disable a mode without removing its code.
-        """
-        # Always register "single" — it's both the default fallback and
-        # the run mode for legacy / followup / review_followup paths.
-        _modes.register("single", SingleModeRunner(agent_runner))
-
-        enabled = {m.strip().lower() for m in workflow.modes.enabled if m}
-        if "pipeline" in enabled:
-            stages = tuple(workflow.modes.pipeline_stages)
-            max_retries = int(getattr(workflow.modes, "pipeline_max_retries_per_stage", 1))
-            stage_models = dict(getattr(workflow.modes, "pipeline_stage_models", None) or {})
-            stage_max_turns = dict(getattr(workflow.modes, "pipeline_stage_max_turns", None) or {})
-            stage_specs = dict(getattr(workflow.modes, "pipeline_stage_specs", None) or {})
-            handoff = str(getattr(workflow.modes, "pipeline_handoff", "prompt"))
-            try:
-                _modes.register(
-                    "pipeline",
-                    PipelineModeRunner(
-                        agent_runner,
-                        stages=stages,
-                        max_retries_per_stage=max_retries,
-                        stage_models=stage_models,
-                        stage_max_turns=stage_max_turns,
-                        stage_specs=stage_specs,
-                        handoff=handoff,
-                    ),
-                )
-            except ValueError as exc:
-                # Bad stage_specs (e.g. kind=pipeline nested). Fall back
-                # to a spec-less pipeline so the daemon keeps running.
-                logger.warning(
-                    "Pipeline registration failed (%s) — registering without stage_specs",
-                    exc,
-                )
-                _modes.register(
-                    "pipeline",
-                    PipelineModeRunner(
-                        agent_runner,
-                        stages=stages,
-                        max_retries_per_stage=max_retries,
-                        stage_models=stage_models,
-                        stage_max_turns=stage_max_turns,
-                        stage_specs={},
-                        handoff=handoff,
-                    ),
-                )
-                stage_specs = {}
-            logger.info(
-                "Collaboration mode registered: pipeline (stages=%s, "
-                "max_retries_per_stage=%d, stage_models=%s, "
-                "stage_max_turns=%s, stage_specs=%s, handoff=%s)",
-                stages,
-                max_retries,
-                stage_models or "(none)",
-                stage_max_turns or "(none)",
-                stage_specs or "(none)",
-                handoff,
-            )
-        if "coordinator" in enabled:
-            _modes.register("coordinator", CoordinatorModeRunner(agent_runner))
-            logger.info("Collaboration mode registered: coordinator")
-        if "swarm" in enabled:
-            _modes.register(
-                "swarm",
-                SwarmModeRunner(
-                    agent_runner,
-                    max_subtasks=workflow.modes.swarm_max_subtasks,
-                    max_parallel=workflow.modes.swarm_max_parallel,
-                    max_waves=workflow.modes.swarm_max_waves,
-                ),
-            )
-            logger.info(
-                "Collaboration mode registered: swarm (max_subtasks=%d, "
-                "max_parallel=%d, max_waves=%d)",
-                workflow.modes.swarm_max_subtasks,
-                workflow.modes.swarm_max_parallel,
-                workflow.modes.swarm_max_waves,
-            )
-        if "debate" in enabled:
-            proposers = tuple(
-                getattr(workflow.modes, "debate_proposers", None) or ("proposer_a", "proposer_b")
-            )
-            judge_model = getattr(workflow.modes, "debate_judge_model", None)
-            isolation = getattr(workflow.modes, "debate_isolation", "reset")
-            proposer_models = dict(getattr(workflow.modes, "debate_proposer_models", None) or {})
-            parallel = bool(getattr(workflow.modes, "debate_parallel", False))
-            judge_mode = str(getattr(workflow.modes, "debate_judge_mode", "pick"))
-            try:
-                _modes.register(
-                    "debate",
-                    DebateModeRunner(
-                        agent_runner,
-                        proposers=proposers,
-                        judge_model=judge_model,
-                        isolation=isolation,
-                        proposer_models=proposer_models,
-                        parallel=parallel,
-                        judge_mode=judge_mode,
-                    ),
-                )
-            except ValueError as exc:
-                # Most likely: parallel=True without isolation=worktree,
-                # or an invalid judge_mode. Fall back to safe defaults so
-                # the daemon keeps running.
-                logger.warning(
-                    "Debate registration failed (%s) — registering with "
-                    "parallel=False, isolation='%s', judge_mode='pick'",
-                    exc,
-                    isolation,
-                )
-                _modes.register(
-                    "debate",
-                    DebateModeRunner(
-                        agent_runner,
-                        proposers=proposers,
-                        judge_model=judge_model,
-                        isolation=isolation,
-                        proposer_models=proposer_models,
-                        parallel=False,
-                        judge_mode="pick",
-                    ),
-                )
-                parallel = False
-                judge_mode = "pick"
-            logger.info(
-                "Collaboration mode registered: debate (proposers=%s, "
-                "judge_model=%s, isolation=%s, parallel=%s, "
-                "proposer_models=%s, judge_mode=%s)",
-                proposers,
-                judge_model or "(default)",
-                isolation,
-                parallel,
-                proposer_models or "(none)",
-                judge_mode,
-            )
+        """机制段已迁 kernel/mode_dispatcher.py（DESIGN §5）；保留薄转发。"""
+        register_collaboration_modes(workflow, agent_runner)
 
     def _build_mode_selector(self, workflow: WorkflowConfig) -> ModeSelector:
-        """Construct ``ModeSelector`` with the configured router backend."""
-        router: Router | None
-        kind = workflow.modes.router_kind
-        if kind == "heuristic":
-            router = HeuristicRouter()
-            logger.info("ModeSelector: router=HeuristicRouter")
-        elif kind == "llm":
-            router = LLMRouter(
-                model=workflow.modes.router_model,
-                endpoint=workflow.modes.router_endpoint,
-                api_key_env_var=workflow.modes.router_api_key_env,
-                timeout_seconds=workflow.modes.router_timeout_seconds,
-            )
-            logger.info(
-                "ModeSelector: router=LLMRouter(model=%s, endpoint=%s, "
-                "api_key_env=%s, timeout=%.1fs)",
-                workflow.modes.router_model,
-                workflow.modes.router_endpoint,
-                workflow.modes.router_api_key_env,
-                workflow.modes.router_timeout_seconds,
-            )
-        else:
-            router = None
-            logger.info("ModeSelector: no router configured (kind=%s)", kind)
-
-        default_mode = workflow.modes.default
-        try:
-            return ModeSelector(
-                default_mode=default_mode,
-                router=router,
-                min_confidence=workflow.modes.router_min_confidence,
-            )
-        except ValueError as exc:
-            # workflow.md misconfiguration — fall back to safe defaults
-            # instead of crashing the daemon at startup.
-            logger.warning("ModeSelector construction failed (%s); using defaults", exc)
-            return ModeSelector()
+        """机制段已迁 kernel/mode_dispatcher.py（DESIGN §5）；保留薄转发。"""
+        return build_mode_selector(workflow)
 
     def _validate_workspace_strategy(self) -> None:
         if self.workflow.workspace.strategy != "sequential":
@@ -1021,49 +779,12 @@ class Orchestrator:
                 pass
 
     def _derive_orchestrator_session_id(self) -> str:
-        """Stable session id for the orchestrator daemon.
-
-        Combines the workspace root path with a daily salt so all
-        orchestrator daemons on a given day share the same id
-        (the polling loop is one continuous session for telemetry
-        purposes — restart on a new day = new session).
-        """
-        try:
-            from datetime import datetime, timezone
-            import hashlib
-
-            workspace = str(self._workspace_root) if self._workspace_root else ""
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            raw = f"orchestrator:{workspace}:{day}"
-            return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-        except Exception:
-            return "orchestrator"
+        """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
+        return derive_session_id(self._workspace_root)
 
     def _report_telemetry(self) -> None:
-        """Best-effort: push today's telemetry summary to the remote issue.
-
-        Only when ``workflow.telemetry.reporting_enabled`` is set; the
-        api_key falls back to the tracker's GitCode token. Never raises.
-        """
-        try:
-            tele = getattr(self.workflow, "telemetry", None)
-            if tele is None or not tele.reporting_enabled:
-                return
-            tracker = getattr(self.workflow, "tracker", None)
-            api_key = tele.api_key or (getattr(tracker, "api_key", "") or "")
-            if not api_key:
-                return
-            from orchestratord.telemetry.reporters import report_day
-
-            report_day(
-                owner=tele.report_owner or getattr(tracker, "owner", "") or "",
-                repo=tele.report_repo or getattr(tracker, "repo", "") or "",
-                api_key=api_key,
-                title=tele.issue_title,
-                force=True,
-            )
-        except Exception:
-            logger.debug("telemetry report skipped", exc_info=True)
+        """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
+        report_telemetry(self.workflow)
 
     async def _recover_stale_running_records(self) -> None:
         reason = "Recovered stale running issue on orchestrator startup"
@@ -1157,76 +878,23 @@ class Orchestrator:
             )
 
     async def _metadata_heartbeat_loop(self) -> None:
-        """Periodically rewrite metadata so CLI can always discover the orchestrator.
-
-        If metadata.json is accidentally deleted, this recreates it within
-        the heartbeat interval (30s), preventing the ``server start`` PID
-        guard from being bypassed for a running instance.
-        """
-        from .workspace_locator import write_orchestrator_metadata
-
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._shutdown_event.wait(),
-                    timeout=30.0,
-                )
-                break  # shutdown requested
-            except asyncio.TimeoutError:
-                pass
-
-            write_orchestrator_metadata(
-                workspace_root=self._workspace_root,
-                workflow_path=self._workflow_path,
-                started_at=self._metadata_started_at,
-                **self._metadata_extras(),
-            )
+        """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
+        await metadata_heartbeat_loop(
+            workspace_root=self._workspace_root,
+            workflow_path=self._workflow_path,
+            started_at=self._metadata_started_at,
+            shutdown_event=self._shutdown_event,
+            extras_provider=self._metadata_extras,
+        )
 
     def _metadata_extras(self) -> dict:
-        """Launch-context fields persisted into metadata.json.
-
-        The heartbeat loop rewrites metadata every 30s, so extras must be
-        supplied on EVERY write — omitting them here would wipe the
-        backend/runtime fields within one heartbeat interval.
-        """
-        agent_cfg = getattr(self.workflow, "agent", None)
-        sandbox_cfg = getattr(self.workflow, "sandbox", None)
-        approval = getattr(sandbox_cfg, "approval_policy", None)
-        runtime = {
-            "provider": getattr(agent_cfg, "provider", None),
-            "model": getattr(agent_cfg, "model", None),
-            "permission_mode": getattr(agent_cfg, "permission_mode", None),
-            "max_concurrent_agents": getattr(
-                agent_cfg, "max_concurrent_agents", None
-            ),
-            "poll_interval_ms": getattr(
-                getattr(self.workflow, "polling", None), "interval_ms", None
-            ),
-            # A structured dict is the sandbox default; the resolved
-            # auto-approve/ask behavior is what approval_policy resolves to
-            # at run time — status only shows the configured form.
-            "approval_policy": "structured" if isinstance(approval, dict) else approval,
-        }
-        backend_name = (
-            getattr(self.agent_runner, "backend_name", None)
-            or getattr(self._backend, "name", None)
-        )
-        extras: dict = {"backend_name": backend_name, "runtime": runtime}
-        # Local import: the API layer is optional in daemon-free tooling.
-        from .api.runtime import get_api_port
-
-        api_port = get_api_port()
-        if api_port is not None:
-            extras["api_port"] = api_port
-        return extras
+        """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
+        return metadata_extras(self.workflow, self.agent_runner, self._backend)
 
     async def shutdown(self) -> None:
         """Signal graceful shutdown and clean up metadata."""
         self._shutdown_event.set()
-        # Clean up orchestrator metadata
-        from .workspace_locator import clear_orchestrator_metadata
-
-        clear_orchestrator_metadata(self._workspace_root)
+        shutdown_cleanup(self._workspace_root)
 
     def _workflow_mtime_ns(self) -> int | None:
         """Return the workflow modification time, if this daemon has a file."""
@@ -2424,7 +2092,7 @@ class Orchestrator:
             or "main"
         )
         rebase_conflicts = tuple(record.conflict_files) if record else ()
-        session.prompt_override = PromptBuilder.render_rebase(
+        session.prompt_override = render_rebase(
             issue=issue,
             branch_name=rebase_branch,
             base_branch=rebase_base,
@@ -2950,7 +2618,7 @@ class Orchestrator:
     async def _launch_review_followup(self, followup: ReviewFollowup) -> None:
         issue = followup.issue
         issue.branch_name = followup.record.branch_name
-        prompt = PromptBuilder.render_review_feedback(
+        prompt = render_review_feedback(
             issue=issue,
             pull_request=followup.pull_request,
             branch_name=followup.record.branch_name or "",
@@ -3440,9 +3108,15 @@ class Orchestrator:
         workflow_orch._stage_runner._progress_reporter = progress_sink
 
         try:
-            result = await workflow_orch.run_for_issue(
-                issue=session.issue,
-                workspace_path=str(session.workspace.path),
+            # run_for_issue 已删除（机制域不得内嵌业务转换，DESIGN §3.2）：
+            # Issue→AgentTask 的业务映射留在业务侧完成后走通用入口。
+            from .issue_registry.task_mapping import issue_to_agent_task
+
+            result = await workflow_orch.run_for_task(
+                issue_to_agent_task(
+                    session.issue,
+                    workspace_path=str(session.workspace.path),
+                )
             )
         except Exception as exc:
             logger.exception("Workflow execution failed for issue %s", session.issue.id)
@@ -4752,7 +4426,7 @@ class Orchestrator:
             else:
                 skipped.append({"feedback": fb, "reason": "No changes were committed"})
 
-        summary = PromptBuilder.render_feedback_summary(
+        summary = render_feedback_summary(
             attempt=attempt,
             processed=processed,
             skipped=skipped,
@@ -4842,7 +4516,7 @@ class Orchestrator:
         """Schedule a retry for a failed session.
 
         ``delay_base_ms`` overrides the base delay for the exponential backoff
-        curve. When ``None`` the default ``_FAILURE_RETRY_BASE_MS`` is used
+        curve. When ``None`` the default ``FAILURE_RETRY_BASE_MS`` is used
         (10s). The orchestrator passes ``workflow.agent.max_turns_retry_delay_ms``
         for ``max_turns_exceeded`` sessions so the longer wait default kicks in
         without forcing all retries to share it.
@@ -4862,7 +4536,7 @@ class Orchestrator:
         # max attempts). These end reasons are terminal; the operator
         # can run the issue again explicitly via ``issue retry``.
         end_reason = getattr(session, "session_end_reason", None)
-        if end_reason in _NON_RETRYABLE_END_REASONS:
+        if end_reason in NON_RETRYABLE_END_REASONS:
             logger.warning(
                 "Not auto-retrying issue_id=%s — end reason '%s' is "
                 "operator-initiated; use 'issue retry' to run again",
@@ -4901,9 +4575,9 @@ class Orchestrator:
             return False
 
         # Exponential backoff capped at max_retry_backoff_ms
-        base_ms = delay_base_ms if delay_base_ms is not None else _FAILURE_RETRY_BASE_MS
+        base_ms = delay_base_ms if delay_base_ms is not None else FAILURE_RETRY_BASE_MS
         max_ms = self.workflow.agent.max_retry_backoff_ms
-        delay_ms = min(base_ms * (1 << (attempt - 1)), max_ms)
+        delay_ms = compute_retry_delay(attempt, base_ms, max_ms)
 
         retry = RetryItem(
             issue_id=issue_id,
@@ -5073,8 +4747,13 @@ class Orchestrator:
         Returns ``False`` when the requeue ceiling is exhausted — the
         item is dropped (with a warning) and the persisted plan cleared.
         """
-        retry.requeue_count = getattr(retry, "requeue_count", 0) + 1
-        if retry.requeue_count > self._retry_requeue_limit():
+        requeued = requeue_retry_item(
+            retry,
+            now,
+            requeue_limit=self._retry_requeue_limit(),
+            max_backoff_ms=self.workflow.agent.max_retry_backoff_ms,
+        )
+        if not requeued:
             logger.warning(
                 "Retry issue %s exceeded the requeue ceiling (%d) — "
                 "dropping the persisted retry plan; use 'issue retry' "
@@ -5084,11 +4763,6 @@ class Orchestrator:
             )
             self._clear_retry_plan(retry.issue_id)
             return False
-        retry.delay_seconds = min(
-            retry.delay_seconds * 2,
-            self.workflow.agent.max_retry_backoff_ms / 1000.0,
-        )
-        retry.scheduled_at = now
         self._state.retry_queue.append(retry)
         return True
 
@@ -5109,19 +4783,11 @@ class Orchestrator:
         import time
 
         now = time.time()
-        ready: list[Any] = []
-        not_ready: list[Any] = []
+        ready, not_ready = split_ready_retries(self._state.retry_queue, now)
 
-        for retry in self._state.retry_queue:
-            if now >= retry.scheduled_at + retry.delay_seconds:
-                ready.append(retry)
-            else:
-                not_ready.append(retry)
-
-        # Explicit reassembly — deferred items are appended to
-        # ``not_ready`` below and the queue is rewritten afterwards, so
-        # retention no longer depends on ``remaining`` aliasing the live
-        # queue list.
+        # The queue is rewritten before processing so retention no
+        # longer depends on ``remaining`` aliasing the live list;
+        # deferred items re-appended below land on the fresh list.
         self._state.retry_queue = not_ready
 
         for retry in ready:

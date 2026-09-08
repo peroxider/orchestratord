@@ -63,7 +63,7 @@ export function IssueDetail({
       <div className="issue-detail__meta">
         <span className="issue-detail__assignee">
           {data.assignee_type
-            ? `${data.assignee_type}:${data.assignee_id}`
+            ? data.assignee_type === 'member' ? c.localOperator : `${data.assignee_type}:${data.assignee_id}`
             : c.unassigned}
         </span>
         {data.labels.map((label) => (
@@ -124,7 +124,7 @@ export function IssueDetail({
                       @{mention}
                     </Badge>
                   ))}
-                  <span className="comment__author">{comment.author_type}</span>
+                  <span className="comment__author">{comment.author_type === 'member' ? c.localOperator : comment.author_type}</span>
                 </div>
               </Card>
             </li>
@@ -157,7 +157,7 @@ export function IssueDetail({
 }
 
 const issueCopy = {
-  en: { loading: 'Loading issue…', failed: 'Could not load issue', unknown: 'unknown error', breadcrumb: 'Breadcrumb', issues: 'Issues', noDescription: 'No description.', unassigned: 'Unassigned', pullRequests: 'Pull requests', sessions: 'Sessions', comments: 'Comments', commentPlaceholder: 'Write a comment… (@agent-name to mention)', comment: 'Comment' },
-  'zh-CN': { loading: '正在加载任务…', failed: '无法加载任务', unknown: '未知错误', breadcrumb: '面包屑导航', issues: '任务', noDescription: '暂无描述。', unassigned: '未分配', pullRequests: '拉取请求', sessions: '会话', comments: '评论', commentPlaceholder: '写下评论…（使用 @agent-name 提及）', comment: '发表评论' },
-  ja: { loading: 'Issue を読み込み中…', failed: 'Issue を読み込めませんでした', unknown: '不明なエラー', breadcrumb: 'パンくず', issues: 'Issue', noDescription: '説明はありません。', unassigned: '未割り当て', pullRequests: 'プルリクエスト', sessions: 'セッション', comments: 'コメント', commentPlaceholder: 'コメントを書く…（@agent-name でメンション）', comment: 'コメント' },
+  en: { loading: 'Loading issue…', failed: 'Could not load issue', unknown: 'unknown error', breadcrumb: 'Breadcrumb', issues: 'Issues', noDescription: 'No description.', unassigned: 'Unassigned', localOperator: 'Local operator', pullRequests: 'Pull requests', sessions: 'Sessions', comments: 'Comments', commentPlaceholder: 'Write a comment… (@agent-name to mention)', comment: 'Comment' },
+  'zh-CN': { loading: '正在加载任务…', failed: '无法加载任务', unknown: '未知错误', breadcrumb: '面包屑导航', issues: '任务', noDescription: '暂无描述。', unassigned: '未分配', localOperator: '本地操作人', pullRequests: '拉取请求', sessions: '会话', comments: '评论', commentPlaceholder: '写下评论…（使用 @agent-name 提及）', comment: '发表评论' },
+  ja: { loading: 'Issue を読み込み中…', failed: 'Issue を読み込めませんでした', unknown: '不明なエラー', breadcrumb: 'パンくず', issues: 'Issue', noDescription: '説明はありません。', unassigned: '未割り当て', localOperator: 'ローカルオペレーター', pullRequests: 'プルリクエスト', sessions: 'セッション', comments: 'コメント', commentPlaceholder: 'コメントを書く…（@agent-name でメンション）', comment: 'コメント' },
 } as const

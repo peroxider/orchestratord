@@ -20,6 +20,7 @@ from orchestratord.api.db import get_repositories
 from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.inbox import InboxItem
+from orchestratord.issue_clarifier.queue import ClarificationQueue
 
 router = APIRouter(tags=["inbox"])
 
@@ -77,6 +78,10 @@ class _InboxCreate(BaseModel):
 class _AssignIn(BaseModel):
     assignee_type: Literal["member", "agent"]
     assignee_id: UUID
+
+
+class _ClarificationAnswer(BaseModel):
+    answer: str
 
 
 @router.get("/api/workspaces/{workspace_id}/inbox")
@@ -180,6 +185,35 @@ async def dismiss(
     domain = _to_domain(item)
     try:
         domain.dismiss()
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    item.status = domain.status
+    return _inbox_payload(item)
+
+
+@router.post("/api/workspaces/{workspace_id}/inbox/{item_id}/answer")
+async def answer_clarification(
+    workspace_id: UUID,
+    item_id: UUID,
+    body: _ClarificationAnswer,
+    repos: Repositories = Depends(get_repositories),
+) -> dict:
+    """Persist a local-operator clarification answer before closing its inbox item."""
+    item = await _inbox_or_404(repos, workspace_id, item_id)
+    answer = body.answer.strip()
+    if item.kind != "clarification" or item.issue_id is None:
+        raise HTTPException(status_code=409, detail="item is not an issue clarification")
+    if not answer:
+        raise HTTPException(status_code=422, detail="answer is required")
+    clarified = ClarificationQueue().resolve(str(item.issue_id), answer, "dashboard")
+    if clarified is None:
+        raise HTTPException(
+            status_code=409,
+            detail="clarification queue entry is unavailable; the inbox item remains open",
+        )
+    domain = _to_domain(item)
+    try:
+        domain.resolve()
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     item.status = domain.status

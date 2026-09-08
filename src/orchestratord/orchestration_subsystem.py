@@ -17,6 +17,9 @@ if TYPE_CHECKING:
     from .orchestrator import Orchestrator
     from .spi.backend import AgentBackend
 
+# 组合根装配：业务 prompt 模板注册进 kernel PromptRouter（DESIGN §4.5/P2）。
+import orchestratord.business_prompts  # noqa: F401
+
 from .config.schema import WorkflowConfig
 from .status_dashboard import StatusDashboard
 from .tracker import TrackerAdapter

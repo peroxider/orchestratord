@@ -30,9 +30,6 @@ export type {
   ProjectDoc,
   Autopilot,
   AutopilotRun,
-  Member,
-  MemberRole,
-  MemberScopes,
   AuditLogEntry,
   AuditActorType,
   PullRequest,
@@ -68,7 +65,7 @@ export type {
   StartChatSessionInput,
   SendChatMessageInput,
 } from './queries/chat'
-export { useAgents } from './queries/agents'
+export { useAgents, useAgent } from './queries/agents'
 export { useSkills, useSkill, useVerifySkill } from './queries/skills'
 export type { SkillVerifyResult } from './queries/skills'
 export { useWorkspaceUsage, useAgentUsage } from './queries/usage'
@@ -78,9 +75,13 @@ export {
   useAssignInbox,
   useResolveInbox,
   useDismissInbox,
+  useInboxDecision,
+  inboxApprovalRequestId,
+  useAnswerInboxClarification,
 } from './queries/inbox'
 export {
   useRuntimes,
+  useRuntime,
   useRegisterRuntime,
   useRevokeRuntime,
 } from './queries/runtimes'
@@ -111,20 +112,8 @@ export {
   usePatchAutopilot,
 } from './queries/autopilots'
 export type { CreateAutopilotInput } from './queries/autopilots'
-export {
-  useMembers,
-  useCreateMember,
-  useUpdateMember,
-  useDeleteMember,
-  useMemberScopes,
-  useGrantScope,
-  useRevokeScope,
-} from './queries/members'
-export type { CreateMemberInput, UpdateMemberInput } from './queries/members'
 export { useAudit } from './queries/audit'
 export type { AuditFilters } from './queries/audit'
 export { usePullRequests } from './queries/vcs'
-export { useWorkspaceStore } from './store/workspace'
-export type { WorkspaceState } from './store/workspace'
 export { CoreProvider } from './provider'
 export * from './realtime'

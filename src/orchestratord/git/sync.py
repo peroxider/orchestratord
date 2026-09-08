@@ -14,6 +14,10 @@ from typing import Any
 from .. import report_writer
 from ..config.schema import AgentConfig, HooksConfig, PrTemplateConfig
 from ..issue_registry.issue import Issue
+
+# GitSyncError / VerificationFailed 定义归属机制域（kernel/lifecycle.py，
+# DESIGN §6）；此处导入并重导出，既有 import 路径与类对象同一性不变。
+from ..kernel.lifecycle import GitSyncError, VerificationFailed
 from ..prompt_builder import resolve_python_executable
 from ..tracker import (
     PullRequestCapability,
@@ -61,18 +65,6 @@ class GitSyncResult:
     # loop 终止），标记终结原因。orchestrator 据此走 mark_failed_with_reason
     # 而非 mark_synced，避免给空 PR 标 SYNCED。
     session_end_reason: str | None = None
-
-
-class GitSyncError(RuntimeError):
-    """Raised when post-run git sync fails."""
-
-
-class VerificationFailed(GitSyncError):
-    """Raised when configured verification commands fail."""
-
-    def __init__(self, message: str, output: str = "") -> None:
-        super().__init__(message)
-        self.output = output
 
 
 class HookFailedError(GitSyncError):

@@ -33,6 +33,7 @@ export type { SkillsListProps } from './skills/skills-list'
 export { SkillDetail } from './skills/skill-detail'
 export type { SkillDetailProps } from './skills/skill-detail'
 export { UsagePage } from './usage/usage-page'
+export { AgentDetail, ProjectDetail, SquadDetail, AutopilotDetail, RuntimeDetail } from './resources/resource-details'
 export type { UsagePageProps } from './usage/usage-page'
 export { UsageCharts, UsageBarChart, UsageLineChart } from './usage/usage-charts'
 export type {

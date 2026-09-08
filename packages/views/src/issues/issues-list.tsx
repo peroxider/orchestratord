@@ -1,8 +1,10 @@
 'use client'
 
+import { useState } from 'react'
+
 import { useIssues } from '@orchestratord/core'
 import type { ApiClient } from '@orchestratord/core'
-import { Badge, Card } from '@orchestratord/ui'
+import { Badge, Button, Card } from '@orchestratord/ui'
 import { useTranslation } from '../i18n'
 import { STATUS_TONE, issueStatusLabel } from './status'
 
@@ -12,12 +14,13 @@ export interface IssuesListProps {
 }
 
 export function IssuesList({ client, workspaceId }: IssuesListProps) {
+  const [visibleCount, setVisibleCount] = useState(100)
   const { data, isPending, isError, error } = useIssues(client, workspaceId)
   const { locale } = useTranslation()
   const c = {
-    en: { loading: 'Loading issues…', failed: 'Failed to load issues', empty: 'No issues yet.' },
-    'zh-CN': { loading: '正在加载任务…', failed: '无法加载任务', empty: '暂无任务。' },
-    ja: { loading: 'Issue を読み込み中…', failed: 'Issue を読み込めませんでした', empty: 'Issue はまだありません。' },
+    en: { loading: 'Loading issues…', failed: 'Failed to load issues', empty: 'No issues yet.', more: 'Load 100 more' },
+    'zh-CN': { loading: '正在加载任务…', failed: '无法加载任务', empty: '暂无任务。', more: '再加载 100 项' },
+    ja: { loading: 'Issue を読み込み中…', failed: 'Issue を読み込めませんでした', empty: 'Issue はまだありません。', more: 'さらに 100 件読み込む' },
   }[locale]
 
   if (isPending) {
@@ -38,8 +41,8 @@ export function IssuesList({ client, workspaceId }: IssuesListProps) {
   }
 
   return (
-    <ul className="issues-list">
-      {issues.map((issue) => (
+    <><ul className="issues-list">
+      {issues.slice(0, visibleCount).map((issue) => (
         <li key={issue.id}>
           <a className="issues-list__link" href={`/issues/${issue.id}`}>
             <Card interactive>
@@ -53,6 +56,6 @@ export function IssuesList({ client, workspaceId }: IssuesListProps) {
           </a>
         </li>
       ))}
-    </ul>
+    </ul>{visibleCount < issues.length && <div className="collection-load-more"><Button variant="secondary" onClick={() => setVisibleCount(count => count + 100)}>{c.more} · {Math.min(visibleCount, issues.length)}/{issues.length}</Button></div>}</>
   )
 }

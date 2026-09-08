@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from .backend_runner import BackendRunner as AgentRunner
     from .agent.task import AgentTask
     from .agent.runner import AgentTaskRunner
-    from .issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 
@@ -277,24 +276,6 @@ class WorkflowOrchestrator:
         )
 
         return result
-
-    async def run_for_issue(
-        self,
-        issue: "Issue",
-        workspace_path: str = "",
-        from_stage: int | None = None,
-    ) -> WorkflowResult:
-        """为指定 Issue 执行工作流 (Orchestrator 集成入口)。
-
-        DEPRECATED: use ``run_for_task()`` with an AgentTask instead.
-        """
-        from .issue_registry.task_mapping import issue_to_agent_task
-
-        task = issue_to_agent_task(
-            issue,
-            workspace_path=workspace_path,
-        )
-        return await self.run_for_task(task, from_stage=from_stage)
 
     async def run_for_task(
         self,

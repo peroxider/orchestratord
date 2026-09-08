@@ -509,7 +509,12 @@ class DebateModeRunner:
         except Exception:
             from types import SimpleNamespace
 
-            branch = SimpleNamespace(**vars(session))
+            # business payload is property-backed (DESIGN §4.3 P3) and does
+            # not appear in vars(); merge the full key set incl. defaults.
+            branch = SimpleNamespace(**vars(session), **session.business_state())
+        # Per-branch business payload (mutable container — don't alias
+        # siblings through the shared dict).
+        branch.business = dict(session.business)
         # Per-branch workspace (path swap doesn't bleed into sibling).
         if hasattr(session, "workspace"):
             branch.workspace = copy.copy(session.workspace)

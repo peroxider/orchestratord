@@ -75,7 +75,7 @@ export function ProjectsList({ client, workspaceId }: ProjectsListProps) {
           {(data ?? []).map((project) => (
             <Card key={project.id} className="project-card">
               <header className="project-card__header">
-                <span className="project-card__name">{project.name}</span>
+                <a className="project-card__name" href={`/projects/${project.id}`}>{project.name}</a>
                 <div><Badge tone="good">{c.active}</Badge><Badge tone="neutral">{project.repos.length} {c.repos}</Badge></div>
               </header>
               {project.description && (

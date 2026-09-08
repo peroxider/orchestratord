@@ -12,6 +12,7 @@ export interface InboxKindCardProps {
   busy: boolean
   onResolve: () => void
   onDismiss: () => void
+  onAnswer?: (answer: string) => void
 }
 
 export interface InboxCardShellProps {

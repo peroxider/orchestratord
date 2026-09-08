@@ -9,6 +9,16 @@
   --header-height: 48px;
 }
 
+html[lang='ja'] {
+  --font-display: 'Manrope', 'Hiragino Sans', 'Yu Gothic', 'Noto Sans CJK JP', sans-serif;
+  --font-ui: 'Inter', 'Hiragino Sans', 'Yu Gothic', 'Noto Sans CJK JP', sans-serif;
+}
+
+html[lang='zh-CN'] {
+  --font-display: 'Manrope', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-ui: 'Inter', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+}
+
 body { font-family: var(--font-ui); background: var(--app-shell); overflow-x: hidden; }
 button, input, textarea, select { font-family: inherit; }
 button { -webkit-tap-highlight-color: transparent; }
@@ -33,6 +43,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--signal); outlin
 .app-nav__item span { min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .app-icon { display: block; flex: 0 0 auto; }
 .app-nav__badge { min-width: 19px; height: 18px; display: grid; place-items: center; padding: 0 5px; border-radius: 999px; background: color-mix(in srgb, var(--purple) 18%, transparent); color: var(--purple); font: normal 500 10px var(--font-data); }
+.nav-connection-dot { margin-left: auto; }
 .app-sidebar__footer { min-height: 64px; padding: 10px 10px; display: flex; align-items: center; gap: 6px; border-top: 1px solid var(--border); overflow: hidden; }
 .runtime-summary { flex: 1; min-width: 0; display: flex; align-items: center; gap: 9px; }
 .runtime-summary div { display: flex; flex-direction: column; min-width: 0; }
@@ -41,6 +52,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--signal); outlin
 .connection-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 12%, transparent); }
 .connection-dot--connected { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 12%, transparent); }
 .connection-dot--connecting { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 12%, transparent); animation: ledger-pulse 1.8s ease-in-out infinite; }
+.connection-dot--reconnecting { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 12%, transparent); animation: ledger-pulse 1.2s ease-in-out infinite; }
 .sidebar-collapse, .icon-button { width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
 .sidebar-collapse:hover, .icon-button:hover { color: var(--foreground); background: var(--surface-raised); border-color: var(--border); }
 .app-shell--collapsed { --sidebar-width: 56px; }
@@ -64,6 +76,7 @@ kbd { padding: 1px 5px; color: var(--muted); background: var(--surface-raised); 
 .connection-button:hover { color: var(--text-body); background: var(--surface); border-color: var(--border); }
 .page-header .locale-switcher { height: 30px; }
 .connection-banner { min-height: 34px; padding: 7px 16px; color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--surface)); border-bottom: 1px solid color-mix(in srgb, var(--warn) 24%, var(--border)); font-size: 12px; }
+.sync-toast { position: fixed; z-index: 120; right: 20px; bottom: 20px; display: flex; align-items: center; gap: 9px; min-height: 42px; padding: 10px 14px; color: var(--text); background: var(--surface-strong); border: 1px solid var(--border-strong); border-radius: var(--radius-md); box-shadow: var(--shadow-lg); font-size: 13px; font-weight: 650; }
 .page-canvas { min-height: calc(100vh - var(--header-height)); padding: 24px !important; }
 
 .section-eyebrow, .dialog-eyebrow { margin: 0 0 6px; color: var(--signal); font: 500 10px/15px var(--font-data); letter-spacing: .1em; }
@@ -184,7 +197,7 @@ kbd { padding: 1px 5px; color: var(--muted); background: var(--surface-raised); 
 .route-loading__heading { width: min(360px, 70%); height: 28px; border-radius: 6px; background: var(--surface-raised); }
 
 .dialog-layer { position: fixed; z-index: 100; inset: 0; padding: 12vh 16px 16px; display: flex; justify-content: center; align-items: flex-start; background: rgba(4, 7, 12, .66); backdrop-filter: blur(4px); }
-.command-dialog, .create-dialog { width: min(620px, 100%); color: var(--text-body); background: var(--surface-raised); border: 1px solid color-mix(in srgb, var(--signal) 22%, var(--border)); border-radius: 10px; box-shadow: 0 24px 80px rgba(0,0,0,.38); overflow: hidden; }
+.command-dialog, .create-dialog, .info-dialog { width: min(620px, 100%); color: var(--text-body); background: var(--surface-raised); border: 1px solid color-mix(in srgb, var(--signal) 22%, var(--border)); border-radius: 10px; box-shadow: 0 24px 80px rgba(0,0,0,.38); overflow: hidden; }
 .command-dialog__input { height: 54px; padding: 0 17px; display: flex; align-items: center; gap: 11px; border-bottom: 1px solid var(--border); color: var(--muted); }
 .command-dialog__input input { flex: 1; height: 100%; color: var(--foreground); background: transparent; border: 0; outline: 0; font-size: 14px; }
 .command-results { max-height: min(440px, 55vh); padding: 6px; overflow: auto; }
@@ -200,6 +213,18 @@ kbd { padding: 1px 5px; color: var(--muted); background: var(--surface-raised); 
 .create-dialog label { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
 .create-dialog > footer { justify-content: flex-end; padding-top: 4px; }
 .form-error { margin: 0; color: var(--bad); font-size: 12px; }
+.info-dialog { width: min(520px, 100%); padding: 18px; }
+.info-dialog > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); }
+.info-dialog h2 { margin: 2px 0 0; color: var(--foreground); font: 600 18px var(--font-display); }
+.shortcut-list, .diagnostic-list { margin: 8px 0 0; }
+.shortcut-list div, .diagnostic-list div { min-height: 42px; display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 16px; border-top: 1px solid var(--border); }
+.shortcut-list div:first-child, .diagnostic-list div:first-child { border-top: 0; }
+.shortcut-list dt, .diagnostic-list dt { color: var(--muted); }
+.shortcut-list dd, .diagnostic-list dd { margin: 0; color: var(--foreground); overflow-wrap: anywhere; }
+.shortcut-list kbd { color: var(--signal); font: 500 11px var(--font-data); }
+.diagnostic-list dd { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.sidebar-help { flex: 0 0 auto; }
+.runtime-summary { padding: 0; color: inherit; background: transparent; border: 0; cursor: pointer; text-align: left; }
 
 .bootstrap-state { min-height: 100vh; padding: 24px !important; display: grid; place-content: center; justify-items: center; color: var(--muted); background: var(--app-shell); text-align: center; }
 .bootstrap-state .brand-mark { width: 42px; height: 42px; margin-bottom: 20px; font-size: 17px; }
@@ -241,6 +266,11 @@ kbd { padding: 1px 5px; color: var(--muted); background: var(--surface-raised); 
 
 @media (max-width: 767px) {
   :root { --sidebar-width: 0px; }
+  button { min-height: 40px; }
+  .icon-button, .sidebar-collapse, .search-trigger, .connection-button, .page-header__actions > .ui-button { min-width: 40px; width: 40px; height: 40px; }
+  .app-nav__item { min-height: 40px; }
+  .runtime-summary { min-height: 40px; }
+  .text-action { padding: 8px 0; }
   .app-sidebar { width: min(310px, 88vw); transform: translateX(-100%); box-shadow: 24px 0 80px rgba(0,0,0,.38); }
   .app-sidebar--open { transform: translateX(0); }
   .app-sidebar__brand-copy, .app-nav__label, .app-nav__item span, .app-nav__badge, .runtime-summary div { display: flex; }
@@ -279,6 +309,6 @@ kbd { padding: 1px 5px; color: var(--muted); background: var(--surface-raised); 
   .session-detail__facts div:nth-child(3) { border-left: 0; border-top: 1px solid var(--border); }
   .session-detail__facts div:nth-child(4) { border-top: 1px solid var(--border); }
   .dialog-layer { padding: 0; align-items: stretch; }
-  .command-dialog, .create-dialog { width: 100%; min-height: 100%; border: 0; border-radius: 0; }
+  .command-dialog, .create-dialog, .info-dialog { width: 100%; min-height: 100%; border: 0; border-radius: 0; }
   .command-results { max-height: calc(100vh - 90px); }
 }

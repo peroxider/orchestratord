@@ -115,7 +115,7 @@ function RuntimeCard({
   return (
     <Card className="runtime-card">
       <header className="runtime-card__header">
-        <span className="runtime-card__hostname">{runtime.hostname}</span>
+        <a className="runtime-card__hostname" href={`/runtimes/${runtime.id}`}>{runtime.hostname}</a>
         <Badge tone={RUNTIME_STATUS_TONE[runtime.status] ?? 'neutral'}>
           {runtimeStatusLabel(runtime.status, locale)}
         </Badge>

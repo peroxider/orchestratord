@@ -3,7 +3,8 @@
 import type { ReactNode } from 'react'
 
 import {
-  AgentsList, AuditList, AutopilotsList, ChatPage, InboxList, IssueDetail,
+  AgentDetail, AgentsList, AuditList, AutopilotDetail, AutopilotsList, ChatPage, InboxList, IssueDetail,
+  ProjectDetail, RuntimeDetail, SquadDetail,
   ProjectsList, RuntimesList, SessionDetail, SkillDetail, SkillsList,
   SquadsList, UsagePage,
   useLocale,
@@ -50,3 +51,8 @@ export function ActivityRouteView() { const i = useInstanceContext(); return <Co
 export function IssueDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <IssueDetail client={apiClient} workspaceId={i.workspace_id} issueId={id} /> }
 export function SessionDetailRouteView({ id }: { id: string }) { return <SessionDetail client={apiClient} sessionId={id} /> }
 export function SkillDetailRouteView({ name }: { name: string }) { return <SkillDetail client={apiClient} name={name} /> }
+export function AgentDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <AgentDetail client={apiClient} workspaceId={i.workspace_id} agentId={id} /> }
+export function ProjectDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <ProjectDetail client={apiClient} workspaceId={i.workspace_id} projectId={id} /> }
+export function SquadDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <SquadDetail client={apiClient} workspaceId={i.workspace_id} squadId={id} /> }
+export function AutopilotDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <AutopilotDetail client={apiClient} workspaceId={i.workspace_id} autopilotId={id} /> }
+export function RuntimeDetailRouteView({ id }: { id: string }) { const i = useInstanceContext(); return <RuntimeDetail client={apiClient} workspaceId={i.workspace_id} runtimeId={id} /> }

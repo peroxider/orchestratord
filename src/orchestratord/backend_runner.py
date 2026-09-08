@@ -33,14 +33,11 @@ from orchestratord.spi.events import EventEnvelope, EventKind
 from orchestratord.spi.session import ResumeStatus
 
 from .agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
-from .approval_policy import (
-    ApprovalPolicy,
-    ToolCallEvent,
-    resolve_approval_policy,
-)
 from .config.schema import AgentConfig, SandboxConfig, WorkflowConfig, WorkspaceConfig
 from .control_socket import ControlSocket
 from .conversation_store import ensure_conversation_id
+from .kernel.approval import ApprovalPolicy, ToolCallEvent, resolve_approval_policy
+from .kernel.run_context import RunContext
 from .prompt_builder import PromptBuilder
 from .runner_utils import (
     _broadcast_to_socket,
@@ -48,7 +45,7 @@ from .runner_utils import (
     _publish_transcript_frame,
     _write_transcript_frame,
 )
-from .session_state import AgentSession, RunSession, RunSubject
+from .session_state import AgentSession, RunSession
 
 logger = logging.getLogger(__name__)
 
@@ -369,43 +366,16 @@ class BackendRunner:
         from the task, delegates to the existing ``run()`` path, and
         returns a structured ``AgentTaskResult``.
         """
-        from pathlib import Path
-
-        from .workspace import Workspace
-
-        # Build backend-neutral runtime state.  The compatibility ``issue``
-        # slot carries a RunSubject, never a tracker-domain Issue.
-        workspace = Workspace(
-            path=Path(task.workspace_path) if task.workspace_path else Path("."),
-            issue_identifier=task.context.get("issue_identifier", task.id),
-            issue_id=task.context.get("issue_id", task.id),
-        )
-        subject = RunSubject(
-            id=task.context.get("issue_id", task.id),
-            identifier=task.context.get("issue_identifier"),
-            title=task.title,
-            description=task.description,
-            labels=task.labels,
-            url=task.context.get("issue_url"),
-            state=task.context.get("issue_state"),
-            author_login=task.context.get("issue_author_login"),
-            branch_name=task.context.get("issue_branch_name"),
-            python_executable=task.context.get("issue_python_executable", ""),
-            priority=task.priority,
-        )
-        task.conversation_id = ensure_conversation_id(task.conversation_id)
+        # Kernel-side unified assembly (DESIGN §4.3 / P3): RunSubject,
+        # Workspace, conversation id and run id are built by RunContext.
+        ctx = RunContext.from_task(task)
+        task.conversation_id = ctx.conversation_id
         session = RunSession(
-            issue=subject,
+            issue=ctx.subject,
             task=task,
-            workspace=workspace,
+            workspace=ctx.workspace,
             run_kind=task.kind,
-            # The task id is deterministic per workflow stage
-            # ("stage-01"), but the run_id doubles as the backend
-            # session id — a second run of the same stage in the same
-            # workspace collided with the persisted session (dsh "id
-            # collision"). Entropy is appended while the stage prefix
-            # keeps runs human-correlatable.
-            run_id=f"{task.id}-{uuid.uuid4().hex[:8]}",
+            run_id=ctx.run_id,
             attempt=task.attempt,
             previous_run_ids=task.previous_run_ids,
             conversation_id=task.conversation_id,
@@ -449,6 +419,9 @@ class BackendRunner:
             kind=task.kind,
             conversation_id=session.conversation_id,
             status=session.status or "completed",
+            # 机制层对业务结论只透传不解释（DESIGN §4.4）：end reason
+            # 作为业务自由码随结果上交，应用层决定其含义。
+            outcome_code=session.session_end_reason or None,
             output_text=session.output_text,
             turn_count=session.turn_count,
             tool_count=session.tool_count,
@@ -1438,7 +1411,7 @@ class BackendRunner:
                 # comparison below.
                 if (session.turn_count or 0) > 1 and turn_has_tool_calls and not turn_has_modifying_tool:
                     try:
-                        from orchestratord.git.utils import get_file_status
+                        from orchestratord.kernel.git_probe import get_file_status
                         statuses = await asyncio.to_thread(get_file_status, str(session.workspace.path))
                         ws_dirty = any(
                             s.status not in ("unmodified", "ignored")
@@ -1824,7 +1797,7 @@ class BackendRunner:
     ) -> bool:
         """Check whether any files have changed since the last snapshot."""
         try:
-            from orchestratord.git.utils import get_file_status
+            from orchestratord.kernel.git_probe import get_file_status
 
             current = await asyncio.to_thread(
                 get_file_status, str(session.workspace.path)

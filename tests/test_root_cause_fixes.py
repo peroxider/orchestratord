@@ -67,7 +67,7 @@ class TestResolveApprovalPolicy(unittest.TestCase):
     def test_unknown_policy_name_fails_closed_and_warns(self) -> None:
         import logging
 
-        with self.assertLogs("orchestratord.approval_policy", level=logging.WARNING):
+        with self.assertLogs("orchestratord.kernel.approval", level=logging.WARNING):
             policy = get_approval_policy("bypass")  # misspelt / unknown
         self.assertIsInstance(policy, AskApprovalPolicy)
 

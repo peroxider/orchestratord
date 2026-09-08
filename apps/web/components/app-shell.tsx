@@ -17,6 +17,7 @@ import {
   useInbox,
   useInstance,
   useRealtimeBridge,
+  useSessions,
   type InstanceBootstrap,
 } from '@orchestratord/core'
 import { Button, Input, Textarea } from '@orchestratord/ui'
@@ -35,7 +36,7 @@ export function useInstanceContext() {
 type IconName =
   | 'overview' | 'inbox' | 'chat' | 'issues' | 'projects' | 'sessions'
   | 'agents' | 'squads' | 'autopilots' | 'runtimes' | 'skills' | 'usage'
-  | 'activity' | 'search' | 'plus' | 'menu' | 'sun' | 'moon' | 'close'
+  | 'activity' | 'search' | 'plus' | 'menu' | 'sun' | 'moon' | 'close' | 'help'
 
 const ICON_PATHS: Record<IconName, ReactNode> = {
   overview: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17h7M17.5 13.5v7"/></>,
@@ -57,6 +58,7 @@ const ICON_PATHS: Record<IconName, ReactNode> = {
   sun: <><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>,
   moon: <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5z"/>,
   close: <path d="M6 6l12 12M18 6L6 18"/>,
+  help: <><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3.7 2c-1 .6-1.5 1.1-1.5 2.2M12 17h.01"/></>,
 }
 
 function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
@@ -64,9 +66,9 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
 }
 
 const copy = {
-  en: { groups: ['Attention', 'Work', 'Orchestration', 'System'], newIssue: 'New issue', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', offline: 'Offline', create: 'Create issue', title: 'Issue title', description: 'Describe the desired outcome…', cancel: 'Cancel', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', noResults: 'No matching issues, sessions, agents, or commands.', creating: 'Creating…' },
-  'zh-CN': { groups: ['需要关注', '工作', '编排', '系统'], newIssue: '新建任务', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', offline: '离线', create: '创建任务', title: '任务标题', description: '描述期望结果…', cancel: '取消', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', noResults: '没有匹配的任务、会话、Agent 或命令。', creating: '正在创建…' },
-  ja: { groups: ['要対応', '作業', 'オーケストレーション', 'システム'], newIssue: 'Issue を作成', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', offline: 'オフライン', create: 'Issue を作成', title: 'Issue タイトル', description: '期待する結果を説明…', cancel: 'キャンセル', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', noResults: '一致する Issue、セッション、エージェント、コマンドはありません。', creating: '作成中…' },
+  en: { groups: ['Attention', 'Work', 'Orchestration', 'System'], newIssue: 'New issue', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', reconnecting: 'Reconnecting', offline: 'Offline', create: 'Create issue', title: 'Issue title', description: 'Describe the desired outcome…', cancel: 'Cancel', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', reconnectNote: 'Realtime is taking longer than expected to reconnect. You can keep working with the data already loaded.', recovered: 'Realtime connection restored.', noResults: 'No matching issues, sessions, agents, or commands.', creating: 'Creating…' },
+  'zh-CN': { groups: ['需要关注', '工作', '编排', '系统'], newIssue: '新建任务', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', reconnecting: '正在重连', offline: '离线', create: '创建任务', title: '任务标题', description: '描述期望结果…', cancel: '取消', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', reconnectNote: '实时连接恢复时间超出预期。你仍可继续处理已加载的数据。', recovered: '实时连接已恢复。', noResults: '没有匹配的任务、会话、Agent 或命令。', creating: '正在创建…' },
+  ja: { groups: ['要対応', '作業', 'オーケストレーション', 'システム'], newIssue: 'Issue を作成', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', reconnecting: '再接続中', offline: 'オフライン', create: 'Issue を作成', title: 'Issue タイトル', description: '期待する結果を説明…', cancel: 'キャンセル', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', reconnectNote: 'リアルタイム接続の復旧に時間がかかっています。読み込み済みのデータは引き続き操作できます。', recovered: 'リアルタイム接続が復旧しました。', noResults: '一致する Issue、セッション、エージェント、コマンドはありません。', creating: '作成中…' },
 } as const
 
 const NAV = [
@@ -76,13 +78,21 @@ const NAV = [
   [{ href: '/runtimes', icon: 'runtimes', labels: ['Runtimes', '运行时', 'ランタイム'] }, { href: '/skills', icon: 'skills', labels: ['Skills', '技能', 'スキル'] }, { href: '/usage', icon: 'usage', labels: ['Usage', '用量', '使用量'] }, { href: '/activity', icon: 'activity', labels: ['Activity', '活动', 'アクティビティ'] }],
 ] as const
 
+const detailsCopy = {
+  en: { help: 'Keyboard shortcuts', diagnostics: 'Connection diagnostics', rest: 'REST API', realtime: 'Realtime', runtime: 'Runtime target', status: 'Status', local: 'Local instance', close: 'Close', nav: 'Navigate', shortcuts: [['⌘/Ctrl K', 'Search and commands'], ['C', 'Create an issue'], ['G then O', 'Go to Overview'], ['G then I', 'Go to Inbox'], ['G then W', 'Go to Issues'], ['G then S', 'Go to Sessions'], ['?', 'Open shortcut help'], ['Esc', 'Close the top layer']] },
+  'zh-CN': { help: '键盘快捷键', diagnostics: '连接诊断', rest: 'REST API', realtime: '实时连接', runtime: '运行时目标', status: '状态', local: '本地实例', close: '关闭', nav: '导航', shortcuts: [['⌘/Ctrl K', '搜索与命令'], ['C', '创建任务'], ['G 再按 O', '前往总览'], ['G 再按 I', '前往收件箱'], ['G 再按 W', '前往任务'], ['G 再按 S', '前往会话'], ['?', '打开快捷键帮助'], ['Esc', '关闭最上层界面']] },
+  ja: { help: 'キーボードショートカット', diagnostics: '接続診断', rest: 'REST API', realtime: 'リアルタイム', runtime: 'ランタイム接続先', status: '状態', local: 'ローカルインスタンス', close: '閉じる', nav: '移動', shortcuts: [['⌘/Ctrl K', '検索とコマンド'], ['C', 'Issue を作成'], ['G → O', '概要へ移動'], ['G → I', '受信箱へ移動'], ['G → W', 'Issue へ移動'], ['G → S', 'セッションへ移動'], ['?', 'ショートカットを表示'], ['Esc', '最前面を閉じる']] },
+} as const
+
+const GO_ROUTES: Record<string, string> = { o: '/', i: '/inbox', c: '/chat', w: '/issues', p: '/projects', s: '/sessions', a: '/agents', q: '/squads', u: '/autopilots', r: '/runtimes', k: '/skills', g: '/usage', v: '/activity' }
+
 function localeIndex(locale: string) { return locale === 'zh-CN' ? 1 : locale === 'ja' ? 2 : 0 }
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
-function useDialogFocus<T extends HTMLElement>(ref: RefObject<T | null>) {
+function useDialogFocus<T extends HTMLElement>(ref: RefObject<T | null>, returnFocus?: HTMLElement | null) {
   useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const previous = returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
     const frame = window.requestAnimationFrame(() => {
       const first = ref.current?.querySelector<HTMLElement>(FOCUSABLE)
       if (first && !ref.current?.contains(document.activeElement)) first.focus()
@@ -91,7 +101,7 @@ function useDialogFocus<T extends HTMLElement>(ref: RefObject<T | null>) {
       window.cancelAnimationFrame(frame)
       if (previous?.isConnected) previous.focus()
     }
-  }, [ref])
+  }, [ref, returnFocus])
   const onKeyDown = (event: ReactKeyboardEvent<T>) => {
     if (event.key !== 'Tab' || !ref.current) return
     const items = [...ref.current.querySelectorAll<HTMLElement>(FOCUSABLE)]
@@ -131,25 +141,87 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
   const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && localStorage.getItem('orchestratord.sidebar') === 'collapsed')
   const [searchOpen, setSearchOpen] = useState(false)
   const [createOpen, setCreateOpen] = useState(false)
-  const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting')
+  const [infoOpen, setInfoOpen] = useState<'help' | 'diagnostics' | null>(null)
+  const [returnFocus, setReturnFocus] = useState<HTMLElement | null>(null)
+  const goPrefix = useRef<number | null>(null)
+  const [connection, setConnection] = useState<'connecting' | 'connected' | 'reconnecting' | 'offline'>('connecting')
+  const [reconnectNotice, setReconnectNotice] = useState(false)
+  const [recovered, setRecovered] = useState(false)
+  const everConnected = useRef(false)
+  const reconnectTimer = useRef<number | null>(null)
+  const recoveredTimer = useRef<number | null>(null)
   const inbox = useInbox(apiClient, instance.workspace_id)
+  const sessions = useSessions(apiClient, instance.workspace_id)
   const inboxCount = (inbox.data ?? []).filter(item => item.status === 'open' || item.status === 'assigned').length
-  const onRealtimeStatus = useCallback((status: 'connecting' | 'open' | 'closed' | 'error') => setConnection(status === 'open' ? 'connected' : status === 'connecting' ? 'connecting' : 'offline'), [])
+  const activeSessionCount = (sessions.data ?? []).filter(item => ['pending', 'queued', 'running', 'paused', 'waiting'].includes(item.status)).length
+  const onRealtimeStatus = useCallback((status: 'connecting' | 'open' | 'closed' | 'error') => {
+    if (status === 'open') {
+      if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
+      reconnectTimer.current = null
+      setReconnectNotice(false)
+      if (everConnected.current) {
+        setRecovered(true)
+        if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current)
+        recoveredTimer.current = window.setTimeout(() => setRecovered(false), 3_000)
+      }
+      everConnected.current = true
+      setConnection('connected')
+      return
+    }
+    if (status === 'connecting') {
+      if (!everConnected.current) { setConnection('connecting'); return }
+      setConnection('reconnecting')
+      if (reconnectTimer.current === null) reconnectTimer.current = window.setTimeout(() => setReconnectNotice(true), 5_000)
+      return
+    }
+    if (everConnected.current && window.navigator.onLine) {
+      setConnection('reconnecting')
+      if (reconnectTimer.current === null) reconnectTimer.current = window.setTimeout(() => setReconnectNotice(true), 5_000)
+      return
+    }
+    if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
+    reconnectTimer.current = null
+    setReconnectNotice(false)
+    setConnection('offline')
+  }, [])
   useRealtimeBridge({ url: instance.realtime_url, workspaceId: instance.workspace_id, onStatus: onRealtimeStatus })
+
+  useEffect(() => () => {
+    if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
+    if (recoveredTimer.current !== null) window.clearTimeout(recoveredTimer.current)
+  }, [])
+
+  const openSearch = useCallback(() => {
+    setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setSearchOpen(true)
+  }, [])
+  const openCreate = useCallback(() => {
+    setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setCreateOpen(true)
+  }, [])
+  const openInfo = useCallback((kind: 'help' | 'diagnostics') => {
+    setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setInfoOpen(kind)
+  }, [])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); setSearchOpen(true) }
-      if (!typing && !event.metaKey && !event.ctrlKey && event.key.toLowerCase() === 'c') { event.preventDefault(); setCreateOpen(true) }
-      if (event.key === 'Escape') { setSearchOpen(false); setCreateOpen(false); setMobileOpen(false) }
+      const key = event.key.toLowerCase()
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); openSearch() }
+      if (!typing && !event.metaKey && !event.ctrlKey && goPrefix.current !== null && GO_ROUTES[key]) { event.preventDefault(); window.clearTimeout(goPrefix.current); goPrefix.current = null; router.push(GO_ROUTES[key]); setMobileOpen(false); return }
+      if (!typing && !event.metaKey && !event.ctrlKey && key === 'g') { event.preventDefault(); if (goPrefix.current !== null) window.clearTimeout(goPrefix.current); goPrefix.current = window.setTimeout(() => { goPrefix.current = null }, 1_200); return }
+      if (!typing && !event.metaKey && !event.ctrlKey && key === 'c') { event.preventDefault(); openCreate() }
+      if (!typing && !event.metaKey && !event.ctrlKey && event.key === '?') { event.preventDefault(); openInfo('help') }
+      if (event.key === 'Escape') { setSearchOpen(false); setCreateOpen(false); setInfoOpen(null); setMobileOpen(false) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [openCreate, openInfo, openSearch, router])
 
   const active = NAV.flat().find((item) => item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)) ?? NAV[0][0]
   const title = active.labels[idx]
+  const connectionText = connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : connection === 'reconnecting' ? c.reconnecting : c.offline
   const navigate = (href: string) => { router.push(href); setMobileOpen(false) }
 
   return <div className={`app-shell${collapsed ? ' app-shell--collapsed' : ''}`}>
@@ -157,26 +229,34 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
     <aside className={`app-sidebar${mobileOpen ? ' app-sidebar--open' : ''}`}>
       <div className="app-sidebar__brand"><span className="brand-mark">O</span><span className="app-sidebar__brand-copy"><strong>{instance.instance_name}</strong><small>EXECUTION LEDGER</small></span><button className="icon-button app-sidebar__mobile-close" aria-label="Close navigation" onClick={() => setMobileOpen(false)}><Icon name="close" /></button></div>
       <nav className="app-nav" aria-label="Primary navigation">
-        {NAV.map((group, groupIndex) => <section className="app-nav__group" key={c.groups[groupIndex]}><p className="app-nav__label">{c.groups[groupIndex]}</p>{group.map((item) => { const selected = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href); return <button key={item.href} className="app-nav__item" data-selected={selected || undefined} onClick={() => navigate(item.href)} title={item.labels[idx]}><Icon name={item.icon} /><span>{item.labels[idx]}</span>{item.href === '/inbox' && inboxCount > 0 && <i className="app-nav__badge">{inboxCount}</i>}</button> })}</section>)}
+        {NAV.map((group, groupIndex) => <section className="app-nav__group" key={c.groups[groupIndex]}><p className="app-nav__label">{c.groups[groupIndex]}</p>{group.map((item) => { const selected = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href); const count = item.href === '/inbox' ? inboxCount : item.href === '/sessions' ? activeSessionCount : 0; return <button key={item.href} className="app-nav__item" data-selected={selected || undefined} onClick={() => navigate(item.href)} title={item.labels[idx]}><Icon name={item.icon} /><span>{item.labels[idx]}</span>{count > 0 && <i className="app-nav__badge">{count}</i>}{item.href === '/runtimes' && connection !== 'connected' && <i className={`nav-connection-dot connection-dot connection-dot--${connection}`} aria-hidden="true" />}</button> })}</section>)}
       </nav>
-      <div className="app-sidebar__footer"><div className="runtime-summary"><span className={`connection-dot connection-dot--${connection}`} /><div><strong>{connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : c.offline}</strong><small>localhost · v{instance.server_version}</small></div></div><button className="sidebar-collapse" onClick={() => { const next = !collapsed; setCollapsed(next); localStorage.setItem('orchestratord.sidebar', next ? 'collapsed' : 'expanded') }} aria-label="Toggle sidebar">{collapsed ? '›' : '‹'}</button></div>
+      <div className="app-sidebar__footer"><button className="runtime-summary" onClick={() => openInfo('diagnostics')}><span className={`connection-dot connection-dot--${connection}`} /><div><strong>{connectionText}</strong><small>localhost · v{instance.server_version}</small></div></button><button className="icon-button sidebar-help" onClick={() => openInfo('help')} aria-label={detailsCopy[locale].help}><Icon name="help" /></button><button className="sidebar-collapse" onClick={() => { const next = !collapsed; setCollapsed(next); localStorage.setItem('orchestratord.sidebar', next ? 'collapsed' : 'expanded') }} aria-label="Toggle sidebar">{collapsed ? '›' : '‹'}</button></div>
     </aside>
     <div className="app-main">
-      <header className="page-header"><div className="page-header__identity"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><Icon name={active.icon} /><h1>{title}</h1></div><div className="page-header__actions"><button className="search-trigger" onClick={() => setSearchOpen(true)}><Icon name="search" /><span>{c.search}</span><kbd>⌘ K</kbd></button><button className="connection-button" title={`${instance.realtime_url} · REST localhost:9000`}><span className={`connection-dot connection-dot--${connection}`} /><span>{connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : c.offline}</span></button><button className="icon-button" aria-label="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button><LocaleSwitcher /><Button onClick={() => setCreateOpen(true)}><Icon name="plus" />{c.newIssue}</Button></div></header>
+      <header className="page-header"><div className="page-header__identity"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><Icon name={active.icon} /><h1>{title}</h1></div><div className="page-header__actions"><button className="search-trigger" onClick={openSearch}><Icon name="search" /><span>{c.search}</span><kbd>⌘ K</kbd></button><button className="connection-button" onClick={() => openInfo('diagnostics')} title={`${instance.realtime_url} · REST 127.0.0.1:9000`}><span className={`connection-dot connection-dot--${connection}`} /><span>{connectionText}</span></button><button className="icon-button" aria-label="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button><LocaleSwitcher /><Button onClick={openCreate}><Icon name="plus" />{c.newIssue}</Button></div></header>
       {connection === 'offline' && <div className="connection-banner">{c.offlineNote}</div>}
+      {reconnectNotice && connection === 'reconnecting' && <div className="connection-banner">{c.reconnectNote}</div>}
       <main className="page-canvas">{children}</main>
     </div>
-    {searchOpen && <CommandPalette instance={instance} close={() => setSearchOpen(false)} navigate={navigate} />}
-    {createOpen && <CreateIssueDialog workspaceId={instance.workspace_id} close={() => setCreateOpen(false)} labels={c} navigate={navigate} />}
+    {searchOpen && <CommandPalette instance={instance} close={() => setSearchOpen(false)} navigate={navigate} returnFocus={returnFocus} />}
+    {createOpen && <CreateIssueDialog workspaceId={instance.workspace_id} close={() => setCreateOpen(false)} labels={c} navigate={navigate} returnFocus={returnFocus} />}
+    {infoOpen && <InfoDialog kind={infoOpen} instance={instance} connection={connection} close={() => setInfoOpen(null)} returnFocus={returnFocus} />}
+    {recovered && <div className="sync-toast" role="status"><span className="connection-dot connection-dot--connected" />{c.recovered}</div>}
   </div>
 }
 
-function CommandPalette({ instance, close, navigate }: { instance: InstanceBootstrap; close: () => void; navigate: (href: string) => void }) {
+function InfoDialog({ kind, instance, connection, close, returnFocus }: { kind: 'help' | 'diagnostics'; instance: InstanceBootstrap; connection: string; close: () => void; returnFocus?: HTMLElement | null }) {
+  const locale = useLocale(); const c = detailsCopy[locale]; const ref = useRef<HTMLElement>(null); const onKeyDown = useDialogFocus(ref, returnFocus)
+  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={ref} onKeyDown={onKeyDown} className="info-dialog" role="dialog" aria-modal="true" aria-label={kind === 'help' ? c.help : c.diagnostics}><header><div><p className="dialog-eyebrow">{kind === 'help' ? c.nav : c.local}</p><h2>{kind === 'help' ? c.help : c.diagnostics}</h2></div><button autoFocus type="button" className="icon-button" aria-label={c.close} onClick={close}><Icon name="close" /></button></header>{kind === 'help' ? <dl className="shortcut-list">{c.shortcuts.map(([keys, label]) => <div key={keys}><dt><kbd>{keys}</kbd></dt><dd>{label}</dd></div>)}</dl> : <dl className="diagnostic-list"><div><dt>{c.status}</dt><dd><span className={`connection-dot connection-dot--${connection}`} />{connection}</dd></div><div><dt>{c.rest}</dt><dd><code>http://127.0.0.1:9000</code></dd></div><div><dt>{c.realtime}</dt><dd><code>{instance.realtime_url}</code></dd></div><div><dt>{c.runtime}</dt><dd>localhost · v{instance.server_version}</dd></div></dl>}</section></div>
+}
+
+function CommandPalette({ instance, close, navigate, returnFocus }: { instance: InstanceBootstrap; close: () => void; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
   const locale = useLocale(); const idx = localeIndex(locale)
   const [query, setQuery] = useState('')
   const [activeIndex, setActiveIndex] = useState(0)
   const dialogRef = useRef<HTMLElement>(null)
-  const onDialogKeyDown = useDialogFocus(dialogRef)
+  const onDialogKeyDown = useDialogFocus(dialogRef, returnFocus)
   const [entities, setEntities] = useState<Array<{ label: string; type: string; href: string }>>([])
   useEffect(() => {
     let live = true
@@ -188,14 +268,16 @@ function CommandPalette({ instance, close, navigate }: { instance: InstanceBoots
       apiClient.request<Array<{ id: string; hostname: string }>>(`/api/workspaces/${instance.workspace_id}/runtimes`),
       apiClient.request<Array<{ name: string; display_name: string }>>('/api/skills'),
       apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/autopilots`),
-    ]).then(([issues, sessions, agents, projects, runtimes, skills, autopilots]) => { if (!live) return; setEntities([
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/squads`),
+    ]).then(([issues, sessions, agents, projects, runtimes, skills, autopilots, squads]) => { if (!live) return; setEntities([
       ...(issues.status === 'fulfilled' ? issues.value.map(x => ({ label: x.title, type: 'Issue', href: `/issues/${x.id}` })) : []),
       ...(sessions.status === 'fulfilled' ? sessions.value.map(x => ({ label: `${x.mode} · ${x.id.slice(0, 8)}`, type: 'Session', href: `/sessions/${x.id}` })) : []),
-      ...(agents.status === 'fulfilled' ? agents.value.map(x => ({ label: x.name, type: 'Agent', href: '/agents' })) : []),
-      ...(projects.status === 'fulfilled' ? projects.value.map(x => ({ label: x.name, type: 'Project', href: '/projects' })) : []),
-      ...(runtimes.status === 'fulfilled' ? runtimes.value.map(x => ({ label: x.hostname, type: 'Runtime', href: '/runtimes' })) : []),
+      ...(agents.status === 'fulfilled' ? agents.value.map(x => ({ label: x.name, type: 'Agent', href: `/agents/${x.id}` })) : []),
+      ...(projects.status === 'fulfilled' ? projects.value.map(x => ({ label: x.name, type: 'Project', href: `/projects/${x.id}` })) : []),
+      ...(runtimes.status === 'fulfilled' ? runtimes.value.map(x => ({ label: x.hostname, type: 'Runtime', href: `/runtimes/${x.id}` })) : []),
       ...(skills.status === 'fulfilled' ? skills.value.map(x => ({ label: x.display_name, type: 'Skill', href: `/skills/${encodeURIComponent(x.name)}` })) : []),
-      ...(autopilots.status === 'fulfilled' ? autopilots.value.map(x => ({ label: x.name, type: 'Autopilot', href: '/autopilots' })) : []),
+      ...(autopilots.status === 'fulfilled' ? autopilots.value.map(x => ({ label: x.name, type: 'Autopilot', href: `/autopilots/${x.id}` })) : []),
+      ...(squads.status === 'fulfilled' ? squads.value.map(x => ({ label: x.name, type: 'Squad', href: `/squads/${x.id}` })) : []),
     ]) })
     return () => { live = false }
   }, [instance.workspace_id])
@@ -205,10 +287,10 @@ function CommandPalette({ instance, close, navigate }: { instance: InstanceBoots
   return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{results.map((item, i) => <button key={`${item.type}-${item.href}-${i}`} data-active={i === activeIndex || undefined} onMouseEnter={() => setActiveIndex(i)} onClick={() => openItem(i)}><span>{item.label}</span><small>{item.type}</small></button>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> browse</span><span><kbd>↵</kbd> open</span><span><kbd>C</kbd> new issue</span><span><kbd>esc</kbd> close</span></footer></section></div>
 }
 
-function CreateIssueDialog({ workspaceId, close, labels, navigate }: { workspaceId: string; close: () => void; labels: typeof copy[keyof typeof copy]; navigate: (href: string) => void }) {
+function CreateIssueDialog({ workspaceId, close, labels, navigate, returnFocus }: { workspaceId: string; close: () => void; labels: typeof copy[keyof typeof copy]; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
   const create = useCreateIssue(apiClient, workspaceId)
   const [title, setTitle] = useState(''); const [description, setDescription] = useState('')
   const dialogRef = useRef<HTMLFormElement>(null)
-  const onDialogKeyDown = useDialogFocus(dialogRef)
+  const onDialogKeyDown = useDialogFocus(dialogRef, returnFocus)
   return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><form ref={dialogRef} onKeyDown={onDialogKeyDown} className="create-dialog" role="dialog" aria-modal="true" onSubmit={e => { e.preventDefault(); if (!title.trim()) return; create.mutate({ title: title.trim(), description }, { onSuccess: issue => { close(); navigate(`/issues/${issue.id}`) } }) }}><header><div><span className="dialog-eyebrow">ISSUE / NEW</span><h2>{labels.newIssue}</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={close}><Icon name="close" /></button></header><label>{labels.title}<Input autoFocus value={title} onChange={e => setTitle(e.target.value)} /></label><label>{labels.description}<Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder={labels.description} /></label>{create.isError && <p className="form-error">Could not create the issue. Your draft is still here; check the local API and try again.</p>}<footer><Button type="button" variant="ghost" onClick={close}>{labels.cancel}</Button><Button type="submit" disabled={!title.trim() || create.isPending}>{create.isPending ? labels.creating : labels.create}</Button></footer></form></div>
 }

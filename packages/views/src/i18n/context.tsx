@@ -40,6 +40,10 @@ export function I18nProvider({
     }
   }, [])
 
+  useEffect(() => {
+    document.documentElement.lang = locale
+  }, [locale])
+
   const value = useMemo<I18nContextValue>(
     () => ({
       locale,

@@ -21,7 +21,7 @@ import {
 import { CSS } from '@dnd-kit/utilities'
 import { useIssues, useMoveIssue } from '@orchestratord/core'
 import type { ApiClient, Issue, IssueStatus } from '@orchestratord/core'
-import { Badge, Card } from '@orchestratord/ui'
+import { Badge, Button, Card } from '@orchestratord/ui'
 import { useTranslation } from '../i18n'
 import type { Locale } from '../i18n/dictionaries'
 import { ISSUE_STATUSES, STATUS_TONE, issueStatusLabel } from './status'
@@ -36,9 +36,9 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
   const move = useMoveIssue(client, workspaceId)
   const { locale } = useTranslation()
   const c = {
-    en: { loading: 'Loading board…', failed: 'Failed to load board', move: 'Move', change: 'Change status for' },
-    'zh-CN': { loading: '正在加载看板…', failed: '无法加载看板', move: '移动', change: '更改状态：' },
-    ja: { loading: 'カンバンを読み込み中…', failed: 'カンバンを読み込めませんでした', move: '移動', change: '状態を変更：' },
+    en: { loading: 'Loading board…', failed: 'Failed to load board', move: 'Move', change: 'Change status for', more: 'Show more' },
+    'zh-CN': { loading: '正在加载看板…', failed: '无法加载看板', move: '移动', change: '更改状态：', more: '显示更多' },
+    ja: { loading: 'カンバンを読み込み中…', failed: 'カンバンを読み込めませんでした', move: '移動', change: '状態を変更：', more: 'さらに表示' },
   }[locale]
   // Optimistic update + WS rollback are owned by ``useMoveIssue``
   // (§5.3): the mutation's ``onMutate`` snaps the card into the target
@@ -109,6 +109,7 @@ export function KanbanBoard({ client, workspaceId }: KanbanBoardProps) {
               locale={locale}
               moveLabel={c.move}
               changeLabel={c.change}
+              moreLabel={c.more}
               onMove={(issueId, nextStatus) => move.mutate({ issueId, status: nextStatus })}
             />
           )
@@ -127,6 +128,7 @@ function KanbanColumn({
   onMove,
   moveLabel,
   changeLabel,
+  moreLabel,
 }: {
   status: IssueStatus
   issues: Issue[]
@@ -136,7 +138,10 @@ function KanbanColumn({
   onMove: (issueId: string, status: IssueStatus) => void
   moveLabel: string
   changeLabel: string
+  moreLabel: string
 }) {
+  const [visibleCount, setVisibleCount] = useState(50)
+  const visibleIssues = issues.slice(0, visibleCount)
   // Each column is a droppable region. The droppable id is the column
   // status so ``handleDragEnd`` can read the target column from
   // ``event.over.id`` without scanning the DOM.
@@ -147,7 +152,7 @@ function KanbanColumn({
   return (
     <SortableContext
       id={status}
-      items={issues.map((i) => i.id)}
+      items={visibleIssues.map((i) => i.id)}
       strategy={verticalListSortingStrategy}
     >
       <section
@@ -164,7 +169,7 @@ function KanbanColumn({
           <span className="kanban-column__count">{issues.length}</span>
         </header>
         <div className="kanban-column__body">
-          {issues.map((issue) => (
+          {visibleIssues.map((issue) => (
             <KanbanCard
               key={issue.id}
               issue={issue}
@@ -176,6 +181,7 @@ function KanbanColumn({
               changeLabel={changeLabel}
             />
           ))}
+          {visibleCount < issues.length && <Button size="sm" variant="ghost" onClick={() => setVisibleCount(count => count + 50)}>{moreLabel} · {visibleIssues.length}/{issues.length}</Button>}
         </div>
       </section>
     </SortableContext>

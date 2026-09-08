@@ -13,6 +13,26 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+#: 机制态 —— Kernel/Layer 1 可理解、可跨业务复用的结果状态
+#: （DESIGN_ORCHESTRATION_BUSINESS_DECOUPLING.md §4.4）。
+#: 业务结论（premise_not_met / no_changes_produced /
+#: empty_branch_no_commits 等）不再作为 status 出现：
+#: 它们表达为 ``status="failed"`` + ``outcome_code=<业务自由码>``，
+#: 机制层对 outcome_code 只透传不解释，解释权在应用层
+#: （ResultInterpreter，P4 落地）。
+MECHANISM_STATUSES: frozenset[str] = frozenset(
+    {
+        "completed",
+        "failed",
+        "interrupted",
+        "rate_limited",
+        "max_turns_exceeded",
+        "loop_detected",
+        "stagnation",
+        "read_only_loop",
+    }
+)
+
 
 @dataclass
 class AgentTask:
@@ -117,11 +137,15 @@ class AgentTaskResult:
     conversation_id: str | None = None
 
     # ── Terminal status ───────────────────────────────────────
-    # One of: "completed", "failed", "stagnation", "loop_detected",
-    #         "max_turns_exceeded", "read_only_loop", "premise_not_met",
-    #         "no_changes_produced", "empty_branch_no_commits",
-    #         "interrupted", "rate_limited"
+    # 机制态，取值见 MECHANISM_STATUSES。业务结论不用 status 表达：
+    # ``status="failed"`` + ``outcome_code``（下方）承载业务自由码，
+    # 机制层透传、应用层解释（DESIGN §4.4）。
     status: str = "completed"
+
+    # ── Business outcome code (pass-through) ─────────────────
+    # 业务自由码（如 "premise_not_met"）。机制层仅透传不解释；
+    # 默认 None 表示"无业务结论"。
+    outcome_code: str | None = None
 
     # ── Output ────────────────────────────────────────────────
     output_text: str = ""
@@ -152,6 +176,9 @@ class AgentTaskResult:
 
     @property
     def is_terminal_failure(self) -> bool:
+        # 语义不变（DESIGN §7 P1 兼容承诺）：新代码的业务结论以
+        # failed + outcome_code 表达（命中 "failed" 分支）；业务态
+        # 字符串保留仅为容忍历史持久化值，新代码不得再产生。
         return self.status in (
             "failed",
             "premise_not_met",

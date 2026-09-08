@@ -3,6 +3,8 @@
 import { useState } from 'react'
 import type { SessionEvent } from '@orchestratord/core'
 import { Badge, Button, Card } from '@orchestratord/ui'
+import { redactSensitive } from './redact-sensitive'
+import { useLocale } from '../i18n'
 
 export interface ToolCallCardProps {
   event: SessionEvent
@@ -15,14 +17,15 @@ const DEFAULT_TRUNCATE_AT = 4096
 
 export function ToolCallCard({ event, truncateAt = DEFAULT_TRUNCATE_AT }: ToolCallCardProps) {
   const [expanded, setExpanded] = useState(false)
+  const c = evidenceCopy[useLocale()]
   const p = event.payload
-  const name = typeof p.name === 'string' ? p.name : 'tool call'
+  const name = typeof p.name === 'string' ? p.name : c.toolCall
   const callId = typeof p.call_id === 'string' ? p.call_id : null
   const args =
     p.arguments && typeof p.arguments === 'object'
       ? (p.arguments as Record<string, unknown>)
       : {}
-  const serialized = JSON.stringify(args, null, 2)
+  const serialized = JSON.stringify(redactSensitive(args), null, 2)
   const isTruncated = serialized.length > truncateAt
   const preview = isTruncated ? serialized.slice(0, truncateAt) + '…' : serialized
   const showFull = expanded || !isTruncated
@@ -44,17 +47,23 @@ export function ToolCallCard({ event, truncateAt = DEFAULT_TRUNCATE_AT }: ToolCa
       {isTruncated && (
         <footer className="tool-call-card__footer">
           <span className="tool-call-card__truncated-note">
-            truncated ({serialized.length.toLocaleString()} chars &gt; {truncateAt.toLocaleString()})
+            {c.truncated} ({serialized.length.toLocaleString()} {c.characters} &gt; {truncateAt.toLocaleString()})
           </span>
           <Button
             size="sm"
             variant="ghost"
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? 'collapse' : 'view full'}
+            {expanded ? c.collapse : c.viewFull}
           </Button>
         </footer>
       )}
     </Card>
   )
 }
+
+const evidenceCopy = {
+  en: { toolCall: 'tool call', truncated: 'truncated', characters: 'characters', collapse: 'Collapse', viewFull: 'View full' },
+  'zh-CN': { toolCall: '工具调用', truncated: '已截断', characters: '个字符', collapse: '收起', viewFull: '查看完整内容' },
+  ja: { toolCall: 'ツール呼び出し', truncated: '省略済み', characters: '文字', collapse: '折りたたむ', viewFull: 'すべて表示' },
+} as const

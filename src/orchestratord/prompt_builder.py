@@ -14,9 +14,8 @@ from typing import TYPE_CHECKING, Any
 from jinja2 import Environment, StrictUndefined, TemplateError
 
 from .agent.task import AgentTask
-from .premise_check import build_premise_block, check_issue_premise
+from .kernel.prompt_core import GENERIC_DEFAULT_PROMPT, get_prompt_router
 from .rules_learner import RuleEngine
-from .tracker import PullRequestFeedback, PullRequestRef
 from .workflow_store import get_workflow_store
 from .paths import SESSIONS_DIR
 
@@ -28,98 +27,10 @@ logger = logging.getLogger(__name__)
 # Jinja2 environment with strict undefined handling (mirrors Solid's strict_variables)
 _jinja_env = Environment(undefined=StrictUndefined)
 
-_DEFAULT_PROMPT = """You are an autonomous software engineering agent.
-
-Task: {{ task.title }}
-{% if task.kind == "issue" and task.context and task.context.get("issue_identifier") %}
-Issue: {{ task.context.get("issue_identifier") }}
-{% endif %}
-{% if task.description %}
-Description:
-{{ task.description }}
-{% endif %}
-{% if task.priority %}
-Priority: {{ task.priority }}
-{% endif %}
-{% if task.context and task.context.get("issue_state") %}
-State: {{ task.context.get("issue_state") }}
-{% endif %}
-
-Please analyze the issue, implement the necessary changes, and ensure all tests pass.
-
-## CLI Usage Guidelines
-When you need to suggest terminal commands for the user:
-- Always use the `orchestratord` CLI entrypoint, NOT `python3 -c` or `PYTHONPATH=`.
-- For orchestrator status: `orchestratord server status`
-- For issue list: `orchestratord issue list`
-- For issue tail: `orchestratord issue tail --id <id>`
-- For other commands: use `orchestratord --help`
-{% if clarification %}
-{{ clarification }}
-{% endif %}
-"""
-
-
-# Jinja2 template for clarification guidance injected into the prompt.
-# Rendered when an issue is in the clarification flow.
-_CLARIFICATION_TEMPLATE = """
----
-## Clarification Context
-
-{% if clarification_answer %}
-The issue author or operator supplied clarification before this run. Treat the
-answer below as part of the issue requirements.
-
-- Question: "{{ pending_question or 'Pre-dispatch clarification' }}"
-- Answer{% if answer_source %} ({{ answer_source }}){% endif %}: "{{ clarification_answer }}"
-{% else %}
-This issue is currently awaiting clarification. When the answer is available,
-it will be provided below. If you are unsure about any aspect of the issue,
-use the `AskIssueAuthor` tool to request clarification from the issue author
-or local operator.
-
-When requesting clarification:
-- Be specific: ask exactly what is ambiguous (e.g., "Should this function be sync or async?")
-- Provide context: include relevant code snippets or error messages
-- Limit to one question at a time to avoid overwhelming responders
-{% if pending_question %}
-- Current pending question: "{{ pending_question }}"
-{% if options %}
-- Available options: {{ options|join(', ') }}
-{% endif %}
-{% endif %}
-{% endif %}
----"""
-
-_REVIEW_FEEDBACK_TEMPLATE = """You are an autonomous software engineering agent fixing pull request feedback.
-
-Issue: {{ issue.identifier }} - {{ issue.title }}
-Pull request: {% if pull_request.number %}#{{ pull_request.number }}{% else %}unknown{% endif %}{% if pull_request.url %} ({{ pull_request.url }}){% endif %}
-Branch: {{ branch_name }}
-
-Current task:
-- Fix only the PR review feedback and CI failures listed below.
-- Do not expand scope or reimplement unrelated issue requirements.
-- Work on the current branch only; do not create a new branch or pull request.
-- Prefer the smallest correct change that addresses the feedback.
-- If feedback is conflicting or unclear, leave code unchanged for that item and explain what clarification is needed.
-- Run relevant tests or record why they cannot be run.
-- CLI Usage: when suggesting terminal commands, use `orchestratord` not `python3 -c` or `PYTHONPATH=`.
-
-Feedback:
-{% for item in feedback %}
-{{ loop.index }}. [{{ item.source }}] {{ item.id }}{% if item.severity %} severity={{ item.severity }}{% endif %}{% if item.status %} status={{ item.status }}{% endif %}
-{% if item.file_path %}   File: {{ item.file_path }}{% if item.line %}:{{ item.line }}{% endif %}
-{% endif %}{% if item.commit_sha %}   Commit: {{ item.commit_sha }}
-{% endif %}{% if item.url %}   URL: {{ item.url }}
-{% endif %}{% if item.diff_hunk %}   Diff hunk:
-```diff
-{{ item.diff_hunk }}
-```
-{% endif %}   Body:
-{{ item.body | indent(3) }}
-{% endfor %}
-"""
+# 业务模板（issue/澄清/检视跟进/rebase/premise 注入）已迁至
+# business_prompts.py 并经 kernel PromptRouter 注册（DESIGN §4.5/P2）。
+# 本模块保留为组装器：store 模板 → 业务 profile → generic 兜底，
+# 对业务模块零 import。
 
 
 class PromptBuilder:
@@ -159,16 +70,21 @@ class PromptBuilder:
         if current:
             template_str = current[1]
         else:
-            template_str = _DEFAULT_PROMPT
+            # store 未加载：业务 profile（按 task.kind 注册）优先，
+            # 未注册回退机制侧 generic 模板。
+            template_str = (
+                get_prompt_router().profile_template(_input_task_kind(task))
+                or GENERIC_DEFAULT_PROMPT
+            )
 
         if not template_str or not template_str.strip():
-            template_str = _DEFAULT_PROMPT
+            template_str = GENERIC_DEFAULT_PROMPT
 
         try:
             template = _jinja_env.from_string(template_str)
         except TemplateError as exc:
             logger.error("Template parse error: %s", exc)
-            template = _jinja_env.from_string(_DEFAULT_PROMPT)
+            template = _jinja_env.from_string(GENERIC_DEFAULT_PROMPT)
 
         # Detect input type: AgentTask or legacy Issue
         if isinstance(task, AgentTask):
@@ -247,7 +163,7 @@ class PromptBuilder:
             # never raise — degrade to a minimal raw prompt if even the
             # default cannot render this task shape.
             try:
-                fallback = _jinja_env.from_string(_DEFAULT_PROMPT)
+                fallback = _jinja_env.from_string(GENERIC_DEFAULT_PROMPT)
                 rendered = fallback.render(context).strip()
             except TemplateError as fallback_exc:
                 logger.error("Default prompt fallback failed: %s", fallback_exc)
@@ -289,18 +205,12 @@ class PromptBuilder:
                 f"{rendered}"
             )
 
-        # Premise check (defect R3): when the issue references files that
-        # do not exist in the workspace, warn the agent up front and hand
-        # it the honest-exit protocol, so "fabricate the missing file" is
-        # no longer the path of least resistance.
-        if ws_path:
-            try:
-                missing_paths = check_issue_premise(task_dict, ws_path)
-            except Exception:  # premise checking must never break prompts
-                logger.debug("premise check failed", exc_info=True)
-                missing_paths = []
-            if missing_paths:
-                rendered = f"{rendered}\n\n{build_premise_block(missing_paths)}"
+        # Post-render business decorations (premise warning block etc.),
+        # registered by business modules into the kernel PromptRouter
+        # (DESIGN §4.5). Hooks never raise and are no-ops when no
+        # business module has registered (e.g. hermetic mechanism tests).
+        for hook in get_prompt_router().post_render_hooks:
+            rendered = hook(rendered, task_dict, ws_path)
 
         if previous_run_ids:
             sessions_home = SESSIONS_DIR
@@ -487,119 +397,6 @@ class PromptBuilder:
         return "", full.strip()
 
     @staticmethod
-    def render_rebase(
-        *,
-        issue: Any,
-        branch_name: str,
-        base_branch: str,
-        conflict_files: tuple[str, ...] | list[str] = (),
-        reason: str | None = None,
-    ) -> str:
-        """Build a prompt for an agent run that resolves a rebase conflict.
-
-        This is used when ``_process_rebase_intent`` left content conflicts
-        (has_conflict=True) and the daemon launches a fresh ``agent_rebase``
-        run to resolve them. The prompt is intentionally minimal — the agent
-        is told exactly which files git marked as conflicting and the
-        suggested git commands to finish the rebase + push.
-        """
-        issue_dict = issue.to_dict() if hasattr(issue, "to_dict") else issue
-        title = (
-            issue_dict.get("title") if isinstance(issue_dict, dict) else getattr(issue, "title", "")
-        ) or ""
-        identifier = (
-            issue_dict.get("identifier")
-            if isinstance(issue_dict, dict)
-            else getattr(issue, "identifier", "")
-        ) or ""
-
-        files_block = (
-            "\n".join(f"- `{name}`" for name in conflict_files)
-            if conflict_files
-            else "- (no specific files reported — run `git diff --name-only --diff-filter=U` to list them)"
-        )
-
-        reason_block = f"\n## Reason\n\n{reason}\n" if reason else ""
-
-        template = (
-            "---\n"
-            f"# PR Conflict Resolution — {identifier}\n"
-            f"\n**Title:** {title}\n"
-            f"**Branch:** `{branch_name}` (base `{base_branch}`)\n"
-            f"{reason_block}"
-            "\n"
-            "## Task\n"
-            "\n"
-            "The orchestrator's automated `git rebase origin/<base>` left this\n"
-            "branch with content conflicts. Your job is to resolve each conflict,\n"
-            "continue the rebase, and push the rebased branch with\n"
-            "`--force-with-lease` (the default) so the PR becomes mergeable\n"
-            "again. **Do NOT close the PR or open a new one.**\n"
-            "\n"
-            "## Conflicting Files\n"
-            "\n"
-            f"{files_block}\n"
-            "\n"
-            "## Procedure\n"
-            "\n"
-            "1. `git status` — confirm REBASE_HEAD is set.\n"
-            "2. For each file above: read the file, remove the\n"
-            "   `<<<<<<<`/`=======`/`>>>>>>>` markers, write the merged\n"
-            "   content you want kept.\n"
-            "3. `git add <file>` for each resolved file.\n"
-            "4. `git rebase --continue` (or `--skip` if the upstream commit is\n"
-            "   the one to drop — but only when clearly safe).\n"
-            "5. `git log --oneline -5` to verify the rebased history.\n"
-            "6. Capture the new `HEAD` SHA, then push:\n"
-            "\n"
-            "   ```bash\n"
-            "   REMOTE_SHA=$(git rev-parse origin/<branch>)\n"
-            "   git push --force-with-lease=<branch>:$REMOTE_SHA origin <branch>\n"
-            "   ```\n"
-            "\n"
-            "7. Print the final head SHA in your response so the orchestrator\n"
-            "   can record it.\n"
-            "\n"
-            "## Constraints\n"
-            "\n"
-            "- **Do not** run `git rebase --abort` unless explicitly asked; we\n"
-            "  want the rebased history, not the pre-rebase one.\n"
-            "- **Do not** use plain `git push --force`; the orchestrator\n"
-            "  defaults to `--force-with-lease` to avoid clobbering concurrent\n"
-            "  pushes. Only use `--force` if the operator explicitly passed\n"
-            "  `--force` to the rebase CLI.\n"
-            "- **Do not** open a new PR; the existing PR will pick up the\n"
-            "  rebased head automatically once the push lands.\n"
-            "---"
-        )
-        return template
-
-    @staticmethod
-    def render_review_feedback(
-        *,
-        issue: Any,
-        pull_request: PullRequestRef,
-        branch_name: str,
-        feedback: list[PullRequestFeedback],
-    ) -> str:
-        issue_dict = issue.to_dict() if hasattr(issue, "to_dict") else issue
-        context = {
-            "issue": _to_jinja_value(issue_dict),
-            "pull_request": pull_request,
-            "branch_name": branch_name,
-            "feedback": feedback,
-        }
-        try:
-            rendered = _jinja_env.from_string(_REVIEW_FEEDBACK_TEMPLATE).render(context).strip()
-        except TemplateError as exc:
-            logger.error("Review feedback template render error: %s", exc)
-            return _DEFAULT_PROMPT
-
-        # Inject rules reference
-        rendered = PromptBuilder._inject_rules_reference_from_store(rendered)
-        return rendered
-
-    @staticmethod
     def _inject_rules_reference_from_store(prompt: str) -> str:
         """Resolve rules path from WorkflowStore and inject reference."""
         store = get_workflow_store()
@@ -612,54 +409,6 @@ class PromptBuilder:
         )
         rules_path = RuleEngine.get_rules_path(config, workflow_path)
         return PromptBuilder._inject_rules_reference(prompt, rules_path)
-
-    @staticmethod
-    def render_feedback_summary(
-        *,
-        attempt: int,
-        processed: list[PullRequestFeedback],
-        skipped: list[dict],
-    ) -> str:
-        """Render a post-followup summary for the PR.
-
-        Args:
-            attempt: Follow-up attempt number.
-            processed: Feedback items that were auto-handled.
-            skipped: Dicts with keys ``feedback`` (PullRequestFeedback)
-                and ``reason`` (str) for items needing human attention.
-        """
-        lines = [
-            "## Orchestratord PR Review Follow-up Summary",
-            "",
-            f"**Follow-up attempt**: #{attempt}",
-            f"**Processed**: {len(processed)} item(s)",
-        ]
-        if processed:
-            lines += ["", "### Auto-handled"]
-            for item in processed:
-                loc = ""
-                if item.file_path:
-                    loc = f" (`{item.file_path}"
-                    if item.line:
-                        loc += f":{item.line}"
-                    loc += "`)"
-                body_preview = (item.body or "")[:80]
-                if len(item.body or "") > 80:
-                    body_preview += "..."
-                lines.append(f"- [{item.source}] {item.id}{loc}: {body_preview}")
-        if skipped:
-            lines += ["", "### Needs human attention"]
-            for entry in skipped:
-                fb = entry["feedback"]
-                reason = entry["reason"]
-                loc = ""
-                if fb.file_path:
-                    loc = f" (`{fb.file_path}"
-                    if fb.line:
-                        loc += f":{fb.line}"
-                    loc += "`)"
-                lines.append(f"- [{fb.source}] {fb.id}{loc}: {reason}")
-        return "\n".join(lines)
 
     @staticmethod
     def build_continuation_prompt(
@@ -718,48 +467,20 @@ class PromptBuilder:
         prompt = PromptBuilder._inject_rules_reference_from_store(prompt)
         return prompt
 
-    @staticmethod
-    def build_clarification_context(
-        pending_question: str | None = None,
-        options: list[str] | None = None,
-        clarification_answer: str | None = None,
-        answer_source: str | None = None,
-    ) -> str:
-        """Build a clarification guidance block for the system prompt.
 
-        This text is injected into the agent's prompt when an issue is in
-        the clarification flow, guiding the agent to use AskIssueAuthor
-        correctly and informing it about any pending question.
+def _input_task_kind(task: Any) -> str:
+    """Extract the task kind before the full template dict is built.
 
-        Args:
-            pending_question: The pending clarification question, if any
-            options: Available options (for multiple-choice questions)
-
-        Returns:
-            A formatted clarification guidance block, or empty string if
-            clarification is not active
-        """
-        if not pending_question and not clarification_answer:
-            return ""
-
-        template_str = _CLARIFICATION_TEMPLATE.strip()
-        try:
-            template = _jinja_env.from_string(template_str)
-        except TemplateError as exc:
-            logger.error("Clarification template parse error: %s", exc)
-            return ""
-
-        context = {
-            "pending_question": pending_question,
-            "options": options or [],
-            "clarification_answer": clarification_answer,
-            "answer_source": answer_source,
-        }
-        try:
-            return template.render(context).strip()
-        except TemplateError as exc:
-            logger.error("Clarification template render error: %s", exc)
-            return ""
+    AgentTask carries ``kind`` directly; legacy Issue objects are
+    inherently issue-shaped; bare dicts carry ``kind`` when present.
+    """
+    if isinstance(task, AgentTask):
+        return task.kind
+    if hasattr(task, "to_dict"):
+        return "issue"
+    if isinstance(task, dict):
+        return str(task.get("kind", ""))
+    return ""
 
 
 def _build_sequential_workspace_context(session: Any) -> str:

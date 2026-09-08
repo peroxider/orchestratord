@@ -3,7 +3,6 @@ import type { ReactNode } from 'react'
 import '@orchestratord/ui/tokens.css'
 import './globals.css'
 import './shell.css'
-import './shell.css'
 import { WebProviders } from './web-providers'
 import { AppShell } from '@/components/app-shell'
 

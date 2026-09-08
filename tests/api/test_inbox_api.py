@@ -13,6 +13,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
+from orchestratord.issue_clarifier.queue import ClarificationQueue
 
 pytestmark = pytest.mark.database
 
@@ -136,3 +137,37 @@ class TestDismiss:
         await client.post(f"/api/workspaces/{ws}/inbox/{item['id']}/dismiss")
         resp = await client.post(f"/api/workspaces/{ws}/inbox/{item['id']}/dismiss")
         assert resp.status_code == 409
+
+
+class TestClarificationAnswer:
+    async def test_answer_resolves_queue_and_inbox(self, client, tmp_path, monkeypatch) -> None:
+        from orchestratord.issue_clarifier import queue as queue_module
+
+        queue_path = tmp_path / "clarifications.json"
+        monkeypatch.setattr(queue_module, "DEFAULT_QUEUE_PATH", queue_path)
+        ws, issue_id = uuid4(), uuid4()
+        ClarificationQueue().enqueue(str(issue_id), "local-1", "Which target?")
+        item = await _create(client, ws, kind="clarification", issue_id=str(issue_id))
+        resp = await client.post(
+            f"/api/workspaces/{ws}/inbox/{item['id']}/answer",
+            json={"answer": "Use the staging target."},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "resolved"
+        clarified = ClarificationQueue().get_resolved(str(issue_id))
+        assert clarified is not None
+        assert clarified.answer == "Use the staging target."
+
+    async def test_missing_queue_entry_keeps_item_open(self, client, tmp_path, monkeypatch) -> None:
+        from orchestratord.issue_clarifier import queue as queue_module
+
+        monkeypatch.setattr(queue_module, "DEFAULT_QUEUE_PATH", tmp_path / "empty.json")
+        ws, issue_id = uuid4(), uuid4()
+        item = await _create(client, ws, kind="clarification", issue_id=str(issue_id))
+        resp = await client.post(
+            f"/api/workspaces/{ws}/inbox/{item['id']}/answer",
+            json={"answer": "Answer"},
+        )
+        assert resp.status_code == 409
+        detail = await client.get(f"/api/workspaces/{ws}/inbox/{item['id']}")
+        assert detail.json()["status"] == "open"

@@ -10,6 +10,14 @@ export function useRuntimes(client: ApiClient, workspaceId: string) {
   })
 }
 
+export function useRuntime(client: ApiClient, workspaceId: string, runtimeId: string) {
+  return useQuery({
+    queryKey: ['runtimes', workspaceId, runtimeId],
+    queryFn: () => client.request<Runtime>(`/api/workspaces/${workspaceId}/runtimes/${runtimeId}`),
+    enabled: Boolean(runtimeId),
+  })
+}
+
 export interface RegisterRuntimeInput {
   hostname: string
   os: string

@@ -54,7 +54,9 @@ class RunSession:
     tracker ``Issue`` until that business pipeline is migrated.
     """
 
-    issue: Any  # DEPRECATED compatibility alias; use task/subject data instead
+    issue: Any  # DEPRECATED compatibility alias; use task/subject data instead.
+    # P4 装配重写时 property 化并迁 business["issue"]——构造签名 issue= 是
+    # 必填首字段，property 化需与构造点重写同步进行（DESIGN §4.3 迁移表）。
     workspace: Workspace
     task: "AgentTask | None" = None  # NEW: generic task abstraction
     # Orchestrator logical conversation metadata.  None remains valid for
@@ -78,10 +80,8 @@ class RunSession:
     event_queue: "asyncio.Queue | None" = None
     prompt_override: str | None = None
     # Resolved pre-dispatch clarification context copied from the
-    # persistent IssueRecord before the run starts.
-    clarification_question: str | None = None
-    clarification_answer: str | None = None
-    clarification_source: str | None = None
+    # persistent IssueRecord before the run starts. P3 起存储于 ``business``
+    # dict（DESIGN §4.3），此名保留为兼容 property。
     coordinator_mode: bool | None = None
     # Local Unix-domain socket or loopback TCP listener for live operator control. None if
     # the socket failed to start (or was disabled by configuration). When
@@ -99,7 +99,6 @@ class RunSession:
     # Reserved for backend-specific runtime bookkeeping. Core orchestration
     # does not import or depend on a backend task registry.
     _runtime_tasks: Any | None = None
-    summary_comment_id: str | None = None
     tool_count: int = 0
     # Cost telemetry: backends reporting real USD (clawcodex/claude
     # SESSION_COMPLETE payload "total_cost_usd") land in cost_usd;
@@ -122,7 +121,7 @@ class RunSession:
     # List of files git left in conflict state. Populated by
     # ``Orchestrator._prepare_rebase_session`` from
     # ``IssueRecord.conflict_files`` when ``run_kind == "agent_rebase"``.
-    conflict_files: tuple[str, ...] | None = None
+    # P3 起存储于 ``business`` dict（DESIGN §4.3），此名保留为兼容 property。
     # Canonical path to ~/.orchestratord/tool-events/{run_id}/events.ndjson.
     tool_events_path: str | None = None
     # Session-transcript storage for conversation recording.
@@ -132,8 +131,6 @@ class RunSession:
     _transcript_pending_results: dict[str, Any] = field(default_factory=dict)
     _transcript_result_order: list[str] = field(default_factory=list)
     attempt: int = 1
-    issue_attempt: int = 1
-    followup_attempt: int = 1
     # 429-aware backoff bookkeeping.
     consecutive_429_count: int = 0
     total_429_backoff_seconds: float = 0.0
@@ -163,11 +160,96 @@ class RunSession:
     _save_json_snapshot: Any = field(default=None, init=False, repr=False, compare=False)
 
     # Goal-mode state persisted alongside events for crash recovery.
-
-    # Goal-mode state persisted alongside events for crash recovery.
     # Serialized from GoalManager.state.to_dict() on session close;
     # restored via GoalManager.restore() on resume.
     goal_state: dict | None = None
+
+    # 业务私有载荷（DESIGN §4.3 / P3）：Kernel 与 Layer 1 对其内容完全透明。
+    # clarification/conflict_files/attempt 类业务字段迁移于此，上方同名
+    # property 为兼容 accessor；P4 起由 Application 经 RunContext.business 读写。
+    # 注意：copy.copy(session) 会与本 dict 产生别名共享——任何新的会话拷贝点
+    # 必须像 modes/debate.py 分支 fork 一样显式 ``dict(session.business)``
+    # 重建容器，否则写操作会穿透到原会话。
+    business: dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Business payload accessors (DESIGN §4.3 / P3) — storage moved to the
+    # ``business`` dict; the historical attribute names remain as read/write
+    # properties so existing consumers stay source-compatible. Mechanism-domain
+    # modules must not read these directly (tests/test_architecture.py).
+    # ------------------------------------------------------------------
+
+    @property
+    def clarification_question(self) -> str | None:
+        return self.business.get("clarification_question")
+
+    @clarification_question.setter
+    def clarification_question(self, value: str | None) -> None:
+        self.business["clarification_question"] = value
+
+    @property
+    def clarification_answer(self) -> str | None:
+        return self.business.get("clarification_answer")
+
+    @clarification_answer.setter
+    def clarification_answer(self, value: str | None) -> None:
+        self.business["clarification_answer"] = value
+
+    @property
+    def clarification_source(self) -> str | None:
+        return self.business.get("clarification_source")
+
+    @clarification_source.setter
+    def clarification_source(self, value: str | None) -> None:
+        self.business["clarification_source"] = value
+
+    @property
+    def conflict_files(self) -> tuple[str, ...] | None:
+        return self.business.get("conflict_files")
+
+    @conflict_files.setter
+    def conflict_files(self, value: tuple[str, ...] | None) -> None:
+        self.business["conflict_files"] = value
+
+    @property
+    def summary_comment_id(self) -> str | None:
+        return self.business.get("summary_comment_id")
+
+    @summary_comment_id.setter
+    def summary_comment_id(self, value: str | None) -> None:
+        self.business["summary_comment_id"] = value
+
+    @property
+    def issue_attempt(self) -> int:
+        return self.business.get("issue_attempt", 1)
+
+    @issue_attempt.setter
+    def issue_attempt(self, value: int) -> None:
+        self.business["issue_attempt"] = value
+
+    @property
+    def followup_attempt(self) -> int:
+        return self.business.get("followup_attempt", 1)
+
+    @followup_attempt.setter
+    def followup_attempt(self, value: int) -> None:
+        self.business["followup_attempt"] = value
+
+    def business_state(self) -> dict[str, Any]:
+        """业务载荷完整快照（含未设置键的机制默认值）。
+
+        供分支 fork（modes/debate 的 SimpleNamespace 回退路径）复制完整
+        键集使用——property 不进入 ``vars(session)``，此方法补齐缺省键。
+        """
+        return {
+            "clarification_question": self.clarification_question,
+            "clarification_answer": self.clarification_answer,
+            "clarification_source": self.clarification_source,
+            "conflict_files": self.conflict_files,
+            "summary_comment_id": self.summary_comment_id,
+            "issue_attempt": self.issue_attempt,
+            "followup_attempt": self.followup_attempt,
+        }
 
 
 # Backwards-compatible public name used by the issue-to-PR application.

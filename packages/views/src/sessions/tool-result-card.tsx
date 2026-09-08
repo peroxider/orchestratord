@@ -3,6 +3,8 @@
 import { useState } from 'react'
 import type { SessionEvent } from '@orchestratord/core'
 import { Badge, Button, Card } from '@orchestratord/ui'
+import { redactSensitive } from './redact-sensitive'
+import { useLocale } from '../i18n'
 
 export interface ToolResultCardProps {
   event: SessionEvent
@@ -18,8 +20,9 @@ export function ToolResultCard({
   truncateAt = DEFAULT_TRUNCATE_AT,
 }: ToolResultCardProps) {
   const [expanded, setExpanded] = useState(false)
+  const c = resultCopy[useLocale()]
   const p = event.payload
-  const name = typeof p.name === 'string' ? p.name : 'tool result'
+  const name = typeof p.name === 'string' ? p.name : c.toolResult
   const outputRaw = p.output
   const isError = p.is_error === true
   const backendTruncated = p.truncated === true
@@ -27,10 +30,10 @@ export function ToolResultCard({
   // Normalize the output to a string we can measure + preview.
   let serialized: string
   if (typeof outputRaw === 'string') {
-    serialized = outputRaw
+    serialized = String(redactSensitive(outputRaw))
   } else if (outputRaw !== undefined && outputRaw !== null) {
     try {
-      serialized = JSON.stringify(outputRaw, null, 2)
+      serialized = JSON.stringify(redactSensitive(outputRaw), null, 2)
     } catch {
       serialized = String(outputRaw)
     }
@@ -56,7 +59,7 @@ export function ToolResultCard({
         </Badge>
         <span className="tool-result-card__name">{name}</span>
         {backendTruncated && (
-          <Badge tone="warn">truncated by backend</Badge>
+          <Badge tone="warn">{c.backendTruncated}</Badge>
         )}
       </header>
       <pre className="tool-result-card__output">
@@ -65,19 +68,25 @@ export function ToolResultCard({
       {isTruncated && (
         <footer className="tool-result-card__footer">
           <span className="tool-result-card__truncated-note">
-            {serialized.length.toLocaleString()} chars
+            {serialized.length.toLocaleString()} {c.characters}
             {!backendTruncated &&
-              ` > ${truncateAt.toLocaleString()} (truncated in UI)`}
+              ` > ${truncateAt.toLocaleString()} (${c.uiTruncated})`}
           </span>
           <Button
             size="sm"
             variant="ghost"
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? 'collapse' : 'view full'}
+            {expanded ? c.collapse : c.viewFull}
           </Button>
         </footer>
       )}
     </Card>
   )
 }
+
+const resultCopy = {
+  en: { toolResult: 'tool result', backendTruncated: 'truncated by backend', characters: 'characters', uiTruncated: 'truncated in UI', collapse: 'Collapse', viewFull: 'View full' },
+  'zh-CN': { toolResult: '工具结果', backendTruncated: '后端已截断', characters: '个字符', uiTruncated: '界面已截断', collapse: '收起', viewFull: '查看完整内容' },
+  ja: { toolResult: 'ツール結果', backendTruncated: 'バックエンドで省略', characters: '文字', uiTruncated: 'UI で省略', collapse: '折りたたむ', viewFull: 'すべて表示' },
+} as const

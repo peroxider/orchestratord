@@ -24,12 +24,9 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
-
-if TYPE_CHECKING:
-    from .issue_registry.issue import Issue
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +41,24 @@ class RouterResult:
     goal_condition: str | None = None
 
 
+class RoutingSubject(Protocol):
+    """Structural slice of a routed subject (DESIGN §1.2 duck-typing).
+
+    机制侧路由不 import 业务类型——任何暴露 ``title`` / ``description``
+    / ``labels`` 的对象皆可（如 issue_pr 应用的 Issue）。实现经
+    ``getattr(..., 默认值)`` 容错读取。
+    """
+
+    title: str
+    description: str
+    labels: list[str]
+
+
 @runtime_checkable
 class Router(Protocol):
     """Backend ``ModeSelector`` consults when no explicit label is set."""
 
-    def choose(self, issue: "Issue") -> RouterResult: ...
+    def choose(self, issue: RoutingSubject) -> RouterResult: ...
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +157,7 @@ class HeuristicRouter:
         self._confidence_match = confidence_match
         self._confidence_default = confidence_default
 
-    def choose(self, issue: "Issue") -> RouterResult:
+    def choose(self, issue: RoutingSubject) -> RouterResult:
         try:
             text = self._extract_text(issue)
         except Exception:  # pragma: no cover — defensive
@@ -182,7 +192,7 @@ class HeuristicRouter:
         )
 
     @staticmethod
-    def _extract_text(issue: "Issue") -> str:
+    def _extract_text(issue: RoutingSubject) -> str:
         title = getattr(issue, "title", "") or ""
         body = getattr(issue, "description", "") or ""
         return (title + " " + body).lower()
@@ -194,7 +204,7 @@ class HeuristicRouter:
                 return k
         return None
 
-    def _goal_condition_if_matches(self, text: str, issue: "Issue") -> str | None:
+    def _goal_condition_if_matches(self, text: str, issue: RoutingSubject) -> str | None:
         """Return ``issue.title`` if ``text`` matches any goal keyword."""
         if self._first_keyword_hit(text, _GOAL_KEYWORDS):
             title = getattr(issue, "title", "") or ""
@@ -290,7 +300,7 @@ class LLMRouter:
 
     # ------------------------------------------------------------------
 
-    def choose(self, issue: "Issue") -> RouterResult:
+    def choose(self, issue: RoutingSubject) -> RouterResult:
         api_key = os.environ.get(self._api_key_env_var, "").strip()
         if not api_key:
             return RouterResult(
@@ -317,7 +327,7 @@ class LLMRouter:
     # HTTP layer
     # ------------------------------------------------------------------
 
-    def _post(self, api_key: str, issue: "Issue") -> str:
+    def _post(self, api_key: str, issue: RoutingSubject) -> str:
         body = self._build_chat_body(issue)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -334,7 +344,7 @@ class LLMRouter:
         content = data["choices"][0]["message"]["content"]
         return str(content).strip()
 
-    def _build_chat_body(self, issue: "Issue") -> dict[str, Any]:
+    def _build_chat_body(self, issue: RoutingSubject) -> dict[str, Any]:
         title = getattr(issue, "title", "") or "(no title)"
         description = (getattr(issue, "description", "") or "(no description)")[
             :4000  # cap so we don't blow context for huge issues

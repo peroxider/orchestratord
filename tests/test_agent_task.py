@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from orchestratord.agent.task import AgentTask, AgentTaskResult, ProgressEvent, ProgressEventKind
+from orchestratord.agent.task import (
+    MECHANISM_STATUSES,
+    AgentTask,
+    AgentTaskResult,
+    ProgressEvent,
+    ProgressEventKind,
+)
 
 
 class TestAgentTask:
@@ -83,6 +89,7 @@ class TestAgentTaskResult:
         r = AgentTaskResult(task_id="t1")
         assert r.kind == "generic"
         assert r.status == "completed"
+        assert r.outcome_code is None
         assert r.output_text == ""
         assert r.turn_count == 0
         assert r.tool_count == 0
@@ -90,6 +97,23 @@ class TestAgentTaskResult:
         assert r.error is None
         assert r.report_path is None
         assert r.run_id is None
+
+    def test_business_outcomes_ride_failed_plus_outcome_code(self):
+        """DESIGN §4.4：业务结论 = 机制态 failed + 透传 outcome_code。"""
+        for code in ("premise_not_met", "no_changes_produced", "empty_branch_no_commits"):
+            r = AgentTaskResult(task_id="t", status="failed", outcome_code=code)
+            assert r.status == "failed"
+            assert r.outcome_code == code
+            assert r.is_terminal_failure  # 语义与旧 status=code 等价
+            assert not r.is_success
+
+    def test_mechanism_statuses_do_not_need_outcome_code(self):
+        """纯机制态不携带业务结论；is_terminal_failure 覆盖面不变。"""
+        for status in MECHANISM_STATUSES - {"failed"}:
+            r = AgentTaskResult(task_id="t", status=status)
+            assert r.outcome_code is None
+        for status in ("max_turns_exceeded", "stagnation", "loop_detected", "read_only_loop"):
+            assert not AgentTaskResult(task_id="t", status=status).is_terminal_failure
 
 
 class TestProgressEvent:

@@ -48,7 +48,7 @@ export function AgentsList({ client, workspaceId }: AgentsListProps) {
         const lastActivity = [...agentSessions].sort((a, b) => b.created_at.localeCompare(a.created_at))[0]?.created_at
         return <Card key={agent.id} className="agent-card">
           <header className="agent-card__header">
-            <span className="agent-card__name">{agent.name}</span>
+            <a className="agent-card__name" href={`/agents/${agent.id}`}>{agent.name}</a>
             <div><Badge tone="accent">{agent.provider}</Badge>{runtime && <Badge tone={RUNTIME_STATUS_TONE[runtime.status] ?? 'neutral'}>{runtimeStatusLabel(runtime.status, locale)}</Badge>}</div>
           </header>
           <dl className="agent-card__facts"><div><dt>{c.runtime}</dt><dd>{runtime?.hostname ?? c.unavailable}</dd></div><div><dt>{c.active}</dt><dd>{activeSessions}</dd></div><div><dt>{c.last}</dt><dd>{lastActivity ? new Date(lastActivity).toLocaleString(locale) : c.never}</dd></div></dl>
