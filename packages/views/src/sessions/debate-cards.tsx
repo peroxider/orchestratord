@@ -7,6 +7,7 @@ import type { BadgeTone } from '@orchestratord/ui'
 import { eventKindLabel, eventSummary } from './event-kind'
 import { useTranslation } from '../i18n'
 import type { Locale } from '../i18n'
+import { modeCopy, modeStatusLabel } from './mode-copy'
 
 export interface DebateCardsProps {
   events: SessionEvent[]
@@ -48,6 +49,7 @@ const STATUS_TONE: Record<ParticipantBucket['status'], BadgeTone> = {
 
 export function DebateCards({ events }: DebateCardsProps) {
   const { locale } = useTranslation()
+  const c = modeCopy[locale]
   const buckets = useMemo<ParticipantBucket[]>(() => {
     const map = new Map<string, ParticipantBucket>()
     for (const event of events) {
@@ -80,15 +82,15 @@ export function DebateCards({ events }: DebateCardsProps) {
   const judge = buckets.find((b) => b.id === 'judge')
 
   if (buckets.length === 0) {
-    return <p className="debate-cards__empty">No debate events yet.</p>
+    return <p className="debate-cards__empty">{c.debateEmpty}</p>
   }
 
   return (
-    <div className="debate-cards" aria-label="Debate participants">
+    <div className="debate-cards" aria-label={c.debateLabel}>
       <div className="debate-cards__proposer-row">
         {proposers.length === 0 && (
           <p className="debate-cards__empty">
-            No proposer events yet — judge card will appear when judging starts.
+            {c.noProposers}
           </p>
         )}
         {proposers.map((proposer) => (
@@ -101,13 +103,13 @@ export function DebateCards({ events }: DebateCardsProps) {
       </div>
       <div className="debate-cards__badge-row">
         <Badge tone="accent" className="debate-cards__independence-badge">
-          Independent reasoning — proposers did not see each other
+          {c.independent}
         </Badge>
       </div>
       {judge && <JudgeCard bucket={judge} locale={locale} />}
       {!judge && (
         <p className="debate-cards__pending-judge">
-          Judge pending — runs after both proposers complete.
+          {c.judgePending}
         </p>
       )}
     </div>
@@ -121,6 +123,7 @@ function ProposerCard({
   bucket: ParticipantBucket
   locale: Locale
 }) {
+  const c = modeCopy[locale]
   const preview = lastTextSnippet(bucket.events)
   const lastEvent = bucket.events[bucket.events.length - 1]
 
@@ -128,22 +131,22 @@ function ProposerCard({
     <article className="debate-cards__card" data-participant-id={bucket.id}>
       <header className="debate-cards__card-header">
         <h3 className="debate-cards__name">{bucket.label}</h3>
-        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{bucket.status}</Badge>
+        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{modeStatusLabel(bucket.status, locale)}</Badge>
       </header>
       {bucket.lens && (
         <p className="debate-cards__lens">
-          <span className="debate-cards__lens-label">Lens</span>
+          <span className="debate-cards__lens-label">{c.lens}</span>
           <span className="debate-cards__lens-value">{bucket.lens}</span>
         </p>
       )}
       <dl className="debate-cards__meta">
         <div>
-          <dt>events</dt>
+          <dt>{c.events}</dt>
           <dd>{bucket.events.length}</dd>
         </div>
         {lastEvent && (
           <div>
-            <dt>last</dt>
+            <dt>{c.last}</dt>
             <dd>
               <span>{eventKindLabel(lastEvent.kind, locale)}</span>
               <span>{eventSummary(lastEvent, locale)}</span>
@@ -163,6 +166,7 @@ function JudgeCard({
   bucket: ParticipantBucket
   locale: Locale
 }) {
+  const c = modeCopy[locale]
   const preview = lastTextSnippet(bucket.events)
   const lastEvent = bucket.events[bucket.events.length - 1]
 
@@ -172,20 +176,20 @@ function JudgeCard({
       data-participant-id={bucket.id}
     >
       <header className="debate-cards__card-header">
-        <h3 className="debate-cards__name">Judge</h3>
-        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{bucket.status}</Badge>
+        <h3 className="debate-cards__name">{c.judge}</h3>
+        <Badge tone={STATUS_TONE[bucket.status] ?? 'neutral'}>{modeStatusLabel(bucket.status, locale)}</Badge>
       </header>
       <p className="debate-cards__judge-note">
-        Saw both proposers' outputs verbatim and implemented the winner.
+        {c.judgeNote}
       </p>
       <dl className="debate-cards__meta">
         <div>
-          <dt>events</dt>
+          <dt>{c.events}</dt>
           <dd>{bucket.events.length}</dd>
         </div>
         {lastEvent && (
           <div>
-            <dt>last</dt>
+            <dt>{c.last}</dt>
             <dd>
               <span>{eventKindLabel(lastEvent.kind, locale)}</span>
               <span>{eventSummary(lastEvent, locale)}</span>

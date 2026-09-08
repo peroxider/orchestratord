@@ -5,6 +5,8 @@ import type { CSSProperties } from 'react'
 import type { SessionEvent } from '@orchestratord/core'
 import { Badge } from '@orchestratord/ui'
 import type { BadgeTone } from '@orchestratord/ui'
+import { useLocale } from '../i18n'
+import { modeCopy, modeStatusLabel } from './mode-copy'
 
 export interface CoordinatorGanttProps {
   events: SessionEvent[]
@@ -52,6 +54,8 @@ function deriveStatus(events: SessionEvent[]): TaskBar['status'] {
 }
 
 export function CoordinatorGantt({ events }: CoordinatorGanttProps) {
+  const locale = useLocale()
+  const c = modeCopy[locale]
   const { bars, totalStart, totalEnd } = useMemo(() => {
     const map = new Map<string, TaskBar>()
     for (const event of events) {
@@ -109,16 +113,16 @@ export function CoordinatorGantt({ events }: CoordinatorGanttProps) {
   }, [events])
 
   if (bars.length === 0) {
-    return <p className="coordinator-gantt__empty">No coordinator events yet.</p>
+    return <p className="coordinator-gantt__empty">{c.coordinatorEmpty}</p>
   }
 
   const totalSpan = Math.max(totalEnd - totalStart, 0.001)
 
   return (
-    <div className="coordinator-gantt" aria-label="Coordinator task distribution">
+    <div className="coordinator-gantt" aria-label={c.coordinatorLabel}>
       <div className="coordinator-gantt__header">
-        <span className="coordinator-gantt__header-label">Task</span>
-        <span className="coordinator-gantt__header-track">Timeline</span>
+        <span className="coordinator-gantt__header-label">{c.task}</span>
+        <span className="coordinator-gantt__header-track">{c.timeline}</span>
       </div>
       <ol className="coordinator-gantt__rows">
         {bars.map((bar) => {
@@ -136,17 +140,17 @@ export function CoordinatorGantt({ events }: CoordinatorGanttProps) {
             >
               <span className="coordinator-gantt__row-label">
                 <span className="coordinator-gantt__row-title">{bar.title}</span>
-                <Badge tone={STATUS_TONE[bar.status] ?? 'neutral'}>{bar.status}</Badge>
+                <Badge tone={STATUS_TONE[bar.status] ?? 'neutral'}>{modeStatusLabel(bar.status, locale)}</Badge>
               </span>
               <span className="coordinator-gantt__track">
                 <span
                   className="coordinator-gantt__bar"
                   style={style}
-                  aria-label={`${bar.title} timeline`}
+                  aria-label={`${bar.title} · ${c.timeline}`}
                 />
               </span>
               <span className="coordinator-gantt__row-meta">
-                {bar.eventCount} event{bar.eventCount === 1 ? '' : 's'}
+                {bar.eventCount} {bar.eventCount === 1 ? c.event : c.events}
               </span>
             </li>
           )

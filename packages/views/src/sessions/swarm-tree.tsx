@@ -4,6 +4,8 @@ import { useMemo } from 'react'
 import type { SessionEvent } from '@orchestratord/core'
 import { Badge } from '@orchestratord/ui'
 import type { BadgeTone } from '@orchestratord/ui'
+import { useLocale, type Locale } from '../i18n'
+import { modeCopy, modeStatusLabel } from './mode-copy'
 
 export interface SwarmTreeProps {
   events: SessionEvent[]
@@ -61,6 +63,8 @@ function waveOf(event: SessionEvent): number {
 }
 
 export function SwarmTree({ events }: SwarmTreeProps) {
+  const locale = useLocale()
+  const c = modeCopy[locale]
   const waves = useMemo<WaveNode[]>(() => {
     const byId = new Map<string, SubtaskNode>()
     for (const event of events) {
@@ -115,16 +119,16 @@ export function SwarmTree({ events }: SwarmTreeProps) {
   }, [events])
 
   if (waves.length === 0) {
-    return <p className="swarm-tree__empty">No swarm events yet.</p>
+    return <p className="swarm-tree__empty">{c.swarmEmpty}</p>
   }
 
   return (
-    <ol className="swarm-tree" aria-label="Swarm execution waves">
+    <ol className="swarm-tree" aria-label={c.swarmLabel}>
       {waves.map((wave) => (
         <li key={wave.index} className="swarm-tree__wave" data-wave-index={wave.index}>
           <header className="swarm-tree__wave-header">
-            <h3 className="swarm-tree__wave-title">Wave {wave.index + 1}</h3>
-            <WaveSummary subtasks={wave.subtasks} />
+            <h3 className="swarm-tree__wave-title">{c.wave} {wave.index + 1}</h3>
+            <WaveSummary subtasks={wave.subtasks} locale={locale} />
           </header>
           <ul className="swarm-tree__subtasks">
             {wave.subtasks.map((subtask) => (
@@ -135,10 +139,10 @@ export function SwarmTree({ events }: SwarmTreeProps) {
               >
                 <div className="swarm-tree__subtask-row">
                   <span className="swarm-tree__subtask-title">{subtask.title}</span>
-                  <Badge tone={STATUS_TONE[subtask.status] ?? 'neutral'}>{subtask.status}</Badge>
+                  <Badge tone={STATUS_TONE[subtask.status] ?? 'neutral'}>{modeStatusLabel(subtask.status, locale)}</Badge>
                 </div>
                 <span className="swarm-tree__subtask-meta">
-                  {subtask.events.length} event{subtask.events.length === 1 ? '' : 's'}
+                  {subtask.events.length} {subtask.events.length === 1 ? c.event : c.events}
                 </span>
               </li>
             ))}
@@ -149,7 +153,8 @@ export function SwarmTree({ events }: SwarmTreeProps) {
   )
 }
 
-function WaveSummary({ subtasks }: { subtasks: SubtaskNode[] }) {
+function WaveSummary({ subtasks, locale }: { subtasks: SubtaskNode[]; locale: Locale }) {
+  const c = modeCopy[locale]
   const counts: Record<TaskStatus, number> = {
     completed: 0,
     in_progress: 0,
@@ -162,10 +167,10 @@ function WaveSummary({ subtasks }: { subtasks: SubtaskNode[] }) {
   }
   return (
     <span className="swarm-tree__wave-summary">
-      <Badge tone="good">{counts.completed} done</Badge>
-      <Badge tone="accent">{counts.in_progress} running</Badge>
-      <Badge tone="neutral">{counts.todo + counts.pending} pending</Badge>
-      {counts.failed > 0 && <Badge tone="bad">{counts.failed} failed</Badge>}
+      <Badge tone="good">{counts.completed} {c.done}</Badge>
+      <Badge tone="accent">{counts.in_progress} {c.running}</Badge>
+      <Badge tone="neutral">{counts.todo + counts.pending} {c.pending}</Badge>
+      {counts.failed > 0 && <Badge tone="bad">{counts.failed} {c.failed}</Badge>}
     </span>
   )
 }

@@ -30,6 +30,15 @@ import { en } from './i18n/locales/en'
 import { zhCN } from './i18n/locales/zh-CN'
 import { cronSummary } from './autopilots/schedule'
 import { redactSensitive } from './sessions/redact-sensitive'
+import { modeStatusLabel } from './sessions/mode-copy'
+
+describe('modeStatusLabel', () => {
+  it('localizes known execution states and safely falls back for new states', () => {
+    expect(modeStatusLabel('running', 'zh-CN')).toBe('运行中')
+    expect(modeStatusLabel('completed', 'ja')).toBe('完了')
+    expect(modeStatusLabel('future_state', 'en')).toBe('Unknown')
+  })
+})
 
 describe('redactSensitive', () => {
   it('redacts sensitive keys at every nesting level without mutating safe evidence', () => {

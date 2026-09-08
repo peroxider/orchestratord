@@ -7,6 +7,7 @@ import type { BadgeTone } from '@orchestratord/ui'
 import { eventKindLabel, eventSummary } from './event-kind'
 import { useTranslation } from '../i18n'
 import type { Locale } from '../i18n'
+import { modeCopy, modeStatusLabel } from './mode-copy'
 
 export interface PipelineGraphProps {
   events: SessionEvent[]
@@ -59,6 +60,7 @@ const STATUS_TONE: Record<StageBucket['status'], BadgeTone> = {
 
 export function PipelineGraph({ events }: PipelineGraphProps) {
   const { locale } = useTranslation()
+  const c = modeCopy[locale]
   const stages = useMemo<StageBucket[]>(() => {
     const buckets = new Map<string, StageBucket>()
     const fallbackIndex = new Map<string, number>()
@@ -95,22 +97,22 @@ export function PipelineGraph({ events }: PipelineGraphProps) {
   }, [events])
 
   if (stages.length === 0) {
-    return <p className="pipeline-graph__empty">No pipeline events yet.</p>
+    return <p className="pipeline-graph__empty">{c.pipelineEmpty}</p>
   }
 
   return (
-    <ol className="pipeline-graph" aria-label="Pipeline stages">
+    <ol className="pipeline-graph" aria-label={c.pipelineLabel}>
       {stages.map((stage, index) => (
         <li key={stage.id} className="pipeline-graph__stage">
           <StageCard stage={stage} locale={locale} />
           {index < stages.length - 1 && (
             <div
               className="pipeline-graph__handoff"
-              aria-label="context injected into next stage"
+              aria-label={c.contextInjected}
             >
               <span className="pipeline-graph__handoff-arrow">↓</span>
               <span className="pipeline-graph__handoff-label">
-                context injected
+                {c.contextInjected}
               </span>
             </div>
           )}
@@ -121,6 +123,7 @@ export function PipelineGraph({ events }: PipelineGraphProps) {
 }
 
 function StageCard({ stage, locale }: { stage: StageBucket; locale: Locale }) {
+  const c = modeCopy[locale]
   // Last meaningful text snippet: walk backwards until we find a
   // text_delta / text event. Used as the card's preview so operators
   // can see what the stage actually produced without opening the
@@ -142,16 +145,16 @@ function StageCard({ stage, locale }: { stage: StageBucket; locale: Locale }) {
     <article className="pipeline-graph__card" data-stage-id={stage.id}>
       <header className="pipeline-graph__card-header">
         <h3 className="pipeline-graph__stage-name">{stage.label}</h3>
-        <Badge tone={STATUS_TONE[stage.status] ?? 'neutral'}>{stage.status}</Badge>
+        <Badge tone={STATUS_TONE[stage.status] ?? 'neutral'}>{modeStatusLabel(stage.status, locale)}</Badge>
       </header>
       <dl className="pipeline-graph__meta">
         <div className="pipeline-graph__meta-row">
-          <dt>events</dt>
+          <dt>{c.events}</dt>
           <dd>{stage.events.length}</dd>
         </div>
         {lastEvent && (
           <div className="pipeline-graph__meta-row">
-            <dt>last</dt>
+            <dt>{c.last}</dt>
             <dd>
               <span className="pipeline-graph__kind">
                 {eventKindLabel(lastEvent.kind, locale)}
