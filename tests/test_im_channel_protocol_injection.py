@@ -2,11 +2,12 @@
 
 Focus on the existing injectable seams:
   * ``command_router`` / ``control_bridge`` default to shim objects.
-  * ``cli_runner`` fully replaces the ``run_orchestrator_subcommand`` import.
+  * Commands are delegated to an injected in-process application service.
   * ``ipc_client`` and ``handlers`` are wired without touching upstream code.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -57,7 +58,7 @@ def test_default_uses_compat_shim_instances() -> None:
 
     assert type(client._commands).__name__ == "CommandRouter"
     assert type(client._control).__name__ == "ControlBridge"
-    assert client._cli_runner is None
+    assert type(client._command_service).__name__ == "OrchestratorCommandService"
 
 
 def test_injected_router_and_bridge_are_used() -> None:
@@ -74,26 +75,6 @@ def test_injected_router_and_bridge_are_used() -> None:
     assert client._control is bridge
 
 
-def test_cli_runner_replaces_subcommand_import() -> None:
-    """``cli_runner`` short-circuits the run_orchestrator_subcommand import."""
-    captured: list[list[str]] = []
-
-    def cli_runner(argv: list[str]) -> tuple[int, str, str]:
-        captured.append(argv)
-        return 42, "stdout", "stderr"
-
-    client = OrchestratorGatewayClient(
-        _noop_handlers(),
-        cli_runner=cli_runner,
-    )
-    rc, stdout, stderr = client._run_orchestrator_cli(["issue", "list"])
-
-    assert rc == 42
-    assert stdout == "stdout"
-    assert stderr == "stderr"
-    assert captured == [["issue", "list"]]
-
-
 @pytest.mark.asyncio
 async def test_ipc_deliver_routes_to_dispatch() -> None:
     """Server-pushed DELIVER frames are converted and dispatched without
@@ -102,7 +83,7 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
         _noop_handlers(),
         origin="im:direct:test:*",
     )
-    client.dispatch = MagicMock(return_value="followup_queued")  # type: ignore[method-assign]
+    client.dispatch = AsyncMock(return_value="orchestrator_cli_issue_list")  # type: ignore[method-assign]
 
     ipc = AsyncMock()
     ipc_client = MagicMock()
@@ -126,7 +107,7 @@ async def test_ipc_deliver_routes_to_dispatch() -> None:
     ipc.complete_processing.assert_awaited_once_with(
         message_id="DEL-123",
         outcome="success",
-        reason="followup_queued",
+        reason="orchestrator_cli_issue_list",
     )
 
 
@@ -135,9 +116,11 @@ async def test_ipc_client_awaits_async_delivery_handler() -> None:
     """The normalized IPC delivery reaches an async orchestrator callback."""
     client = GatewayIpcClient("unused.sock", "test-instance")
     delivered: list[InboundMessage] = []
+    handled = asyncio.Event()
 
     async def on_deliver(message: InboundMessage) -> None:
         delivered.append(message)
+        handled.set()
 
     class Reader:
         def __init__(self) -> None:
@@ -153,7 +136,10 @@ async def test_ipc_client_awaits_async_delivery_handler() -> None:
             ))
 
         async def readline(self) -> bytes:
-            return next(self._lines)
+            line = next(self._lines)
+            if not line:
+                await asyncio.wait_for(handled.wait(), timeout=1)
+            return line
 
     client._reader = Reader()  # type: ignore[assignment]
     client._running = True

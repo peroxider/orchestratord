@@ -8,9 +8,10 @@ entry point for the autonomous orchestration engine.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .applications.issue_pr.lifecycle import IssueToPrLifecycle
@@ -43,10 +44,10 @@ class OrchestrationSubsystem:
     workflow: WorkflowConfig
     workspace_manager: WorkspaceManager
     tracker_adapter: TrackerAdapter
-    agent_runner: "BackendRunner"
+    agent_runner: BackendRunner
     status_dashboard: StatusDashboard
-    stage_runners: dict[str, "BackendRunner"]
-    _orchestrator: "Orchestrator | None" = None
+    stage_runners: dict[str, BackendRunner]
+    _orchestrator: Orchestrator | None = None
     _workflow_yaml_path: str | None = None
     _bundle_dir: Path | None = None
     _backend: "AgentBackend | None" = None

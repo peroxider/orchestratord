@@ -1,317 +1,49 @@
 """OrchestratorGatewayClient — orchestrator opt-in IM dispatch (P5).
 
-Registered per issue/run session via the gateway UDS. Splits inbound
-semantics to existing orchestrator entry points — never invents new
-synonyms:
+Registered per issue/run session via the gateway UDS. The orchestratord
+gateway surface is commands + event reports only:
 
-  * ``followUp`` → ``queue_pending_message`` (the existing pending queue)
-  * ``pause/resume/stop`` → control socket verbs
-  * ``inject`` / ``contextOnly`` → ``issue inject`` / ``.operator_hints.md``
-    (NOT the control-socket no-op)
-  * ``command`` (``/agent retry|follow-up|unblock``) → existing
-    ``parse_agent_command`` path
+  * whitelisted slash commands (``/server status``, ``/issue ...``) → the
+    existing orchestrator CLI / control-verb entry points; replies go back
+    to the SAME channel/user that issued the command (the delivery's
+    concrete origin — never the wildcard, so a Feishu command is answered
+    on Feishu even when a WeChat channel is also connected).
+  * event reports (lifecycle / issue status / run results) → OUTBOUND to
+    the wildcard origin (``im:direct:*:*`` by default), which the gateway
+    resolves to the authorized recipient(s).
+
+Both the gateway and this client reject semantic chat and non-whitelisted
+commands. The client requires a concrete origin authenticated by the gateway.
+Legacy semantic enums remain available for wire compatibility only.
 
 The client is a pure dispatcher with injectable handlers so it is
 unit-testable without a live orchestrator. The daemon wiring binds the
-real handlers.
+real handlers. Production commands call the shared application service in the
+orchestrator process, with request-local output and cancellable async waits.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import io
+import inspect
 import logging
-import re
-import shlex
-import sys
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any
 
+from orchestratord.commands.models import CommandService
+from orchestratord.im_gateway.origin_utils import is_concrete_im_origin
+from orchestratord.im_gateway.repl_command_gate import check_orchestrator_command
+from orchestratord.im_gateway.semantics import (
+    CommandRouter,
+    ControlBridge,
+    MessageClassifier,
+)
 from orchestratord.ipc.models import InboundMessage, MessageSemantics
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Local CommandRouter / ControlBridge / MessageClassifier
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class CommandRoute:
-    """Parsed command route from a user message."""
-
-    kind: str = ""  # "orchestrator_cli" | "agent_intent" | "control_verb"
-    verb: str = ""
-    issue_hint: str | None = None
-    payload: str = ""
-    argv: tuple[str, ...] = ()
-
-
-# Regex for loose issue-id matching (e.g. AGENTSDK-15, PROJ-128).
-_ISSUE_ID_RE = re.compile(r"\b([A-Z][A-Z0-9_]+-\d+)\b")
-
-# Recognized orchestrator issue subcommands.
-_ORCHESTRATOR_ISSUE_COMMANDS = frozenset(
-    {
-        "list", "show", "tail", "stop", "pause", "resume",
-        "clarify", "inject", "feedback", "review", "retry",
-        "workspace", "rebase",
-    }
-)
-
-# Agent-intent verbs routed through the agent_intent handler.
-_AGENT_CMD_RE = re.compile(
-    r"^\s*/agent\s+(retry|follow-up|unblock)\b[^\n]*", re.IGNORECASE,
-)
-
-# Control verbs that map directly to control_socket operations.
-_CONTROL_VERB_RE = re.compile(
-    r"^\s*/(?P<verb>pause|resume|stop|takeover|inject|detach|clarify|review|feedback)\b[^\n]*",
-    re.IGNORECASE,
-)
-
-# Control verbs routed to the control socket.
-_CONTROL_SOCKET_VERBS = frozenset({"pause", "resume", "stop", "detach", "takeover"})
-
-# Verbs that bridge to issue inject (NOT control socket no-op).
-_INJECT_VERBS = frozenset({"inject"})
-
-
-class CommandRouter:
-    """Parse inbound text into a :class:`CommandRoute`.
-
-    Provides a self-contained
-    implementation covering the same dispatch surface.
-    """
-
-    def route(self, message: InboundMessage) -> CommandRoute | None:
-        text = (message.text or "").strip()
-
-        # Orchestrator CLI commands (/issue <sub>, /server status).
-        argv = self._orchestrator_argv(text)
-        if argv is not None:
-            return CommandRoute(
-                kind="orchestrator_cli",
-                verb=argv[0],
-                issue_hint=self._extract_issue(text, argv),
-                payload=text,
-                argv=tuple(argv),
-            )
-
-        # /agent retry|follow-up|unblock
-        m = _AGENT_CMD_RE.match(text)
-        if m:
-            verb = m.group(1).lower()
-            issue_hint = self._extract_issue(text)
-            return CommandRoute(
-                kind="agent_intent", verb=verb, issue_hint=issue_hint, payload=text,
-            )
-
-        # Control verbs: /pause, /resume, /stop, /takeover, /inject, etc.
-        m = _CONTROL_VERB_RE.match(text)
-        if m:
-            verb = m.group("verb").lower()
-            issue_hint = self._extract_issue(text)
-            return CommandRoute(
-                kind="control_verb", verb=verb, issue_hint=issue_hint, payload=text,
-            )
-
-        return None
-
-    @staticmethod
-    def _orchestrator_argv(text: str) -> list[str] | None:
-        tokens = _split_command_tokens(text)
-        if not tokens:
-            return None
-        command = tokens[0].lower()
-        if command == "issue" and len(tokens) >= 2:
-            issue_subcommand = tokens[1].lower()
-            if issue_subcommand in _ORCHESTRATOR_ISSUE_COMMANDS:
-                return ["issue", issue_subcommand, *tokens[2:]]
-        if command == "server" and len(tokens) >= 2 and tokens[1].lower() == "status":
-            return ["server", "status", *tokens[2:]]
-        return None
-
-    @staticmethod
-    def _extract_issue(
-        text: str, argv: list[str] | None = None,
-    ) -> str | None:
-        if argv:
-            for idx, token in enumerate(argv):
-                if token == "--id" and idx + 1 < len(argv):
-                    return argv[idx + 1]
-                if token.startswith("--id="):
-                    return token.split("=", 1)[1]
-        m = _ISSUE_ID_RE.search(text)
-        return m.group(1) if m else None
-
-
-@dataclass
-class ControlTarget:
-    """Resolved control target from semantic + route."""
-
-    surface: str = ""  # "bridge_interrupt" | "control_socket" | "issue_inject" | "operator_hints" | "issue_cli"
-    verb: str = ""
-    issue_hint: str | None = None
-    payload: str = ""
-
-
-class ControlBridge:
-    """Map ``MessageSemantics`` + ``CommandRoute`` to a :class:`ControlTarget`.
-
-    Provides a self-contained
-    implementation.
-    """
-
-    def resolve(
-        self,
-        semantic: MessageSemantics,
-        route: CommandRoute | None,
-    ) -> ControlTarget | None:
-        if semantic is MessageSemantics.INTERRUPT:
-            return ControlTarget(
-                surface="bridge_interrupt",
-                verb="interrupt",
-                payload=route.payload if route else "",
-            )
-
-        if route is None:
-            return None
-
-        verb = route.verb
-
-        if verb in _INJECT_VERBS:
-            return ControlTarget(
-                surface="issue_inject",
-                verb=verb,
-                payload=route.payload,
-                issue_hint=route.issue_hint,
-            )
-
-        if verb in _CONTROL_SOCKET_VERBS:
-            return ControlTarget(
-                surface="control_socket",
-                verb=verb,
-                payload=route.payload,
-                issue_hint=route.issue_hint,
-            )
-
-        # clarify/review/feedback/retry → issue CLI surface
-        return ControlTarget(
-            surface="issue_cli",
-            verb=verb,
-            payload=route.payload,
-            issue_hint=route.issue_hint,
-        )
-
-    def context_only_target(
-        self, route: CommandRoute | None,
-    ) -> ControlTarget:
-        """contextOnly routes to operator hints (no run trigger)."""
-        return ControlTarget(
-            surface="operator_hints",
-            verb="contextOnly",
-            payload=route.payload if route else "",
-            issue_hint=route.issue_hint if route else None,
-        )
-
-
-# DeliverAs metadata → MessageSemantics mapping.
-_DELIVER_AS_MAP = {
-    "newPrompt": "NEW_PROMPT",
-    "command": "COMMAND",
-    "followUp": "FOLLOW_UP",
-    "approval": "APPROVAL",
-    "interrupt": "INTERRUPT",
-    "contextOnly": "CONTEXT_ONLY",
-}
-
-# Singleton CommandRouter for MessageClassifier reuse.
-_COMMAND_ROUTER: CommandRouter | None = None
-
-
-class MessageClassifier:
-    """Classify an :class:`InboundMessage` into :class:`MessageSemantics`.
-
-    Provides a self-contained
-    implementation covering the same classification rules:
-    1. Structured ``deliverAs`` metadata takes precedence.
-    2. Explicit slash commands recognized by ``CommandRouter`` → COMMAND.
-    3. Approval only via structured metadata or bound wait-point.
-    4. Plain text while session busy → FOLLOW_UP.
-    5. Otherwise → NEW_PROMPT.
-    """
-
-    def classify(
-        self,
-        message: InboundMessage,
-        *,
-        is_busy: bool = False,
-        has_pending_wait: bool = False,
-    ) -> MessageSemantics:
-        # 1. Structured deliverAs wins (explicit, no NL guessing).
-        deliver_as = self._deliver_as(message)
-        if deliver_as is not None:
-            return deliver_as
-
-        # 2. Explicit slash commands.
-        if _get_command_router().route(message) is not None:
-            return MessageSemantics.COMMAND
-
-        # 3. Approval only via structured metadata or bound wait-point.
-        if (
-            has_pending_wait
-            and message.semantic_tags
-            and "approval" in message.semantic_tags
-        ):
-            return MessageSemantics.APPROVAL
-
-        # 4. Busy ordinary text → queue-as-followUp.
-        if is_busy:
-            return MessageSemantics.FOLLOW_UP
-
-        # 5. Default.
-        return MessageSemantics.NEW_PROMPT
-
-    def _deliver_as(
-        self, message: InboundMessage,
-    ) -> MessageSemantics | None:
-        raw = None
-        if message.raw and isinstance(message.raw, dict):
-            raw = message.raw.get("deliverAs")
-        if raw is None:
-            for tag in message.semantic_tags or []:
-                if tag in _DELIVER_AS_MAP:
-                    return MessageSemantics[_DELIVER_AS_MAP[tag]]
-        if isinstance(raw, str) and raw in _DELIVER_AS_MAP:
-            return MessageSemantics[_DELIVER_AS_MAP[raw]]
-        return None
-
-
-def _get_command_router() -> CommandRouter:
-    global _COMMAND_ROUTER
-    if _COMMAND_ROUTER is None:
-        _COMMAND_ROUTER = CommandRouter()
-    return _COMMAND_ROUTER
-
-
-def _split_command_tokens(text: str) -> list[str]:
-    stripped = (text or "").strip()
-    if not stripped.startswith("/"):
-        return []
-    try:
-        tokens = shlex.split(stripped)
-    except ValueError:
-        tokens = stripped.split()
-    if not tokens:
-        return []
-    tokens[0] = tokens[0].lstrip("/")
-    return tokens
-
 
 @dataclass
 class OrchestratorHandlers:
@@ -337,15 +69,24 @@ class OrchestratorGatewayClient:
         pending_retry_base_seconds: float = 60.0,
         pending_retry_max_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
-        cli_runner: Callable[[list[str]], tuple[int, str, str]] | None = None,
+        cli_timeout_seconds: float = 60.0,
+        command_service: CommandService | None = None,
     ) -> None:
         self._h = handlers
         self._commands = command_router or CommandRouter()
         self._control = control_bridge or ControlBridge()
         self._ipc = ipc_client
         self._origin = origin
-        self._cli_runner = cli_runner
+        from orchestratord.commands.service import OrchestratorCommandService
+
+        self._command_service = command_service or OrchestratorCommandService(
+            timeout_seconds=cli_timeout_seconds, runtime_supplier=lambda: None
+        )
         self._pending_outbound: deque[str] = deque()
+        # A parallel envelope queue keeps metadata/routing aligned with each
+        # queued message. It intentionally permits identical text for
+        # different origins or deliveries, avoiding cross-channel reply loss.
+        self._pending_outbound_extras: deque[dict[str, Any]] = deque()
         self._pending_outbound_limit = max(1, pending_outbound_limit)
         self._flush_lock = asyncio.Lock()
         self._clock = clock
@@ -356,6 +97,12 @@ class OrchestratorGatewayClient:
         )
         self._pending_retry_delay = self._pending_retry_base_seconds
         self._pending_next_flush_at = 0.0
+        # DELIVER-triggered flush task (see _schedule_deliver_flush) and the
+        # delivery currently being dispatched (for in_reply_to threading).
+        self._deliver_flush_task: asyncio.Task[None] | None = None
+        self._current_delivery_id: str = ""
+        # Signature probe cache for the bound IPC client's send_outbound.
+        self._ipc_send_params: dict[str, bool] = {}
         if ipc_client is not None:
             # Route server-pushed DELIVER frames through dispatch.
             ipc_client.on_deliver = self._on_pushed_deliver
@@ -367,7 +114,7 @@ class OrchestratorGatewayClient:
         # previously invoked this private callback directly.
         if not isinstance(message, InboundMessage):
             message = InboundMessage(
-                origin=getattr(message, "origin", "") or self._origin,
+                origin=getattr(message, "origin", "") or "",
                 text=getattr(message, "text", "") or "",
                 message_id=getattr(message, "delivery_id", "") or "",
                 channel_type="gateway",
@@ -377,23 +124,35 @@ class OrchestratorGatewayClient:
                 metadata=dict(getattr(message, "metadata", {}) or {}),
             )
         semantic = None
-        if message.semantic:
-            with contextlib.suppress(ValueError):
+        if message.semantic is not None:
+            try:
                 semantic = MessageSemantics(message.semantic)
+            except ValueError:
+                await self._complete_processing(message.message_id, "failure", "invalid semantic")
+                return
         # Keep the normalized message supplied by GatewayIpcClient.  Its
         # metadata/context token are part of the routing contract and must not
         # be discarded while crossing the IPC boundary.
-        if not message.origin:
-            message.origin = self._origin
         if semantic is None:
             message.semantic = self._classify(message)
             semantic = message.semantic
+        # Track the in-flight delivery so replies queued during dispatch can
+        # thread in_reply_to back to the triggering IM message.
+        self._current_delivery_id = message.message_id
         try:
-            status = self.dispatch(message, semantic)
-            await self._flush_pending_outbound(force=True)
+            status = await self.dispatch(message, semantic)
+            # Drain replies independently so provider latency does not delay
+            # the next command. Command completion records execution outcome;
+            # delivery success is reported separately by OUTBOUND ACK/NACK.
+            self._schedule_deliver_flush()
+            # Yield once so the scheduled flush starts before this delivery
+            # callback returns.
+            await asyncio.sleep(0)
             await self._complete_processing(
                 message.message_id,
-                "failure" if status in {"not_dispatched", "command_unroutable"} else "success",
+                "success" if status.startswith("orchestrator_cli_") and status not in {
+                    "orchestrator_cli_invalid", "orchestrator_cli_failed",
+                } else "failure",
                 status,
             )
             logger.info(
@@ -401,13 +160,52 @@ class OrchestratorGatewayClient:
                 message.message_id[:16],
                 status,
             )
-        except Exception:  # noqa: BLE001
+        except asyncio.CancelledError:
+            await self._complete_processing(message.message_id, "cancelled", "connection closed")
+            raise
+        except Exception:
             await self._complete_processing(
                 message.message_id,
                 "failure",
                 "orchestrator dispatch failed",
             )
             logger.exception("orchestrator IM dispatch failed")
+        finally:
+            self._current_delivery_id = ""
+
+    def _schedule_deliver_flush(self) -> None:
+        """Schedule the DELIVER-triggered pending-outbound flush as a task.
+
+        At most one flush task exists at a time: while one is draining,
+        consecutive DELIVERs skip scheduling because the running drain loop
+        re-checks the queue after every send and picks up newly queued
+        items. The task reference is kept (GC) and its failures logged.
+        """
+        task = self._deliver_flush_task
+        if task is not None and not task.done():
+            return
+        task = asyncio.create_task(self._deliver_flush_runner())
+        self._deliver_flush_task = task
+        task.add_done_callback(self._on_deliver_flush_done)
+
+    def _on_deliver_flush_done(self, task: asyncio.Task[None]) -> None:
+        if self._deliver_flush_task is task:
+            self._deliver_flush_task = None
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(
+                "orchestrator IM deliver flush task failed",
+                exc_info=task.exception(),
+            )
+
+    async def _deliver_flush_runner(self) -> None:
+        # Drain until a full pass makes no progress (empty queue, or a
+        # NACK/deferred/error that must respect the retry backoff instead
+        # of hot-looping with force=True).
+        while self._pending_outbound:
+            before = len(self._pending_outbound)
+            await self._flush_pending_outbound(force=True)
+            if len(self._pending_outbound) >= before:
+                return
 
     async def _complete_processing(
         self,
@@ -424,7 +222,7 @@ class OrchestratorGatewayClient:
                     "orchestrator processing completion skipped while disconnected: %s",
                     message_id[:16],
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.warning(
                     "orchestrator processing completion failed: %s",
                     message_id[:16],
@@ -434,37 +232,83 @@ class OrchestratorGatewayClient:
     def _classify(self, message):
         return MessageClassifier().classify(message)
 
-    async def send_outbound(self, text: str) -> None:
+    async def send_outbound(
+        self,
+        text: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+        in_reply_to: str | None = None,
+        origin: str | None = None,
+    ) -> None:
         """Send a reply / event back to the IM origin via the OUTBOUND frame.
 
-        The origin is the opt-in origin (``im:direct:*:*`` by default for
-        orchestrator); the gateway resolves the wildcard to a concrete
-        sender at OUTBOUND time. The event is queued only when the send
-        cannot start right now (the IPC socket is not open yet) or when the
-        gateway explicitly NACKs the send. If the IPC ACK times out, delivery
-        is ambiguous: the gateway may already have sent the IM message but
-        returned its ACK too late. In that case we do not auto-retry, because
-        duplicate chat messages are worse than a best-effort dropped event.
+        The origin defaults to the opt-in origin (``im:direct:*:*`` for
+        orchestrator event reports); the gateway resolves the wildcard to
+        the authorized recipient at OUTBOUND time. Command replies pass the
+        DELIVER's concrete ``origin`` instead, so the answer lands on the
+        channel that asked (no cross-channel misrouting with multiple
+        channels connected). ``metadata`` (event envelope: issue_id /
+        event_type / level / markdown) and ``in_reply_to`` (the triggering
+        delivery id) are forwarded when the bound IPC client supports
+        them; replies sent while a DELIVER is being dispatched default
+        ``in_reply_to`` to that delivery's id. The event is queued only
+        when the send cannot start right now (the IPC socket is not open
+        yet) or when the gateway explicitly NACKs the send. If the IPC ACK
+        times out, delivery is ambiguous: the gateway may already have
+        sent the IM message but returned its ACK too late. In that case we
+        do not auto-retry, because duplicate chat messages are worse than a
+        best-effort dropped event.
         """
-        if self._ipc is None or not self._origin:
+        target_origin = origin or self._origin
+        if self._ipc is None or not target_origin:
             return
-        if text in self._pending_outbound:
-            logger.debug("orchestrator IM outbound deduped before send: %r", text[:60])
-            await self._flush_pending_outbound()
-            return
+        if not in_reply_to and self._current_delivery_id:
+            in_reply_to = self._current_delivery_id
         if self._pending_outbound:
-            self._queue_pending_outbound(text)
+            self._queue_pending_outbound(text, metadata, in_reply_to, target_origin)
             await self._flush_pending_outbound()
             return
-        sent = await self._send_to_origin(self._origin, text)
+        sent = await self._send_to_origin(target_origin, text, metadata, in_reply_to)
         if not sent:
-            self._queue_pending_outbound(text)
+            self._queue_pending_outbound(text, metadata, in_reply_to, target_origin)
 
-    async def _send_to_origin(self, origin: str, text: str) -> bool:
+    def _ipc_accepts(self, param: str) -> bool:
+        """Whether the bound IPC client's ``send_outbound`` accepts ``param``.
+
+        The real :class:`~orchestratord.ipc.client.GatewayIpcClient`
+        supports the full OUTBOUND frame (metadata / in_reply_to); simpler
+        stubs only accept ``origin``/``text``. Probe once and cache.
+        """
+        if param in self._ipc_send_params:
+            return self._ipc_send_params[param]
+        try:
+            sig = inspect.signature(self._ipc.send_outbound)
+        except (TypeError, ValueError):
+            supported = False
+        else:
+            params = sig.parameters
+            supported = param in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        self._ipc_send_params[param] = supported
+        return supported
+
+    async def _send_to_origin(
+        self,
+        origin: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        in_reply_to: str | None = None,
+    ) -> bool:
         if self._ipc is None:
             return False
+        kwargs: dict[str, Any] = {"origin": origin, "text": text}
+        if metadata and self._ipc_accepts("metadata"):
+            kwargs["metadata"] = metadata
+        if in_reply_to and self._ipc_accepts("in_reply_to"):
+            kwargs["in_reply_to"] = in_reply_to
         try:
-            response = await self._ipc.send_outbound(origin=origin, text=text)
+            response = await self._ipc.send_outbound(**kwargs)
         except RuntimeError as exc:
             # Not connected yet (heartbeat loop hasn't run / reconnected).
             # Queue so the post-register flush delivers it; never propagate
@@ -493,21 +337,54 @@ class OrchestratorGatewayClient:
         self._reset_pending_flush_backoff()
         return True
 
-    def _queue_pending_outbound(self, text: str) -> None:
-        # Skip exact duplicates already waiting in the queue — e.g. the
+    def _queue_pending_outbound(
+        self,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        in_reply_to: str | None = None,
+        origin: str | None = None,
+    ) -> None:
+        # Skip an exact duplicate already waiting in the queue — e.g. the
         # orchestrator emits "orchestratord: IM notifications
         # enabled" on every reconnect, and if the gateway can't resolve
         # the wildcard origin (operator hasn't messaged recently), each
         # copy would queue and all would flush at once when the operator
-        # finally sends a message.
-        if text in self._pending_outbound:
-            logger.debug("orchestrator IM outbound deduped: %r already queued", text[:60])
-            return
+        # finally sends a message. Origin and in_reply_to are part of the
+        # identity: equal reply text from two channels must remain two sends.
+        extra = self._pending_extra(metadata, in_reply_to, origin)
+        for index, (pending_text, pending_extra) in enumerate(
+            zip(self._pending_outbound, self._pending_outbound_extras, strict=True)
+        ):
+            if (
+                pending_text == text
+                and pending_extra.get("origin") == extra.get("origin")
+                and pending_extra.get("in_reply_to") == extra.get("in_reply_to")
+            ):
+                self._pending_outbound_extras[index] = extra
+                logger.debug("orchestrator IM outbound deduped: %r already queued", text[:60])
+                return
         if len(self._pending_outbound) >= self._pending_outbound_limit:
             self._pending_outbound.popleft()
+            self._pending_outbound_extras.popleft()
             logger.warning("orchestrator IM outbound pending queue full; dropped oldest event")
         self._pending_outbound.append(text)
+        self._pending_outbound_extras.append(extra)
         logger.info("orchestrator IM outbound queued (pending connection or send retry)")
+
+    @staticmethod
+    def _pending_extra(
+        metadata: dict[str, Any] | None,
+        in_reply_to: str | None,
+        origin: str | None = None,
+    ) -> dict[str, Any]:
+        extra: dict[str, Any] = {}
+        if metadata:
+            extra["metadata"] = metadata
+        if in_reply_to:
+            extra["in_reply_to"] = in_reply_to
+        if origin:
+            extra["origin"] = origin
+        return extra
 
     def _defer_pending_flush(self, reason: str) -> None:
         delay = self._pending_retry_delay
@@ -534,8 +411,11 @@ class OrchestratorGatewayClient:
         async with self._flush_lock:
             if not self._pending_outbound:
                 return
-            origin = self._origin
-            if not origin:
+            # Entries carry their own origin (command replies: the concrete
+            # channel that issued the command). A missing wildcard origin only
+            # blocks entries that did not capture one.
+            head_extra = self._pending_outbound_extras[0]
+            if not self._origin and not head_extra.get("origin"):
                 return
             if force:
                 self._reset_pending_flush_backoff()
@@ -545,15 +425,24 @@ class OrchestratorGatewayClient:
                     self._pending_next_flush_at - self._clock(),
                 )
                 return
-            # Wildcard origins are flushed too: the gateway resolves them at
-            # OUTBOUND time (recent sender, else persisted context tokens).
+            # Queued entries keep their own origin: command replies carry the
+            # concrete channel they must return to; event reports flush to the
+            # wildcard origin, which the gateway resolves to the authorized
+            # recipient at OUTBOUND time.
             while self._pending_outbound:
                 text = self._pending_outbound[0]
+                extra = self._pending_outbound_extras[0]
+                origin = extra.get("origin") or self._origin
                 try:
-                    sent = await self._send_to_origin(origin, text)
+                    sent = await self._send_to_origin(
+                        origin,
+                        text,
+                        extra.get("metadata"),
+                        extra.get("in_reply_to"),
+                    )
                     if not sent:
                         return
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.warning(
                         "orchestrator IM pending outbound flush failed origin=%s",
                         origin[:32],
@@ -561,105 +450,111 @@ class OrchestratorGatewayClient:
                     )
                     return
                 self._pending_outbound.popleft()
+                self._pending_outbound_extras.popleft()
 
-    def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
-        """Route ``message`` to the right existing orchestrator entry.
+    async def dispatch(self, message: InboundMessage, semantic: MessageSemantics) -> str:
+        """Execute only an authenticated, explicitly allowed IM command."""
+        if (
+            not is_concrete_im_origin(message.origin)
+            or (message.metadata or {}).get("authenticated_origin") != message.origin
+        ):
+            return "origin_unauthenticated"
+        allowed, _ = check_orchestrator_command(message.text)
+        if semantic is not MessageSemantics.COMMAND or not allowed:
+            return "command_rejected"
+        route = self._commands.route(message)
+        if route is None or route.kind != "orchestrator_cli":
+            return "command_unroutable"
+        # The CLI requires explicit --id too; enforce it here for direct
+        # lifecycle handlers and bounded /issue tail replies as well.
+        argv = list(route.argv)
+        if argv[0] == "issue" and argv[1] != "list" and not self._arg_value(argv, "--id"):
+            self._queue_command_reply(
+                route.payload, 2, "", "error: --id is required",
+                origin=message.origin, in_reply_to=message.message_id,
+            )
+            return "orchestrator_cli_invalid"
+        return await self._dispatch_orchestrator_cli(
+            route, reply_origin=message.origin, in_reply_to=message.message_id
+        )
 
-        Returns a short status string describing the dispatch (for ack).
-        """
-        issue_id = self._issue_id(message)
-        if semantic is MessageSemantics.FOLLOW_UP:
-            self._h.queue_pending_message(issue_id, message.text)
-            return "followup_queued"
-        if semantic is MessageSemantics.CONTEXT_ONLY:
-            self._h.operator_hints(issue_id, message.text)
-            return "context_only_recorded"
-        if semantic is MessageSemantics.INTERRUPT:
-            # interrupt maps to control verbs via the bridge
-            ctrl = self._control.resolve(MessageSemantics.INTERRUPT, None)
-            if ctrl is not None:
-                self._h.bridge_interrupt(issue_id, ctrl.payload)
-            return "interrupt_dispatched"
-        if semantic is MessageSemantics.COMMAND:
-            route = self._commands.route(message)
-            if route is None:
-                return "command_unroutable"
-            if route.kind == "orchestrator_cli":
-                return self._dispatch_orchestrator_cli(route)
-            if route.kind == "agent_intent":
-                self._h.agent_intent(route.verb, route.issue_hint or issue_id)
-                return f"agent_{route.verb}"
-            # control_verb
-            ctrl = self._control.resolve(semantic, route)
-            if ctrl is None:
-                return "command_unroutable"
-            if ctrl.surface == "control_socket":
-                self._h.control_verb(ctrl.verb, ctrl.issue_hint or issue_id)
-                return f"control_{ctrl.verb}"
-            if ctrl.surface == "issue_inject":
-                self._h.issue_inject(ctrl.issue_hint or issue_id, route.payload)
-                return "inject_delivered"
-            if ctrl.surface == "issue_cli":
-                self._h.issue_cli(ctrl.verb, ctrl.issue_hint or issue_id, ctrl.payload)
-                return f"issue_cli_{ctrl.verb}"
-            return f"issue_cli_{ctrl.verb}"
-        # newPrompt / approval → leave to the host agent / approval binding
-        return "not_dispatched"
-
-    def _dispatch_orchestrator_cli(self, route) -> str:
+    async def _dispatch_orchestrator_cli(
+        self,
+        route,
+        *,
+        reply_origin: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> str:
         argv = list(route.argv)
         if len(argv) < 2:
-            self._queue_command_reply(route.payload, 2, "", "error: invalid orchestrator command")
+            self._queue_command_reply(
+                route.payload,
+                2,
+                "",
+                "error: invalid orchestrator command",
+                origin=reply_origin,
+                in_reply_to=in_reply_to,
+            )
             return "orchestrator_cli_invalid"
 
         noun, verb = argv[0], argv[1]
-        if noun == "issue" and verb in {"stop", "pause", "resume"}:
-            issue_id = route.issue_hint or self._arg_value(argv, "--id")
-            if not issue_id:
-                self._queue_command_reply(route.payload, 2, "", "error: --id is required")
-                return f"orchestrator_cli_issue_{verb}"
-            self._h.control_verb(verb, issue_id)
+        if noun == "issue" and verb == "tail":
             self._queue_command_reply(
                 route.payload,
                 0,
-                f"Control command '{verb}' sent for issue {issue_id}",
+                self._tail_notice(argv),
                 "",
+                origin=reply_origin,
+                in_reply_to=in_reply_to,
             )
-            return f"orchestrator_cli_issue_{verb}"
-
-        if noun == "issue" and verb == "tail":
-            self._queue_command_reply(route.payload, 0, self._tail_notice(argv), "")
             return "orchestrator_cli_issue_tail"
 
-        rc, stdout, stderr = self._run_orchestrator_cli(argv)
-        self._queue_command_reply(route.payload, rc, stdout, stderr)
-        return f"orchestrator_cli_{noun}_{verb}"
+        rc, stdout, stderr = await self._run_cli_isolated(argv)
+        self._queue_command_reply(
+            route.payload,
+            rc,
+            stdout,
+            stderr,
+            origin=reply_origin,
+            in_reply_to=in_reply_to,
+        )
+        return f"orchestrator_cli_{noun}_{verb}" if rc == 0 else "orchestrator_cli_failed"
 
-    def _run_orchestrator_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        if self._cli_runner is not None:
-            return self._cli_runner(list(argv))
+    async def _run_cli_isolated(self, argv: list[str]) -> tuple[int, str, str]:
+        """Parse command text and call the shared application service in-process."""
+        from orchestratord.commands.models import CommandRequest
+        from orchestratord.commands.parsing import CommandParseError, parse_command
 
-        stdout = io.StringIO()
-        stderr = io.StringIO()
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            try:
-                from orchestratord.cli.main import app
-                import sys as _sys
+        try:
+            request = parse_command(argv)
+        except CommandParseError as exc:
+            return 2, "", f"error: {exc}"
+        if request.resource == "issue" and request.action in {"stop", "pause", "resume"}:
+            request = CommandRequest(request.resource, request.action, {**request.options, "yes": True, "no_wait": True})
+        result = await self._command_service.execute(request)
+        return result.exit_code, result.stdout, result.stderr
 
-                _sys.argv = ["orchestratord"] + list(argv)
-                app()
-                rc = 0
-            except SystemExit as exc:
-                code = exc.code
-                rc = code if isinstance(code, int) else 1
-            except Exception as exc:  # noqa: BLE001
-                print(f"error: {exc}", file=sys.stderr)
-                rc = 1
-        return rc, stdout.getvalue(), stderr.getvalue()
-
-    def _queue_command_reply(self, command_text: str, rc: int, stdout: str, stderr: str) -> None:
+    def _queue_command_reply(
+        self,
+        command_text: str,
+        rc: int,
+        stdout: str,
+        stderr: str,
+        *,
+        origin: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> None:
         text = self._format_command_reply(command_text, rc, stdout, stderr)
-        self._queue_pending_outbound(text)
+        # Route the reply to the channel that issued the command (the
+        # DELIVER's concrete origin) and thread it back to the triggering
+        # IM message (in_reply_to). Never the wildcard: with WeChat and
+        # Feishu both connected, the wildcard resolves wechat-first and a
+        # Feishu command's answer would land on WeChat.
+        self._queue_pending_outbound(
+            text,
+            in_reply_to=in_reply_to or self._current_delivery_id or None,
+            origin=origin,
+        )
 
     @staticmethod
     def _format_command_reply(command_text: str, rc: int, stdout: str, stderr: str) -> str:
@@ -700,4 +595,10 @@ class OrchestratorGatewayClient:
         return ""
 
 
-__all__ = ["OrchestratorGatewayClient", "OrchestratorHandlers"]
+__all__ = [
+    "CommandRouter",
+    "ControlBridge",
+    "MessageClassifier",
+    "OrchestratorGatewayClient",
+    "OrchestratorHandlers",
+]

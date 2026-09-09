@@ -13,6 +13,7 @@ from enum import Enum
 from typing import Any
 
 PROTOCOL_VERSION = "gateway/1"
+CHANNEL_RELOAD_TIMEOUT_SECONDS = 60.0
 
 
 class FrameType(str, Enum):
@@ -78,7 +79,7 @@ class GatewayFrame:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GatewayFrame:
         if not isinstance(data, dict):
-            raise ValueError("frame must be a JSON object")
+            raise ValueError("frame must be a JSON object")  # noqa: TRY004
         ftype = data.get("type")
         if ftype is None:
             raise ValueError("frame missing 'type'")
@@ -125,11 +126,12 @@ class GatewayFrame:
     def deliver(cls, *, delivery_id: str, session_id: str, origin: str,
                 text: str, semantic: str | None = None,
                 deadline_ms: int | None = None,
-                context_token: str | None = None) -> GatewayFrame:
+                context_token: str | None = None,
+                metadata: dict[str, Any] | None = None) -> GatewayFrame:
         return cls(type=FrameType.DELIVER, delivery_id=delivery_id,
                    session_id=session_id, origin=origin, text=text,
                    semantic=semantic, deadline_ms=deadline_ms,
-                   context_token=context_token)
+                   context_token=context_token, metadata=metadata)
 
     @classmethod
     def ack(cls, *, delivery_id: str, layer: str,
@@ -145,6 +147,15 @@ class GatewayFrame:
     def event(cls, *, event_type: str,
               payload: dict[str, Any] | None = None) -> GatewayFrame:
         return cls(type=FrameType.EVENT, event_type=event_type, payload=payload)
+
+    @classmethod
+    def processing_complete(cls, *, message_id: str, outcome: str,
+                            reason: str | None = None) -> GatewayFrame:
+        """Report a terminal processing outcome for a pushed DELIVER frame."""
+        payload: dict[str, Any] = {"message_id": message_id, "outcome": outcome}
+        if reason:
+            payload["reason"] = reason
+        return cls.event(event_type="processing.complete", payload=payload)
 
     @classmethod
     def outbound(cls, *, origin: str, text: str,

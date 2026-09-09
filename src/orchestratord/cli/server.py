@@ -62,27 +62,9 @@ def add_server_parser(
         required=True,
     )
 
-    # --- server status ---
-    status_parser = server_sub.add_parser(
-        "status",
-        help="Show orchestrator daemon status",
-        description="Display whether the orchestrator daemon is running, its PID, "
-        "uptime, workspace root, and project slug. Idempotent (pure read).",
-    )
-    status_parser.add_argument(
-        "--workspace",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Explicit workspace root path (optional auto-detection override)",
-    )
-    status_parser.add_argument(
-        "--workflow",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="Path to WORKFLOW.md (helps resolve workspace when metadata is missing)",
-    )
+    from orchestratord.commands.parsing import add_server_status_parser
+
+    add_server_status_parser(server_sub)
 
     # --- server stop ---
     stop_parser = server_sub.add_parser(
@@ -333,9 +315,21 @@ def add_server_parser(
 
 def run(args: argparse.Namespace) -> int:
     """Dispatch to the appropriate server subcommand."""
-    cmd = getattr(args, "server_subcommand", None) or getattr(args, "daemon_subcommand", None)
+    cmd = getattr(args, "server_subcommand", None) or getattr(
+        args, "daemon_subcommand", None
+    )
     if cmd == "status":
-        return _run_status(args)
+        from orchestratord.commands.cli_adapter import render
+        from orchestratord.commands.models import CommandRequest
+        from orchestratord.commands.service import OrchestratorCommandService
+
+        return render(
+            asyncio.run(
+                OrchestratorCommandService(output_limit=None).execute(
+                    CommandRequest("server", "status", vars(args))
+                )
+            )
+        )
     elif cmd == "stop":
         return _run_stop(args)
     elif cmd in ("start", "serve"):
@@ -456,35 +450,18 @@ def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
 
 
 def _slug_from_workspace(ws_str: str) -> str:
-    """Generate a deterministic slug from a workspace path string."""
-    parts = [
-        p
-        for p in ws_str.strip().replace("/", "-").replace("\\", "-").split("-")
-        if p and p not in ("tmp", ".orchestratord", "~")
-    ]
-    return "-".join(parts[-3:]) if parts else "default"
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_slug_from_workspace", ws_str)
 
 
 def _is_pid_alive(pid: int) -> bool:
-    """Check whether a PID is still alive (no-side-effect signal 0 test)."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_is_pid_alive", pid)
 
 
 def _format_uptime(started_at: float) -> str:
-    """Format uptime as human-readable string."""
-    elapsed = time.time() - started_at
-    if elapsed < 60:
-        return f"{int(elapsed)}s"
-    elif elapsed < 3600:
-        return f"{int(elapsed / 60)}m {int(elapsed % 60)}s"
-    else:
-        hours = int(elapsed / 3600)
-        minutes = int((elapsed % 3600) / 60)
-        return f"{hours}h {minutes}m"
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_format_uptime", started_at)
 
 
 _REGISTRY_COUNT_ORDER = (
@@ -500,74 +477,13 @@ _REGISTRY_COUNT_ORDER = (
 
 
 def _registry_counts_line(workspace_root: str | None) -> str | None:
-    """One-line issue tally from the workspace registry, for ``server status``.
-
-    Pure read of ``<workspace_root>/.orchestratord_issue_registry.json``
-    (flat ``{issue_id: record}``, lowercase status strings). Returns None
-    when there is nothing trustworthy to show — no file, unreadable, or
-    unexpected shape — so a registry problem never breaks ``status``.
-    """
-    if not workspace_root or workspace_root == "unknown":
-        return None
-    registry_path = Path(workspace_root) / ".orchestratord_issue_registry.json"
-    if not registry_path.is_file():
-        return None
-    try:
-        data = json.loads(registry_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if not data:
-        return "none registered"
-    counts: dict[str, int] = {}
-    for rec in data.values():
-        status = str(rec.get("status", "unknown")) if isinstance(rec, dict) else "unknown"
-        counts[status] = counts.get(status, 0) + 1
-    parts = [f"{s}={counts[s]}" for s in _REGISTRY_COUNT_ORDER if counts.get(s)]
-    parts += [
-        f"{s}={n}" for s, n in sorted(counts.items()) if s not in _REGISTRY_COUNT_ORDER
-    ]
-    return " · ".join(parts)
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_registry_counts_line", workspace_root)
 
 
 def _runtime_lines(meta: dict) -> list[str]:
-    """Render backend / agent / concurrency / API lines from launch context.
-
-    Older daemons persist none of these fields; each line appears only
-    when its source data exists, keeping ``status`` output backward
-    compatible.
-    """
-    lines: list[str] = []
-    backend = meta.get("backend")
-    if backend:
-        lines.append(f"  Backend        : {backend}")
-    runtime = meta.get("runtime")
-    if not isinstance(runtime, dict):
-        runtime = {}
-    agent_bits: list[str] = []
-    provider_model = "/".join(
-        str(p) for p in (runtime.get("provider"), runtime.get("model")) if p
-    )
-    if provider_model:
-        agent_bits.append(provider_model)
-    if runtime.get("permission_mode"):
-        agent_bits.append(f"permission_mode={runtime['permission_mode']}")
-    if runtime.get("approval_policy"):
-        agent_bits.append(f"approval={runtime['approval_policy']}")
-    if agent_bits:
-        lines.append(f"  Agent          : {' · '.join(agent_bits)}")
-    conc_bits: list[str] = []
-    if runtime.get("max_concurrent_agents") is not None:
-        conc_bits.append(f"{runtime['max_concurrent_agents']} concurrent agent(s)")
-    if runtime.get("poll_interval_ms") is not None:
-        conc_bits.append(f"poll every {runtime['poll_interval_ms']}ms")
-    if conc_bits:
-        lines.append(f"  Concurrency    : {' · '.join(conc_bits)}")
-    api_port = meta.get("api_port")
-    if api_port:
-        lines.append(f"  API            : http://127.0.0.1:{api_port}")
-    return lines
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_runtime_lines", meta)
 
 
 # ---------------------------------------------------------------------------
@@ -576,48 +492,8 @@ def _runtime_lines(meta: dict) -> list[str]:
 
 
 def _run_status(args: argparse.Namespace) -> int:
-    """Show orchestrator daemon status. Idempotent — pure read."""
-    meta_path, meta = _find_metadata(args)
-
-    if meta is None:
-        print("Orchestrator daemon: NOT RUNNING")
-        print("  No orchestrator metadata found.")
-        print("  Hint: Start with 'orchestratord server start --workflow WORKFLOW.md'")
-        return 0  # idempotent: not-running is a valid status, not an error
-
-    pid = meta.get("pid")
-    started_at = meta.get("started_at", 0)
-    project_slug = meta.get("project_slug", "unknown")
-    workspace_root = meta.get("workspace_root", "unknown")
-    workflow_path = meta.get("workflow_path")
-
-    if pid and _is_pid_alive(pid):
-        uptime = _format_uptime(started_at) if started_at else "unknown"
-        print("Orchestrator daemon: RUNNING")
-        print(f"  PID            : {pid}")
-        print(f"  Uptime         : {uptime}")
-        print(f"  Project        : {project_slug}")
-        print(f"  Workspace root : {workspace_root}")
-        if workflow_path:
-            print(f"  Workflow       : {workflow_path}")
-        for _line in _runtime_lines(meta):
-            print(_line)
-        counts_line = _registry_counts_line(workspace_root)
-        if counts_line:
-            print(f"  Issues         : {counts_line}")
-        print(f"  Metadata       : {meta_path}")
-    else:
-        stale_age = _format_uptime(started_at) if started_at else "unknown"
-        print(f"Orchestrator daemon: STOPPED (stale metadata from {stale_age} ago)")
-        print(f"  Project        : {project_slug}")
-        print(f"  Workspace root : {workspace_root}")
-        print(f"  Metadata       : {meta_path} (stale — clean up with 'server stop')")
-        # Auto-clean stale metadata
-        if meta_path and meta_path.exists():
-            meta_path.unlink()
-            print("  -> Stale metadata cleaned up.")
-
-    return 0
+    """Compatibility adapter for the shared server service."""
+    return _call_shared("_run_status", args)
 
 
 # ---------------------------------------------------------------------------
@@ -662,7 +538,9 @@ def _run_stop_all(args: argparse.Namespace) -> int:
     cleaned = 0
     errors = 0
 
-    print(f"Stopping all orchestrator daemons ({len(metadata_files)} metadata files found)...")
+    print(
+        f"Stopping all orchestrator daemons ({len(metadata_files)} metadata files found)..."
+    )
     print()
 
     for meta_path, meta in metadata_files:
@@ -672,7 +550,9 @@ def _run_stop_all(args: argparse.Namespace) -> int:
 
         if pid is None or not _is_pid_alive(pid):
             pid_str = pid or "N/A"
-            print(f"  [{slug}] already stopped (PID {pid_str}) — cleaning up stale metadata")
+            print(
+                f"  [{slug}] already stopped (PID {pid_str}) — cleaning up stale metadata"
+            )
             try:
                 meta_path.unlink(missing_ok=True)
                 cleaned += 1
@@ -689,7 +569,9 @@ def _run_stop_all(args: argparse.Namespace) -> int:
         except ProcessLookupError:
             print(f"    Process {pid} already exited.")
         except PermissionError:
-            print(f"    ⚠ Permission denied — cannot signal PID {pid}.", file=sys.stderr)
+            print(
+                f"    ⚠ Permission denied — cannot signal PID {pid}.", file=sys.stderr
+            )
             errors += 1
             continue
 
@@ -759,7 +641,8 @@ def _run_stop(args: argparse.Namespace) -> int:
     except PermissionError:
         print(f"  Permission denied: cannot signal PID {pid}.", file=sys.stderr)
         print(
-            f"  Try running with elevated privileges or kill manually: kill {pid}", file=sys.stderr
+            f"  Try running with elevated privileges or kill manually: kill {pid}",
+            file=sys.stderr,
         )
         return 1
 
@@ -773,7 +656,9 @@ def _run_stop(args: argparse.Namespace) -> int:
             time.sleep(0.2)
         else:
             # Timed out — process still alive
-            print(f"  Process did not exit within {timeout}s timeout. Use --force for SIGKILL.")
+            print(
+                f"  Process did not exit within {timeout}s timeout. Use --force for SIGKILL."
+            )
             print(f"  You may also kill manually: kill -9 {pid}")
             return 1
 
@@ -828,7 +713,8 @@ def _run_connect_gateway(args: argparse.Namespace) -> int:
             print(f"gateway connected: origin={origin} sock={sock}")
             return 0
         print(
-            f"gateway connect failed: {result.get('message') or 'unknown error'}", file=sys.stderr
+            f"gateway connect failed: {result.get('message') or 'unknown error'}",
+            file=sys.stderr,
         )
         return 1
 
@@ -937,7 +823,9 @@ def _write_gateway_control(workspace: Path, command: str, payload: dict) -> Path
     return control_path
 
 
-def _wait_gateway_control_result(response_path: Path, timeout_seconds: float = 0.2) -> dict | None:
+def _wait_gateway_control_result(
+    response_path: Path, timeout_seconds: float = 0.2
+) -> dict | None:
     deadline = time.time() + max(0.0, timeout_seconds)
     while time.time() < deadline:
         if response_path.exists():
@@ -1042,7 +930,9 @@ def _mount_gateway_opt_in(
                 return
             except Exception:
                 logger.exception("IM control_verb failed")
-        logger.warning("IM control_verb: orchestrator not ready (%s %s)", verb, issue_id)
+        logger.warning(
+            "IM control_verb: orchestrator not ready (%s %s)", verb, issue_id
+        )
 
     def _issue_inject(issue_id, hint):
         # Write to the workspace's .operator_hints.md via the orchestrator.
@@ -1056,7 +946,9 @@ def _mount_gateway_opt_in(
                 hints_file.parent.mkdir(parents=True, exist_ok=True)
                 with hints_file.open("a", encoding="utf-8") as f:
                     f.write(f"\n{hint}\n")
-                logger.info("IM issue_inject: issue=%s hint_len=%d", issue_id, len(hint))
+                logger.info(
+                    "IM issue_inject: issue=%s hint_len=%d", issue_id, len(hint)
+                )
                 return
             except Exception:
                 logger.exception("IM issue_inject failed")
@@ -1066,15 +958,35 @@ def _mount_gateway_opt_in(
         _issue_inject(issue_id, text)
 
     def _queue_pending(issue_id, text):
-        # Pending-message queue lives on RuntimeTaskRegistry; without an
-        # active task for this issue we record the intent for the next run.
-        logger.info("IM followup queued: issue=%s text_len=%d", issue_id, len(text))
+        # Real follow-up path on the live orchestrator (SPEC Phase 4):
+        # hints + the existing chat follow-up control handler.
+        o = _orch()
+        if o is not None and hasattr(o, "_apply_im_followup"):
+            try:
+                o._apply_im_followup(issue_id, text)
+                return
+            except Exception:
+                logger.exception("IM followup control failed")
+        # Orchestrator not constructed yet — record the follow-up text in
+        # .operator_hints.md so the next run picks it up.
+        _issue_inject(issue_id, text)
+        logger.warning(
+            "IM followup: orchestrator not ready; hints recorded (issue=%s)", issue_id
+        )
 
     def _agent_intent(verb, issue_id):
         _control_verb(verb, issue_id)
 
     def _issue_cli(verb, issue_id, payload):
-        logger.info("IM issue_cli: %s issue=%s", verb, issue_id)
+        o = _orch()
+        if o is not None and hasattr(o, "_apply_im_issue_cli"):
+            try:
+                o._apply_im_issue_cli(verb, issue_id, payload)
+                logger.info("IM issue_cli: %s issue=%s", verb, issue_id)
+                return
+            except Exception:
+                logger.exception("IM issue_cli failed")
+        logger.warning("IM issue_cli: orchestrator not ready (%s %s)", verb, issue_id)
 
     def _bridge_interrupt(issue_id, payload):
         _control_verb("stop", issue_id)
@@ -1093,8 +1005,19 @@ def _mount_gateway_opt_in(
 
     session_id = f"orchestrator-{os.getpid()}"
     ipc = GatewayIpcClient(sock, instance_id=session_id)
+    from orchestratord.commands.service import OrchestratorCommandService
+
+    command_service = OrchestratorCommandService(
+        workspace_root=config.workspace.root,
+        workflow_path=getattr(config, "source_path", None)
+        or getattr(config, "_source_path", None),
+        runtime_supplier=_orch,
+    )
     wrapper = OrchestratorGatewayClient(
-        handlers, ipc_client=ipc, origin=origin, command_router=None, control_bridge=None
+        handlers,
+        ipc_client=ipc,
+        origin=origin,
+        command_service=command_service,
     )
 
     async def _connect_and_register() -> bool:
@@ -1115,12 +1038,16 @@ def _mount_gateway_opt_in(
             logger.debug("orchestrator IM reconnect raised (gateway unavailable)")
             return False
         if response is None or response.ack_layer != "accepted":
-            logger.warning("orchestrator IM gateway unavailable; will retry on next heartbeat")
+            logger.warning(
+                "orchestrator IM gateway unavailable; will retry on next heartbeat"
+            )
             return False
         flush_pending = getattr(wrapper, "_flush_pending_outbound", None)
         if callable(flush_pending):
             await flush_pending()
-        logger.info("orchestrator IM opt-in connected: origin=%s sock=%s", origin[:32], sock)
+        logger.info(
+            "orchestrator IM opt-in connected: origin=%s sock=%s", origin[:32], sock
+        )
         return True
 
     async def _heartbeat_loop():
@@ -1140,11 +1067,15 @@ def _mount_gateway_opt_in(
                             "keeping the current registration until the next check"
                         )
                     else:
-                        logger.warning("orchestrator IM heartbeat timed out twice; reconnecting")
+                        logger.warning(
+                            "orchestrator IM heartbeat timed out twice; reconnecting"
+                        )
                         await _connect_and_register()
                         missed_heartbeats = 0
                 elif response.ack_layer != "accepted":
-                    logger.warning("orchestrator IM heartbeat was not accepted; reconnecting")
+                    logger.warning(
+                        "orchestrator IM heartbeat was not accepted; reconnecting"
+                    )
                     await _connect_and_register()
                     missed_heartbeats = 0
                 else:
@@ -1159,21 +1090,28 @@ def _mount_gateway_opt_in(
 
     wrapper._heartbeat_loop = _heartbeat_loop
 
-    # Outbound: orchestrator events → WeChat via OUTBOUND frames.
+    # Outbound: orchestrator events → IM via OUTBOUND frames.
     # _build_session_sink reads im_event_deliver at sink-build time inside
     # Orchestrator.run(); inject it through the KernelHooks seam right after
     # subsystem.run() constructs the orchestrator, before it starts polling.
+    from orchestratord.sinks.channel import deliver_event_via_client
+
     def _sync_deliver(event, text):
         try:
             loop = asyncio.get_event_loop()
-            loop.create_task(wrapper.send_outbound(text))
         except RuntimeError:
             logger.warning("orchestrator IM: no loop; dropping event")
+            return
+        # Forward the event metadata envelope (issue_id/event_type/
+        # level/markdown) through the client when it supports it.
+        deliver_event_via_client(wrapper, event, text, loop=loop)
 
     class _ImGatewayKernelHooks:
         """DESIGN §4.7：宿主经 KernelHooks 注入 IM 网关装配（取代 monkey-patch）。"""
 
         async def on_kernel_start(self, kernel) -> None:
+            # Inject the gateway runtime onto the freshly constructed
+            # orchestrator before it starts polling / building session sinks.
             kernel._im_gateway_wrapper = wrapper
             kernel._im_gateway_session_id = session_id
             kernel._im_gateway_heartbeat_task = getattr(wrapper, "_heartbeat_task", None)
@@ -1280,7 +1218,9 @@ def _run_orchestrator(
     # timezone-aware timestamps, MDC context injection, and optional
     # JSON output for log aggregators.
     _ws_root = getattr(config.workspace, "root", "") or ""
-    _json_log = str(Path(_ws_root) / ".reports" / "orchestrator.ndjson") if _ws_root else None
+    _json_log = (
+        str(Path(_ws_root) / ".reports" / "orchestrator.ndjson") if _ws_root else None
+    )
     from ..logging_setup import configure_orchestrator_logging
 
     configure_orchestrator_logging(
@@ -1449,7 +1389,9 @@ def _run_orchestrator(
             try:
                 loop.add_signal_handler(
                     sig,
-                    lambda sig_name=signal.Signals(sig).name: _schedule_shutdown(sig_name),
+                    lambda sig_name=signal.Signals(sig).name: _schedule_shutdown(
+                        sig_name
+                    ),
                 )
             except NotImplementedError:
                 # Windows ProactorEventLoop has no POSIX signal support.
@@ -1515,7 +1457,9 @@ def _run_orchestrator(
 
         async def _run_with_dashboard() -> None:
             """Run orchestrator with a concurrent dashboard status loop."""
-            dashboard_task = asyncio.create_task(_dashboard_loop(subsystem.status_dashboard, port))
+            dashboard_task = asyncio.create_task(
+                _dashboard_loop(subsystem.status_dashboard, port)
+            )
             try:
                 await _run()
             finally:
@@ -1544,3 +1488,18 @@ async def _dashboard_loop(dashboard, port: int | None) -> None:
             )
         except Exception:
             pass
+
+
+def _shared_context():
+    from orchestratord.commands.models import CommandContext
+
+    return CommandContext(
+        metadata_directory=ORCHESTRATORD_ORCHESTRATOR_DIR,
+    )
+
+
+def _call_shared(name, *args, **kwargs):
+    from orchestratord.commands import server as operations
+    from orchestratord.commands.cli_adapter import invoke
+
+    return invoke(getattr(operations, name), _shared_context(), *args, **kwargs)

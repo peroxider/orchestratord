@@ -54,6 +54,7 @@ def app() -> None:
     from orchestratord.cli.backend import add_backend_parser
     from orchestratord.cli.dashboard import add_dashboard_parser
     from orchestratord.cli.db import add_db_parser
+    from orchestratord.cli.gateway import add_gateway_parser
     from orchestratord.cli.issue import add_issue_parser
     from orchestratord.cli.peer import add_peer_parser
     from orchestratord.cli.rules import add_rules_parser
@@ -71,6 +72,7 @@ def app() -> None:
     add_run_parser(subparsers)
     add_backend_parser(subparsers)
     add_app_parser(subparsers)
+    add_gateway_parser(subparsers)
     add_issue_parser(subparsers)
     add_workflow_parser(subparsers)
     add_dashboard_parser(subparsers)
@@ -93,6 +95,8 @@ def app() -> None:
         from orchestratord.cli.run import run
     elif subcommand == "backend":
         from orchestratord.cli.backend import run
+    elif subcommand == "gateway":
+        from orchestratord.cli.gateway import run
     elif subcommand == "app":
         from orchestratord.cli.app import run
     elif subcommand == "issue":

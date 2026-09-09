@@ -9,10 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestratord.sinks.channel import (
-    ChannelProgressSink,
-    build_gateway_deliver,
-)
 from orchestratord.events import (
     EventLevel,
     OrchestratorEvent,
@@ -20,6 +16,10 @@ from orchestratord.events import (
     format_event,
 )
 from orchestratord.ipc import IM_DIRECT_ALL_ORIGIN
+from orchestratord.sinks.channel import (
+    ChannelProgressSink,
+    build_gateway_deliver,
+)
 
 
 def _session(issue_id="AGENTSDK-15", reason="success", pr=None):
@@ -409,7 +409,6 @@ def test_run_orchestrator_starts_im_heartbeat_inside_runtime_loop(monkeypatch, t
         def create_task(self, coro):
             events.append("old_loop_task")
             coro.close()
-            return None
 
     class _FakeWorkflowLoader:
         @staticmethod
@@ -426,7 +425,7 @@ def test_run_orchestrator_starts_im_heartbeat_inside_runtime_loop(monkeypatch, t
 
     class _FakeSubsystem:
         def __init__(self, _config, **_kwargs):
-            self.status_dashboard = SimpleNamespace(state=lambda: {})
+            self.status_dashboard = SimpleNamespace(state=dict)
 
         async def run(self):
             events.append("subsystem_run")
@@ -939,7 +938,7 @@ def test_mount_gateway_reconnects_when_heartbeat_is_not_accepted(monkeypatch) ->
             nonlocal heartbeat_calls
             heartbeat_calls += 1
             if heartbeat_calls <= 2:
-                return None
+                return
             raise asyncio.CancelledError()
 
     class _FakeClient:
@@ -1179,10 +1178,8 @@ def test_mount_gateway_flushes_pending_outbound_after_accepted_heartbeat(monkeyp
 @pytest.mark.asyncio
 async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
     """A server-pushed DELIVER frame dispatches to the bound handlers."""
-    from orchestratord.sinks.channel import build_ipc_deliver
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
-        OrchestratorHandlers,
     )
     from orchestratord.ipc import GatewayFrame
 
@@ -1198,7 +1195,14 @@ async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
 
     ipc = _FakeIpc()
     handlers = _handlers(control_verb=lambda v, iid: control_calls.append((v, iid)))
-    client = OrchestratorGatewayClient(handlers, ipc_client=ipc, origin="wechat:direct:a:u")
+    from orchestratord.commands.models import CommandResult
+
+    async def execute(request):
+        control_calls.append((request.action, request.options["id"]))
+        return CommandResult(0)
+
+    client = OrchestratorGatewayClient(handlers, ipc_client=ipc, origin="wechat:direct:a:u",
+                                       command_service=SimpleNamespace(execute=execute))
     assert ipc.on_deliver is not None  # wired on construct
 
     # /pause with an issue id → command → control_verb
@@ -1206,7 +1210,8 @@ async def test_orchestrator_on_pushed_deliver_dispatches_control_verb() -> None:
         delivery_id="d1",
         session_id="orch",
         origin="wechat:direct:a:u",
-        text="/pause AGENTSDK-15",
+        metadata={"authenticated_origin": "wechat:direct:a:u"},
+        text="/issue pause --id AGENTSDK-15",
         semantic="command",
     )
     await client._on_pushed_deliver(frame)
@@ -1243,10 +1248,12 @@ async def test_orchestrator_on_pushed_deliver_dispatches_lifecycle_issue_cli(
     text: str, argv: list[str]
 ) -> None:
     """Lifecycle issue slash commands run through the existing orchestrator CLI path."""
+    from orchestratord.commands.models import CommandResult
+    from orchestratord.commands.parsing import parse_command
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
     from orchestratord.ipc import GatewayFrame
 
-    cli_calls: list[list[str]] = []
+    cli_calls = []
 
     class _FakeIpc:
         def __init__(self):
@@ -1257,16 +1264,16 @@ async def test_orchestrator_on_pushed_deliver_dispatches_lifecycle_issue_cli(
             self.sent.append(text)
             return GatewayFrame.ack(delivery_id="d1", layer="processed", message="sent")
 
-    def _run_cli(actual_argv: list[str]) -> tuple[int, str, str]:
-        cli_calls.append(actual_argv)
-        return 0, "ok", ""
+    async def _run_cli(request):
+        cli_calls.append(request)
+        return CommandResult(0, "ok")
 
     ipc = _FakeIpc()
     client = OrchestratorGatewayClient(
         _handlers(),
         ipc_client=ipc,
         origin="wechat:direct:a:u",
-        cli_runner=_run_cli,
+        command_service=SimpleNamespace(execute=_run_cli),
     )
 
     await client._on_pushed_deliver(
@@ -1274,12 +1281,13 @@ async def test_orchestrator_on_pushed_deliver_dispatches_lifecycle_issue_cli(
             delivery_id="d1",
             session_id="orch",
             origin="wechat:direct:a:u",
+            metadata={"authenticated_origin": "wechat:direct:a:u"},
             text=text,
             semantic="command",
         )
     )
 
-    assert cli_calls == [argv]
+    assert cli_calls == [parse_command(argv)]
     assert ipc.sent
     assert ipc.sent[0].startswith(f"命令已执行：{text}")
     assert "ok" in ipc.sent[0]
@@ -1293,7 +1301,6 @@ async def test_orchestrator_all_private_binding_sends_wildcard_after_inbound() -
     origin; it reuses the single OUTBOUND channel."""
     from orchestratord.im_gateway_client import (
         OrchestratorGatewayClient,
-        OrchestratorHandlers,
     )
     from orchestratord.ipc import GatewayFrame
 
@@ -1369,8 +1376,8 @@ async def test_orchestrator_all_private_binding_sends_to_wildcard_then_wildcard(
 @pytest.mark.asyncio
 async def test_orchestrator_pending_outbound_stays_queued_when_flush_is_rejected() -> None:
     """A gateway NACK during flush must not silently drop queued events."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1433,7 +1440,6 @@ async def test_orchestrator_outbound_timeout_does_not_queue_retry() -> None:
 
         async def send_outbound(self, *, origin, text):
             self.sent.append((origin, text))
-            return None
 
     ipc = _TimeoutIpc()
     client = OrchestratorGatewayClient(_handlers(), ipc_client=ipc, origin="im:direct:*:*")
@@ -1460,7 +1466,6 @@ async def test_orchestrator_pending_outbound_timeout_is_dropped_not_retried() ->
 
         async def send_outbound(self, *, origin, text):
             self.sent.append((origin, text))
-            return None
 
     ipc = _TimeoutIpc()
     client = OrchestratorGatewayClient(_handlers(), ipc_client=ipc, origin="im:direct:*:*")
@@ -1547,8 +1552,8 @@ async def test_orchestrator_pending_outbound_dedupes_identical_text() -> None:
 @pytest.mark.asyncio
 async def test_orchestrator_pending_duplicate_does_not_send_while_queued() -> None:
     """A duplicate event already pending must not bypass the queue and send now."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1581,8 +1586,8 @@ async def test_orchestrator_pending_duplicate_does_not_send_while_queued() -> No
 @pytest.mark.asyncio
 async def test_orchestrator_inbound_flush_bypasses_pending_retry_cooldown() -> None:
     """A new inbound WeChat message can refresh context and should trigger a flush."""
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     clock = [1000.0]
 
@@ -1637,8 +1642,8 @@ async def test_orchestrator_pending_outbound_concurrent_flush_no_index_error() -
     self._pending_outbound[0] before an await, then both try popleft(),
     causing IndexError: pop from an empty deque.
     """
-    from orchestratord.ipc.protocol import GatewayFrame
     from orchestratord.im_gateway_client import OrchestratorGatewayClient
+    from orchestratord.ipc.protocol import GatewayFrame
 
     class _SlowIpc:
         """IPC that yields control during send_outbound to simulate concurrency."""
@@ -1791,8 +1796,9 @@ def test_orchestrator_control_stop_emits_im_event() -> None:
 
 @pytest.mark.asyncio
 async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path) -> None:
+    from orchestratord.commands.issue import _run_review
+    from orchestratord.commands.models import CommandContext
     from orchestratord.issue_clarifier.queue import ClarificationQueue
-    from orchestratord.cli.issue import _run_review
     from orchestratord.issue_registry import IssueRegistry, IssueStatus
     from orchestratord.orchestrator import Orchestrator
     from orchestratord.tracker import Intent
@@ -1811,7 +1817,7 @@ async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path
         feedback=feedback,
         comment=None,
     )
-    assert _run_review(registry_path, args, workspace_root=tmp_path) == 0
+    assert await _run_review(CommandContext(), registry_path, args, workspace_root=tmp_path) == 0
     assert IssueRegistry(registry_path).get(issue_id).status is IssueStatus.PENDING_REVIEW
 
     tracker_updates: list[tuple[str, str]] = []
@@ -1860,7 +1866,7 @@ async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path
     # update the operator feedback instead of failing on status=pending.
     updated_feedback = "注释仍然没有中文"
     args.feedback = updated_feedback
-    assert _run_review(registry_path, args, workspace_root=tmp_path) == 0
+    assert await _run_review(CommandContext(), registry_path, args, workspace_root=tmp_path) == 0
     await orchestrator._process_control_commands()
 
     record = registry.get(issue_id)
@@ -1876,7 +1882,8 @@ async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path
 
 @pytest.mark.asyncio
 async def test_review_approve_syncs_daemon_state_and_remote_tracker(tmp_path) -> None:
-    from orchestratord.cli.issue import _run_review
+    from orchestratord.commands.issue import _run_review
+    from orchestratord.commands.models import CommandContext
     from orchestratord.issue_registry import IssueRegistry, IssueStatus
     from orchestratord.orchestrator import Orchestrator
 
@@ -1900,7 +1907,7 @@ async def test_review_approve_syncs_daemon_state_and_remote_tracker(tmp_path) ->
         feedback=None,
         comment="LGTM",
     )
-    assert _run_review(registry_path, args, workspace_root=tmp_path) == 0
+    assert await _run_review(CommandContext(), registry_path, args, workspace_root=tmp_path) == 0
 
     tracker_updates: list[tuple[str, str]] = []
     tracker_comments: list[tuple[str, str]] = []
@@ -1942,7 +1949,7 @@ async def test_review_approve_syncs_daemon_state_and_remote_tracker(tmp_path) ->
     assert any(event.event_type == "issue.completed" for event in delivered)
 
     # Reissuing approve repairs a remote label that missed the first sync.
-    assert _run_review(registry_path, args, workspace_root=tmp_path) == 0
+    assert await _run_review(CommandContext(), registry_path, args, workspace_root=tmp_path) == 0
     await orchestrator._process_control_commands()
     assert tracker_updates == [(issue_id, "completed"), (issue_id, "completed")]
     assert tracker_comments == [(issue_id, "## Approved\n\nLGTM")]
