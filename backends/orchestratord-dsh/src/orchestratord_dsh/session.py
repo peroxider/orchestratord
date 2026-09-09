@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -47,7 +48,9 @@ class DshSession:
         spec: SessionSpec,
         *,
         harness_factory: Callable[[], Any] | None = None,
+        on_close: Callable[[DshSession], None] | None = None,
     ) -> None:
+        self._on_close = on_close
         self._spec = spec
         # ``id(self)`` looked unique but CPython reuses object ids
         # after GC — two sessions could collide with a live persisted
@@ -673,11 +676,22 @@ class DshSession:
 
     async def close(self) -> None:
         # Mark closed before scheduling cleanup, including before the first
-        # worker dispatch. Never cancel a to_thread task and call it stopped.
+        # worker dispatch.
         self._closed = True
         await asyncio.to_thread(self.close_sync)
-        if self._turn_task is not None:
-            await asyncio.wait_for(asyncio.shield(self._turn_task), timeout=5.0)
+        # Reap the in-flight turn task: cancel + bounded join, mirroring
+        # the opencode backend close path. close_sync above already killed
+        # the process tree, so the worker's blocked read unwinds on its own;
+        # a stuck worker thread must not hang close() forever.
+        if self._turn_task is not None and not self._turn_task.done():
+            self._turn_task.cancel()
+            # CancelledError must be suppressed explicitly — awaiting a
+            # cancelled task re-raises it here, and letting it escape
+            # would break the core's cleanup on operator stop.
+            with suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(self._turn_task, timeout=5.0)
+        if self._on_close is not None:
+            self._on_close(self)
 
     def close_sync(self) -> None:
         self._closed = True
