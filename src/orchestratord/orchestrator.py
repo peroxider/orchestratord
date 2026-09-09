@@ -964,6 +964,7 @@ class Orchestrator:
         # Rebuild the retry queue from persisted retry plans so a
         # scheduled retry survives daemon restarts.
         self._recover_pending_retries()
+        await self._recover_persistent_states()
 
         # Start metadata heartbeat for CLI discovery
         heartbeat_task = asyncio.create_task(self._metadata_heartbeat_loop())
@@ -1123,6 +1124,36 @@ class Orchestrator:
                 attempt,
                 record.next_retry_at,
                 remaining,
+            )
+
+    async def _recover_persistent_states(self) -> None:
+        """Restore in-memory state sets from persistent registry records.
+
+        On daemon restart the in-memory ``_state`` sets (``completed``,
+        ``pending_review``) are empty.  Without this recovery, an issue
+        whose registry record is ``PENDING_REVIEW`` would be treated as a
+        fresh candidate and re-launched — producing duplicate work on the
+        already-existing PR branch.
+
+        ``COMPLETED`` records are re-hydrated too: the tracker usually
+        closes completed issues, but restoring the set keeps the
+        candidate-issue poll loop consistent without consulting the
+        tracker API.
+        """
+        from .issue_registry.models import IssueStatus
+
+        for record in self._registry.records_by_status(IssueStatus.PENDING_REVIEW):
+            self._state.pending_review.add(record.issue_id)
+            logger.info(
+                "Recovered pending_review state for issue_id=%s on startup",
+                record.issue_id,
+            )
+
+        for record in self._registry.records_by_status(IssueStatus.COMPLETED):
+            self._state.completed.add(record.issue_id)
+            logger.info(
+                "Recovered completed state for issue_id=%s on startup",
+                record.issue_id,
             )
 
     async def _metadata_heartbeat_loop(self) -> None:
