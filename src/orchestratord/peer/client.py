@@ -17,9 +17,10 @@ real ``httpx`` client when a ``base_url`` is given.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -35,6 +36,9 @@ from orchestratord.peer.handshake import (
 )
 from orchestratord.peer.nonce_store import NonceStore
 from orchestratord.peer.protocol import PeerFrame, PeerFrameType
+from orchestratord.peer.transports import select_transport_factory
+
+logger = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT_SECONDS = HELLO_TIMEOUT_SECONDS
 
@@ -87,6 +91,19 @@ class PeerClient:
         request_timeout: float = REQUEST_TIMEOUT_SECONDS,
         retries: int = MAX_HANDSHAKE_RETRIES,
         backoff_base: float = 0.5,
+        # PR-B1 / PR-B2: client transport selector.
+        #   ``"auto"`` (default, the v2 client) reads the remote Agent
+        #       Card ``transports[]`` and, when frame is advertised,
+        #       swaps the factory to :class:`HttpsFrameTransport`.
+        #   ``"rest"`` is explicit legacy and logs a deprecation warning.
+        #   ``"frame"`` forces frame transport; requires a non-empty
+        #       ``frame_url`` (resolved from the remote card or passed in).
+        transport: Literal["auto", "rest", "frame"] = "auto",
+        # PR-B2: when the remote Agent Card advertises a frame
+        # transport, ``open()`` extracts its URL here. Callers that
+        # already know the frame endpoint can pass it directly to
+        # skip discovery.
+        frame_url: str | None = None,
     ) -> None:
         self._orch_id = orch_id
         self._token = token
@@ -98,6 +115,12 @@ class PeerClient:
         self._request_timeout = request_timeout
         self._retries = retries
         self._backoff_base = backoff_base
+        self._transport_kind = transport
+        # PR-B1: instance flag so the legacy-protocol / deprecated-
+        # transport warnings fire once per client, not per ``open()``
+        # retry. Re-instantiate the client to re-warn.
+        self._warned_legacy_protocol = False
+        self._frame_url = frame_url
         self._base_url = base_url
         self._owns_http = http is None
         if http is not None:
@@ -137,6 +160,28 @@ class PeerClient:
             )
             resp.raise_for_status()
             self.card = resp.json()
+        # PR-B2: if the Agent Card advertises a frame transport and the
+        # caller didn't already pin a ``frame_url``, capture it here so
+        # ``_negotiate_transport`` can swap the factory on the v2 path.
+        if self._frame_url is None and isinstance(self.card, dict):
+            for entry in self.card.get("transports") or []:
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("protocol") == "frame"
+                    and entry.get("url")
+                ):
+                    self._frame_url = entry["url"]
+                    break
+        # PR-B1 / PR-B2: negotiate transport from the remote Agent
+        # Card's ``transports[]`` field. ``transport="auto"`` (the new
+        # default v2 client) now *swaps* the factory to
+        # :class:`HttpsFrameTransport` when frame is advertised (PR-B2);
+        # a legacy Phase 1 remote (no ``transports[]``) still routes
+        # through the injected factory and emits a one-time warning.
+        # ``transport="rest"`` is explicit legacy and emits a
+        # deprecation warning. ``transport="frame"`` forces the frame
+        # binding and raises if no frame URL is available.
+        self._negotiate_transport()
         last_exc: Exception | None = None
         for attempt in range(self._retries + 1):
             if attempt:
@@ -263,6 +308,78 @@ class PeerClient:
             yield frame
 
     # -- internals --
+
+    def _negotiate_transport(self) -> None:
+        """PR-B2: actually swap the transport factory based on the Agent Card.
+
+        The injected ``transport_factory`` is honored unless the
+        caller asked for ``transport="frame"`` or ``"auto"`` and the
+        remote advertises a frame transport — in both cases the
+        factory is replaced with one that opens
+        :class:`~orchestratord.peer.transports.HttpsFrameTransport`.
+        Legacy ``transport="rest"`` and remotes without ``transports[]``
+        continue to use the injected factory (no behavior change vs
+        Phase 1).
+        """
+        if self._transport_kind == "frame":
+            if not self._frame_url:
+                raise PeerClientError(
+                    "PeerClient(transport='frame') requires a frame URL "
+                    "— discover the Agent Card (pass base_url=) or pass "
+                    "frame_url= explicitly"
+                )
+            self._transport_factory = select_transport_factory(
+                self.card,
+                frame_url=self._frame_url,
+                orch_id=self._orch_id,
+                token=self._token,
+                fallback_factory=self._transport_factory,
+            )
+            return
+        if self._transport_kind == "rest":
+            if not self._warned_legacy_protocol:
+                logger.warning(
+                    "peer client transport='rest' is deprecated; "
+                    "use transport='auto' on Phase B daemons "
+                    "(remote orch_id=%s)",
+                    self._orch_id,
+                )
+                self._warned_legacy_protocol = True
+            return
+        # transport == "auto": swap to frame when advertised, fall back
+        # to the injected factory otherwise.
+        transports = []
+        if isinstance(self.card, dict):
+            raw = self.card.get("transports")
+            if isinstance(raw, list):
+                transports = [t for t in raw if isinstance(t, dict)]
+        if not transports and not self._warned_legacy_protocol:
+            # PR-B1 invariant: a remote on the legacy Phase 1 wire (no
+            # ``transports[]``) emits a one-time warning so operators see
+            # deprecation pressure. The fallback factory is unchanged —
+            # legacy Phase 1 daemons keep working.
+            logger.warning(
+                "peer %s is on legacy protocol (no transports[] in "
+                "Agent Card); using rest transport",
+                self._orch_id,
+            )
+            self._warned_legacy_protocol = True
+        previous_factory = self._transport_factory
+        new_factory = select_transport_factory(
+            self.card,
+            frame_url=self._frame_url,
+            orch_id=self._orch_id,
+            token=self._token,
+            fallback_factory=previous_factory,
+        )
+        if new_factory is not previous_factory and not self._warned_legacy_protocol:
+            logger.info(
+                "peer %s selected frame transport (url=%s)",
+                self._orch_id,
+                self._frame_url,
+            )
+            self._warned_legacy_protocol = True
+        self._transport_factory = new_factory
 
     async def _send_or_fail(self, frame: PeerFrame) -> None:
         transport = await self._require_transport()

@@ -27,6 +27,7 @@ from orchestratord.api.routers import (
     issues,
     members,
     peer,
+    peer_frame,
     projects,
     realtime,
     runtimes,
@@ -151,6 +152,10 @@ def create_app(
     # Agent Card carries no workspace data, so it mounts public — same
     # reasoning as ``realtime`` above.
     application.include_router(peer.router)
+    # PR-B2: the long-lived chunked POST frame transport (``peer/1``)
+    # shares the main app + main port (single-port design, plan §A).
+    # ``require_peer_auth`` is the per-route gate.
+    application.include_router(peer_frame.router)
     return application
 
 

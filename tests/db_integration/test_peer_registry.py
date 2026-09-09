@@ -288,3 +288,106 @@ async def test_cli_reject_deletes_pending_row(db, db_engine, monkeypatch) -> Non
     await db.commit()
     assert await _run_reject(peer.id) == 0
     assert await get_peer(db, ws, "orch-C3") is None
+
+
+# ---------------------------------------------------------------------------
+# PR-B1: client_kind (Phase B v2 vs Phase 1 v1_sunset)
+# ---------------------------------------------------------------------------
+
+
+async def test_upsert_defaults_client_kind_to_v1_sunset(db) -> None:
+    """PR-B1: an invite body without peer_client_version stamps v1_sunset.
+
+    Phase 1 clients do not declare a version — they predate the field —
+    so the registry defaults every new row to the legacy classification.
+    Migration 0048 backfills existing rows to the same value.
+    """
+    ws = uuid.uuid4()
+    peer = await upsert_peer(
+        db, workspace_id=ws, orch_id="orch-L", name="L", url="u"
+    )
+    assert peer.client_kind == "v1_sunset"
+
+
+async def test_upsert_accepts_explicit_v2(db) -> None:
+    """PR-B1: a v2 client can opt into the modern classification."""
+    ws = uuid.uuid4()
+    peer = await upsert_peer(
+        db,
+        workspace_id=ws,
+        orch_id="orch-M",
+        name="M",
+        url="u",
+        client_kind="v2",
+    )
+    assert peer.client_kind == "v2"
+
+
+async def test_upsert_preserves_client_kind_on_update(db) -> None:
+    """PR-B1 invariant: a re-invite without peer_client_version must not
+    downgrade an already-classified peer.
+
+    This is the regression the spec calls out explicitly — without this
+    guard, a v1 client's later re-invite would silently stamp an already
+    trusted peer back to ``v1_sunset``.
+    """
+    ws = uuid.uuid4()
+    peer = await upsert_peer(
+        db,
+        workspace_id=ws,
+        orch_id="orch-M",
+        name="M",
+        url="u",
+        client_kind="v2",
+    )
+    assert peer.client_kind == "v2"
+    refreshed = await upsert_peer(
+        db, workspace_id=ws, orch_id="orch-M", name="M", url="u2"
+    )
+    # No client_kind passed on update → preserve existing v2.
+    assert refreshed.client_kind == "v2"
+    # But other fields did refresh.
+    assert refreshed.url == "u2"
+
+
+async def test_cli_list_renders_client_kind_column(
+    db, db_engine, monkeypatch, capsys
+) -> None:
+    """PR-B1: the ``peer list`` output gains a CLIENT_KIND column and a
+    ⚠ marker on v1_sunset rows. v2 rows have no marker so the column
+    stays plain for downstream parsing."""
+    from orchestratord.cli.peer import _run_list
+
+    _bind_cli_to_test_db(db_engine, monkeypatch)
+    ws = uuid.uuid4()
+    await upsert_peer(
+        db,
+        workspace_id=ws,
+        orch_id="orch-legacy",
+        name="Legacy",
+        url="http://l:9001",
+    )
+    await upsert_peer(
+        db,
+        workspace_id=ws,
+        orch_id="orch-modern",
+        name="Modern",
+        url="http://m:9001",
+        client_kind="v2",
+    )
+    await db.commit()
+
+    assert await _run_list(ws, None) == 0
+    out = capsys.readouterr().out
+    assert "CLIENT_KIND" in out
+    assert "v1_sunset" in out
+    assert "v2" in out
+    # The legacy row carries the ⚠ suffix; the v2 row does not.
+    legacy_line = next(
+        line for line in out.splitlines() if "orch-legacy" in line
+    )
+    modern_line = next(
+        line for line in out.splitlines() if "orch-modern" in line
+    )
+    assert legacy_line.rstrip().endswith("⚠")
+    assert "⚠" not in modern_line

@@ -125,3 +125,55 @@ def test_full_index_inventory_present() -> None:
     combined = "\n".join(p.read_text(encoding="utf-8") for p in _version_files())
     missing = sorted(name for name in EXPECTED_INDEX_NAMES if name not in combined)
     assert not missing, f"missing indexes: {missing}"
+
+
+# -- PR-B1: migration 0048 adds ``peers.client_kind`` --
+
+
+def test_migration_0048_adds_client_kind_with_default_v1_sunset() -> None:
+    """PR-B1: migration 0048 backfills ``peers.client_kind`` with the
+    ``v1_sunset`` default — Phase 1 peers (no ``peer_client_version``
+    in invite) are auto-classified on upgrade.
+
+    Pins three non-negotiable properties:
+
+    1. ``down_revision = "0047"`` — the migration sits on top of the
+       last pre-Phase B migration, with no branch.
+    2. ``upgrade()`` adds a ``client_kind`` column to ``peers``,
+       ``nullable=False``, with ``server_default="v1_sunset"`` so
+       existing rows adopt the legacy classification automatically
+       (Postgres backfills the literal on ``ALTER TABLE ADD COLUMN
+       ... DEFAULT``).
+    3. ``downgrade()`` drops the column — round-trip safe.
+    """
+    path = VERSIONS / "0048_add_peer_client_kind.py"
+    assert path.exists(), "migration 0048 missing"
+    text = path.read_text(encoding="utf-8")
+
+    assert 'down_revision = "0047"' in text
+    assert 'op.add_column(\n        "peers",' in text or (
+        'op.add_column("peers",' in text
+    ), "0048 must add_column('peers', ...)"
+    assert "sa.Column(" in text
+    assert '"client_kind"' in text
+    assert "nullable=False" in text
+    assert 'server_default="v1_sunset"' in text
+    # Round-trip: downgrade drops the column.
+    assert 'op.drop_column("peers", "client_kind")' in text
+
+
+def test_migration_0048_keeps_server_default_for_legacy_clients() -> None:
+    """PR-B1 invariant: the ``server_default`` is intentionally **kept**
+    on the column, not dropped in a follow-up ``alter_column``. A future
+    Phase 1 client that re-omits ``peer_client_version`` would otherwise
+    violate ``NOT NULL`` on insert — the default is the safety net."""
+    import re
+
+    path = VERSIONS / "0048_add_peer_client_kind.py"
+    text = path.read_text(encoding="utf-8")
+    # Strip the docstring (which mentions "alter_column" as prose) and
+    # only assert on actual ``op.alter_column(...)`` calls in the body.
+    body_only = re.sub(r'"""[\s\S]*?"""', "", text, count=1)
+    assert (
+        "alter_column" not in body_only
+    ), "0048 must not alter_column — the v1_sunset server_default is the safety net"

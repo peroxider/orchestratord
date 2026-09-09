@@ -35,6 +35,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from orchestratord.api.db import get_repositories
 from orchestratord.api.deps import require_auth, require_peer_auth
@@ -42,9 +43,10 @@ from orchestratord.api.realtime import get_broker
 from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import issue_api_token
-from orchestratord.peer.card import build_agent_card, ensure_orch_id
+from orchestratord.peer.card import _resolve_card_url, build_agent_card, ensure_orch_id
 from orchestratord.peer.dispatcher import PeerMessageDispatcher
 from orchestratord.peer.registry import (
+    CLIENT_KIND_V2,
     STATUS_ACCEPTED,
     STATUS_PENDING,
     list_peers,
@@ -57,8 +59,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["peer"])
 
-_PEER_LISTEN_PORT_DEFAULT = "9001"
-
 # D14: a peer relationship is workspace-scoped, so every invite names
 # the workspace it wants to join.
 _PEER_INVOKE_METHODS = {
@@ -69,10 +69,10 @@ _PEER_INVOKE_METHODS = {
 
 @router.get("/.well-known/agent.json")
 async def get_agent_card() -> dict:
-    url = os.environ.get("ORCHESTRATORD_PEER_PUBLIC_URL", "") or (
-        f"http://127.0.0.1:{_PEER_LISTEN_PORT_DEFAULT}"
-    )
-    return build_agent_card(orch_id=ensure_orch_id(), url=url)
+    # PR-B1: defer URL resolution to ``peer.card._resolve_card_url`` so the
+    # ``url`` field and the ``transports[rest].url`` field share one source
+    # of truth (env → ORCHESTRATORD_PEER_LISTEN → sentinel default).
+    return build_agent_card(orch_id=ensure_orch_id(), url=_resolve_card_url())
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +87,11 @@ class _InviteRequest(BaseModel):
     workspace_id: UUID
     capabilities: list[str] = Field(default_factory=list)
     card: dict[str, Any] | None = None
+    # PR-B1: opt-in client-version tag. v2 clients advertise themselves;
+    # Phase 1 clients omit the field and are stamped ``v1_sunset`` by
+    # ``upsert_peer``. Pydantic v2 ``Literal`` keeps the wire schema
+    # tight so a typo (``"v3"``) is rejected before the registry sees it.
+    peer_client_version: Literal["v2"] | None = None
 
 
 @router.post("/api/peer/invite", status_code=202)
@@ -110,6 +115,15 @@ async def post_invite(
         url=body.url,
         capabilities=body.capabilities,
         card=body.card,
+        # PR-B1: a v2 client opts in by sending peer_client_version="v2";
+        # Phase 1 clients omit the field and ``upsert_peer`` defaults
+        # to ``v1_sunset``. UPDATE path preserves the existing value
+        # (see registry.upsert_peer docstring).
+        client_kind=(
+            CLIENT_KIND_V2
+            if body.peer_client_version == "v2"
+            else None
+        ),
     )
     trust = {
         item.strip()
@@ -224,6 +238,7 @@ async def get_peers(
             "url": row.url,
             "status": row.status,
             "capabilities": row.capabilities,
+            "client_kind": row.client_kind,  # PR-B1
             "created_at": row.created_at.isoformat(),
             "accepted_at": row.accepted_at.isoformat() if row.accepted_at else None,
         }

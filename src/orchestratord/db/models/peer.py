@@ -38,6 +38,10 @@ class Peer(Base):
     remote_workspace_id: Mapped[str | None]
     # "pending" → "accepted"; removal deletes the row (AC8).
     status: Mapped[str]
+    # PR-B1: ``v1_sunset`` for Phase 1 peers (no transports[] in card, no
+    # peer_client_version in invite), ``v2`` for Phase B clients.
+    # Backfilled to ``v1_sunset`` by migration 0048 for pre-existing rows.
+    client_kind: Mapped[str]
     # AuthToken row holding the per-peer bearer token
     # (SHA-256 hash, scopes=["peer.*"]); issued on accept.
     token_id: Mapped[uuid.UUID | None]

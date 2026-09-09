@@ -87,6 +87,18 @@ def add_serve_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     serve_parser.add_argument(
+        "--peer-frame-listen",
+        type=str,
+        default=None,
+        help=(
+            "Optional peer/1 frame listener as HOST:PORT (PR-B2.1). "
+            "When set, the Agent Card advertises the frame transport "
+            "on this socket instead of the REST listener's "
+            "/peer/v1/stream path. Default: unset — single-port "
+            "design shares the REST listener."
+        ),
+    )
+    serve_parser.add_argument(
         "--redis-url",
         type=str,
         default="redis://localhost:6379/0",
@@ -114,6 +126,12 @@ def run(args: argparse.Namespace) -> int:
     # Redis URL default via flags but stay env-overridable for PR6's
     # two-daemon integration runs.
     os.environ.setdefault("ORCHESTRATORD_PEER_LISTEN", args.peer_listen)
+    # PR-B2.1: optional split-port frame listener. Only set the env
+    # when the operator opted in via the flag — leaving it unset
+    # preserves the single-port design (frame shares the REST listener).
+    peer_frame_listen = getattr(args, "peer_frame_listen", None)
+    if peer_frame_listen:
+        os.environ.setdefault("ORCHESTRATORD_PEER_FRAME_LISTEN", peer_frame_listen)
     os.environ.setdefault("ORCHESTRATORD_REDIS_URL", args.redis_url)
 
     # §10.2 first-boot seed — default workspace + fixed owner member +

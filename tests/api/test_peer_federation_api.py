@@ -592,3 +592,118 @@ async def test_rate_limit_returns_429_with_retry_after(
     assert first.status_code == 200
     assert second.status_code == 429  # D25
     assert "retry-after" in {k.lower() for k in second.headers}
+
+
+# ---------------------------------------------------------------------------
+# PR-B1: peer_client_version → client_kind (Phase B v2 vs Phase 1 v1_sunset)
+# ---------------------------------------------------------------------------
+
+
+async def test_invite_without_peer_client_version_stamps_v1_sunset(
+    client, db
+) -> None:
+    """PR-B1: a Phase 1 client (no peer_client_version) is auto-classified
+    ``v1_sunset`` so operators can see the legacy population at a glance."""
+    ws = await _seed_workspace(db)
+    resp = await client.post(
+        "/api/peer/invite",
+        json={
+            "orch_id": "orch-legacy",
+            "name": "Legacy",
+            "url": "http://legacy:9001",
+            "workspace_id": str(ws.id),
+            "capabilities": ["peer.invoke"],
+        },
+    )
+    assert resp.status_code == 202, resp.text
+    listed = await client.get(
+        "/api/peer/peers",
+        params={"workspace_id": str(ws.id)},
+    )
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["orch_id"] == "orch-legacy"
+    assert rows[0]["client_kind"] == "v1_sunset"
+
+
+async def test_invite_with_peer_client_version_v2_stamps_v2(
+    client, db
+) -> None:
+    """PR-B1: a v2 client opting in via ``peer_client_version: "v2"`` is
+    classified accordingly and survives the list round-trip."""
+    ws = await _seed_workspace(db)
+    resp = await client.post(
+        "/api/peer/invite",
+        json={
+            "orch_id": "orch-modern",
+            "name": "Modern",
+            "url": "http://modern:9001",
+            "workspace_id": str(ws.id),
+            "capabilities": ["peer.invoke"],
+            "peer_client_version": "v2",
+        },
+    )
+    assert resp.status_code == 202, resp.text
+    listed = await client.get(
+        "/api/peer/peers",
+        params={"workspace_id": str(ws.id)},
+    )
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["client_kind"] == "v2"
+
+
+async def test_reinvite_without_version_preserves_existing_v2(
+    client, db
+) -> None:
+    """PR-B1 invariant (server-side mirror of the registry test):
+    a re-invite that omits ``peer_client_version`` must not downgrade
+    a peer that was previously classified ``v2``."""
+    ws = await _seed_workspace(db)
+    first = await client.post(
+        "/api/peer/invite",
+        json={
+            "orch_id": "orch-modern",
+            "name": "Modern",
+            "url": "http://modern:9001",
+            "workspace_id": str(ws.id),
+            "peer_client_version": "v2",
+        },
+    )
+    assert first.status_code == 202
+    # Re-invite without peer_client_version.
+    second = await client.post(
+        "/api/peer/invite",
+        json={
+            "orch_id": "orch-modern",
+            "name": "Modern",
+            "url": "http://modern:9001",
+            "workspace_id": str(ws.id),
+        },
+    )
+    assert second.status_code == 202
+    listed = await client.get(
+        "/api/peer/peers",
+        params={"workspace_id": str(ws.id)},
+    )
+    rows = listed.json()
+    assert len(rows) == 1
+    assert rows[0]["client_kind"] == "v2"
+
+
+async def test_invite_rejects_unknown_peer_client_version(client, db) -> None:
+    """PR-B1: the Pydantic ``Literal["v2"]`` keeps the wire schema tight
+    — typos like ``"v3"`` are rejected with 422 before the registry sees
+    them, so a malformed version never silently downgrades a peer."""
+    ws = await _seed_workspace(db)
+    resp = await client.post(
+        "/api/peer/invite",
+        json={
+            "orch_id": "orch-x",
+            "name": "X",
+            "url": "http://x:9001",
+            "workspace_id": str(ws.id),
+            "peer_client_version": "v3",  # not yet released
+        },
+    )
+    assert resp.status_code == 422, resp.text

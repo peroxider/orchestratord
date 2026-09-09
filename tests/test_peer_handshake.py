@@ -470,3 +470,107 @@ def test_parse_sse_line_bad_type_returns_none() -> None:
 def test_peer_client_error_is_exception() -> None:
     assert issubclass(PeerClientError, Exception)
     assert issubclass(PeerAuthError, Exception)
+
+
+# -- PR-B1: transport="auto"|"rest"|"frame" selector semantics --
+
+
+def test_client_default_transport_is_auto() -> None:
+    """PR-B1: ``PeerClient.__init__`` defaults to ``transport="auto"``.
+
+    A v2 client defaults to the modern selector; v1 callers must
+    opt into ``transport="rest"`` explicitly to keep the legacy
+    behavior. This test pins the default so the contract cannot drift
+    to a v1-compat path silently.
+    """
+    import inspect
+
+    sig = inspect.signature(PeerClient.__init__)
+    assert sig.parameters["transport"].default == "auto"
+
+
+def test_auto_logs_legacy_protocol_warning_when_card_has_no_transports(
+    tmp_path, caplog
+) -> None:
+    """PR-B1 / PR-B2 invariant: a remote on the legacy Phase 1 wire
+    (no ``transports[]`` in card) triggers a one-time warning, then
+    falls back to the injected factory. The PR-B2 factory-swap path
+    is bypassed in this branch — proving the legacy compatibility
+    promise is unchanged by Phase B."""
+    import logging
+
+    transport_a = MemoryTransport()
+    client = _make_client(lambda: transport_a, tmp_path)
+    # Inject a card with no transports[] — the legacy Phase 1 shape.
+    client.card = {
+        "protocol_version": "peer/1",
+        "orch_id": "orch-LEGACY",
+        "transports": [],  # empty / missing
+    }
+    with caplog.at_level(logging.WARNING):
+        client._negotiate_transport()
+    # Factory is preserved (Phase 1 fallback path).
+    assert client._transport_factory is not None
+    # Warning text mentions legacy protocol / transports[].
+    messages = [r.message for r in caplog.records]
+    assert any("legacy" in m.lower() or "transports" in m for m in messages), (
+        f"expected legacy protocol warning, got {messages!r}"
+    )
+
+
+def test_client_explicit_rest_logs_deprecation(tmp_path, caplog) -> None:
+    """PR-B1: ``transport="rest"`` is explicit legacy and emits a
+    deprecation warning the operator should see exactly once."""
+    import logging
+
+    transport_a = MemoryTransport()
+    client = _make_client(lambda: transport_a, tmp_path, transport="rest")
+    with caplog.at_level(logging.WARNING):
+        client._negotiate_transport()
+    messages = [r.message for r in caplog.records]
+    assert any(
+        "deprecated" in m.lower() or "transport='rest'" in m for m in messages
+    ), f"expected deprecation warning, got {messages!r}"
+
+
+def test_client_explicit_frame_succeeds_when_url_provided(tmp_path) -> None:
+    """PR-B2: ``transport="frame"`` actually swaps to ``HttpsFrameTransport``
+    once a frame URL is supplied. The PR-B1 ``NotImplementedError`` path
+    is gone — the binding is real."""
+    transport_a = MemoryTransport()
+    client = _make_client(lambda: transport_a, tmp_path, transport="frame")
+    client.card = {
+        "transports": [
+            {
+                "protocol": "frame",
+                "url": "https://h/peer/v1/stream",
+                "version": "1",
+            },
+        ],
+    }
+    client._frame_url = "https://h/peer/v1/stream"
+    # Must NOT raise NotImplementedError; must NOT raise at all.
+    client._negotiate_transport()
+    # The factory has been swapped to one that opens HttpsFrameTransport.
+    assert client._transport_factory is not None
+    assert callable(client._transport_factory)
+
+
+def test_client_explicit_frame_raises_when_no_url(tmp_path) -> None:
+    """PR-B2: ``transport="frame"`` without a frame URL is a clear,
+    actionable error — not a silent downgrade to the injected factory."""
+    transport_a = MemoryTransport()
+    client = _make_client(lambda: transport_a, tmp_path, transport="frame")
+    client.card = {
+        "transports": [
+            {
+                "protocol": "frame",
+                "url": "https://h/peer/v1/stream",
+                "version": "1",
+            },
+        ],
+    }
+    # No ``_frame_url`` set — open() failed to discover one.
+    assert client._frame_url is None
+    with pytest.raises(PeerClientError, match="frame URL"):
+        client._negotiate_transport()

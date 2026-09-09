@@ -29,7 +29,12 @@ from orchestratord.db import models as orm
 from orchestratord.domain.auth_token import issue_api_token
 from orchestratord.peer.card import ensure_orch_id
 from orchestratord.peer.group import GroupError, GroupManager
-from orchestratord.peer.registry import list_peers, remove_peer, set_peer_status
+from orchestratord.peer.registry import (
+    CLIENT_KIND_V1_SUNSET,
+    list_peers,
+    remove_peer,
+    set_peer_status,
+)
 
 
 def add_peer_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -148,9 +153,18 @@ async def _run_list(workspace_id: UUID, status: str | None) -> int:
     if not rows:
         print("(no peers)")
         return 0
-    print(f"{'ORCH_ID':<24} {'STATUS':<10} NAME / URL")
+    print(
+        f"{'ORCH_ID':<24} {'STATUS':<10} {'CLIENT_KIND':<12} NAME / URL"
+    )
     for row in rows:
-        print(f"{row.orch_id:<24} {row.status:<10} {row.name} / {row.url}")
+        # PR-B1: a trailing ⚠ marks legacy (Phase 1) peers so the operator
+        # can spot them at a glance. The column is always present so
+        # ``awk``/``jq`` pipelines downstream keep a stable shape.
+        marker = " ⚠" if row.client_kind == CLIENT_KIND_V1_SUNSET else ""
+        print(
+            f"{row.orch_id:<24} {row.status:<10} "
+            f"{row.client_kind:<12} {row.name} / {row.url}{marker}"
+        )
     return 0
 
 

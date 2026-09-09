@@ -25,6 +25,13 @@ from orchestratord.db.models.peer import Peer
 STATUS_PENDING = "pending"
 STATUS_ACCEPTED = "accepted"
 
+# PR-B1: stable client-version tag stamped on each peer row. ``v1_sunset``
+# marks Phase 1 clients (no transports[] in card, no peer_client_version
+# in invite); ``v2`` marks Phase B clients that opt in. Migration 0048
+# backfills existing rows with ``v1_sunset``.
+CLIENT_KIND_V1_SUNSET = "v1_sunset"
+CLIENT_KIND_V2 = "v2"
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -79,6 +86,7 @@ async def upsert_peer(
     capabilities: list[str] | None = None,
     remote_workspace_id: str | None = None,
     card: dict[str, Any] | None = None,
+    client_kind: str | None = None,
 ) -> Peer:
     """Create or refresh the registry row for (workspace_id, orch_id).
 
@@ -87,6 +95,13 @@ async def upsert_peer(
     fields (name/url/capabilities/card) refresh in place without
     touching trust state, so a re-invite never silently resurrects a
     peer the operator rejected.
+
+    PR-B1: ``client_kind`` is stamped on INSERT (defaulting to
+    :data:`CLIENT_KIND_V1_SUNSET` when the caller does not specify it)
+    and is **preserved on UPDATE** — a re-invite that lacks
+    ``peer_client_version`` must not downgrade an already-classified
+    peer back to ``v1_sunset``. Callers that need to force-update the
+    classification can pass the new value explicitly.
 
     The read-then-insert is race-guarded by ``uq_peers_workspace_orch``:
     a concurrent invite for the same key loses its INSERT inside a
@@ -101,6 +116,9 @@ async def upsert_peer(
             peer.remote_workspace_id = remote_workspace_id
             peer.capabilities = list(capabilities or [])
             peer.card = card
+            # PR-B1: client_kind is intentionally NOT refreshed here —
+            # see docstring invariant. Caller passes explicit value to
+            # override.
             await session.flush()
             return peer
         peer = Peer(
@@ -114,6 +132,9 @@ async def upsert_peer(
             token_id=None,
             capabilities=list(capabilities or []),
             card=card,
+            client_kind=client_kind
+            if client_kind is not None
+            else CLIENT_KIND_V1_SUNSET,
             created_at=_now(),
             accepted_at=None,
         )
