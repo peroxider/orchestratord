@@ -108,7 +108,7 @@ async def test_check_file_changes_offloads_slow_git_status_to_thread(monkeypatch
     and the heartbeat below never ticks; with it the loop stays free.
     """
     monkeypatch.setattr(
-        "orchestratord.git.utils.get_file_status",
+        "orchestratord.kernel.git_probe.get_file_status",
         _slow_get_file_status(2.0),
     )
 
@@ -186,7 +186,7 @@ async def test_turn_complete_dispatch_does_not_block_event_loop(monkeypatch):
     scheduled heartbeat from ticking.
     """
     monkeypatch.setattr(
-        "orchestratord.git.utils.get_file_status",
+        "orchestratord.kernel.git_probe.get_file_status",
         _slow_get_file_status(2.0),
     )
 

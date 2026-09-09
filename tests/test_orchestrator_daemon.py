@@ -1189,6 +1189,9 @@ class TestRecoverPersistentStates(unittest.IsolatedAsyncioTestCase):
             orch._process_review_feedback = AsyncMock()
             orch._process_pending_rebase_conflicts = AsyncMock()
             orch._process_pr_conflict_scan = AsyncMock()
+            from orchestratord.applications.issue_pr.provider import IssuePrWorkProvider
+
+            orch._work_provider = IssuePrWorkProvider(orch)
 
             # Simulate daemon startup recovery.
             await orch._recover_persistent_states()
