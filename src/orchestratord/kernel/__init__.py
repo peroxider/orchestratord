@@ -6,3 +6,7 @@ local_tracker / review_feedback / repro_gate / premise_check / intent /
 tracker* / approval_policy / applications / git）。
 依赖规则由 tests/test_architecture.py 固化。
 """
+
+from .kernel import OrchestrationKernel
+
+__all__ = ["OrchestrationKernel"]

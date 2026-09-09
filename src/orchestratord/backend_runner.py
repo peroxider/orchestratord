@@ -397,6 +397,7 @@ class BackendRunner:
         session = RunSession(
             subject=ctx.subject,
             task=task,
+            run_context=ctx,
             workspace=ctx.workspace,
             run_kind=task.kind,
             run_id=ctx.run_id,

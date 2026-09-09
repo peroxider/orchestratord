@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 
 class _IssueDispatchHost(Protocol):
-    """宿主（Orchestrator）暴露给 WorkProvider 的最小派发接缝。"""
+    """宿主暴露给 WorkProvider 的机制组合接缝。
+
+    Issue intent/rebase/feedback operations are resolved by the application
+    facade through the composition root's finite compatibility lookup; they
+    are deliberately absent from this protocol.
+    """
 
     tracker: TrackerAdapter
     workflow: WorkflowConfig
@@ -52,46 +57,6 @@ class _IssueDispatchHost(Protocol):
         message: str = "",
         payload: dict[str, Any] | None = None,
     ) -> None: ...
-
-    def _issue_payload(self, issue: Issue, **extra: Any) -> dict[str, Any]: ...
-
-    async def _resolve_intent(
-        self, issue: Issue
-    ) -> tuple[Intent, CommandIntent | None, str | None]: ...
-
-    def _is_command_author_eligible(
-        self, issue: Issue, author_login: str | None
-    ) -> bool: ...
-
-    async def _reject_unauthorized_command(
-        self, issue: Issue, command_intent: CommandIntent
-    ) -> None: ...
-
-    def _check_retry_rate_limit(
-        self, issue: Issue, *, force: bool = False
-    ) -> bool: ...
-
-    async def _post_command_acknowledgement(
-        self, issue: Issue, command: Command
-    ) -> str | None: ...
-
-    async def _sync_tracker_issue_state(
-        self, issue_id: str, state: str
-    ) -> bool: ...
-
-    def _uses_review_feedback_followup(self, record: Any) -> bool: ...
-
-    async def _launch_followup_with_pending_reviews(self, issue: Issue) -> bool: ...
-
-    def _check_rebase_rate_limit(
-        self, issue: Issue, *, force: bool = False
-    ) -> bool: ...
-
-    async def _process_rebase_intent(
-        self, issue: Issue, *, force: bool | None = None
-    ) -> PRRebaseResult | None: ...
-
-    async def _dependencies_satisfied(self, issue: Issue) -> bool: ...
 
     async def _launch_issue(self, issue: Issue) -> None: ...
 

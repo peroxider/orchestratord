@@ -22,6 +22,7 @@ class KernelEventKind(str, Enum):
     """机制事件种类（§4.2 on_kernel_event 的载荷类型之一）。"""
 
     KERNEL_STARTED = "kernel_started"
+    POLL_TICK = "poll_tick"
     RUN_STARTED = "run_started"
     RUN_FINISHED = "run_finished"
     RUN_CANCELLED = "run_cancelled"

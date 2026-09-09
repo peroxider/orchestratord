@@ -60,6 +60,9 @@ class RunSession:
     subject: Any  # Renamed from deprecated `issue` in P6 — see class docstring.
     workspace: Workspace
     task: "AgentTask | None" = None  # NEW: generic task abstraction
+    # Materialized kernel context.  Applications may attach business data
+    # here; the mechanism layer only carries the object through the run.
+    run_context: Any | None = None
     # Orchestrator logical conversation metadata.  None remains valid for
     # legacy callers that construct a session directly.
     conversation_id: str | None = None
@@ -276,11 +279,11 @@ class RunSession:
 AgentSession = RunSession
 
 
-@dataclass
+@dataclass(init=False)
 class RetryItem:
     """Item queued for retry."""
 
-    issue_id: str
+    dedup_key: str
     attempt: int
     delay_seconds: float
     identifier: str = ""
@@ -291,3 +294,38 @@ class RetryItem:
     # How many times a tracker-miss/fetch-failure has
     # re-queued this item (ceiling in Orchestrator._retry_requeue_limit).
     requeue_count: int = 0
+
+    def __init__(
+        self,
+        dedup_key: str = "",
+        attempt: int = 1,
+        delay_seconds: float = 0.0,
+        identifier: str = "",
+        error: str = "",
+        worker_host: str | None = None,
+        workspace_path: str = "",
+        scheduled_at: float | None = None,
+        requeue_count: int = 0,
+        *,
+        issue_id: str | None = None,
+    ) -> None:
+        # ``issue_id`` is accepted only as a source-compatible boundary for
+        # persisted/legacy callers.  Kernel code uses the generic dedup_key.
+        self.dedup_key = dedup_key or issue_id or ""
+        self.attempt = attempt
+        self.delay_seconds = delay_seconds
+        self.identifier = identifier
+        self.error = error
+        self.worker_host = worker_host
+        self.workspace_path = workspace_path
+        self.scheduled_at = time.time() if scheduled_at is None else scheduled_at
+        self.requeue_count = requeue_count
+
+    @property
+    def issue_id(self) -> str:
+        """Deprecated compatibility alias; new mechanism code uses dedup_key."""
+        return self.dedup_key
+
+    @issue_id.setter
+    def issue_id(self, value: str) -> None:
+        self.dedup_key = value

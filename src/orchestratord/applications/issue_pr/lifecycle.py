@@ -43,8 +43,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from orchestratord.events import EventLevel
 from orchestratord.kernel.application import CommandHandler, Outcome, PreparedRun
+from orchestratord.kernel.events import KernelEvent, KernelEventKind
+from orchestratord.kernel.run_context import RunContext
 from orchestratord.modes.base import DEFAULT_MODE, ModeDecision
 from orchestratord.tracker import Intent, PullRequestCapability, supports
+from .commands import IssuePrCommands
+from .interpret import IssuePrInterpretation
 
 if TYPE_CHECKING:
     from orchestratord.config.schema import WorkflowConfig
@@ -85,18 +89,6 @@ class _IssueLifecycleHost(Protocol):
 
     def _session_payload(self, session: Any, **extra: Any) -> dict[str, Any]: ...
 
-    async def _dependencies_satisfied(self, issue: Issue) -> bool: ...
-
-    async def _prepare_intent_reset(self, issue: Issue) -> None: ...
-
-    async def _sync_tracker_issue_state(self, issue_id: str, state: str) -> bool: ...
-
-    def _uses_review_feedback_followup(self, record: Any) -> bool: ...
-
-    async def _launch_followup_with_pending_reviews(self, issue: Issue) -> bool: ...
-
-    def _prepare_intent_session(self, session: AgentSession) -> None: ...
-
     async def _schedule_retry(
         self,
         session: AgentSession,
@@ -104,19 +96,6 @@ class _IssueLifecycleHost(Protocol):
         delay_base_ms: int | None = None,
     ) -> bool: ...
 
-    async def _update_issue_summary(self, session: AgentSession) -> None: ...
-
-    async def _handle_review_followup_control(self, issue_id: str, extra: str) -> None: ...
-
-    async def _handle_rebase_control(self, issue_id: str, extra: str) -> None: ...
-
-    async def _handle_review_approve_control(self, issue_id: str, comment: str) -> None: ...
-
-    async def _handle_review_retry_control(self, issue_id: str, feedback: str) -> None: ...
-
-    async def _handle_retry_control(self, issue_id: str, reason: str) -> None: ...
-
-    async def _handle_followup_control(self, issue_id: str, extra: str) -> bool: ...
 
 
 class IssueToPrLifecycle:
@@ -134,6 +113,92 @@ class IssueToPrLifecycle:
         # C2c 两段式装配（DESIGN §4.2/G2）：组合根可先以无宿主形态构造
         # （宿主彼时尚未存在），由 Orchestrator.__init__ 回绑 ``_host``。
         self._host = host
+        self._interpretation = IssuePrInterpretation(host)
+        self._commands = IssuePrCommands(host)
+
+    def bind_host(self, host: _IssueLifecycleHost) -> None:
+        """Complete two-phase composition-root wiring."""
+        self._host = host
+        self._interpretation.host = host
+        self._commands.host = host
+
+    def work_provider(self) -> Any:
+        """Return the provider assembled by the composition root."""
+        return getattr(self._host, "_work_provider", None)
+
+    def prompt_profiles(self) -> dict[str, str]:
+        """Issue→PR prompt profiles are registered by the prompt module."""
+        return {}
+
+    async def prepare_run(self, item: Any, ctx: RunContext) -> PreparedRun:
+        """Full-signature Application seam.
+
+        The legacy daemon still uses the three-seam launch path because an
+        issue workspace must be created before a generic AgentTask exists.
+        This adapter keeps that ordering explicit while exposing the final
+        protocol to the Kernel and to new embedders.
+        """
+        issue = item.business.get("issue") if item is not None else None
+        if issue is None:
+            raise ValueError("issue_pr prepare_run requires WorkItem.business['issue']")
+        prepared = await self.prepare_launch(issue)
+        if prepared is None:
+            return PreparedRun(business={"gated": True})
+        return prepared
+
+    async def interpret_result(
+        self, item: Any, result: Any, ctx: RunContext
+    ) -> Outcome:
+        """Adapt a generic AgentTaskResult into the existing issue interpreter."""
+        issue = item.business.get("issue") if item is not None else None
+        if issue is None:
+            return Outcome.dispose("missing_issue")
+        from orchestratord.session_state import AgentSession
+
+        session = AgentSession(
+            subject=issue,
+            workspace=ctx.workspace,
+            task=ctx.task,
+            run_context=ctx,
+            run_id=getattr(result, "run_id", None) or ctx.run_id,
+            conversation_id=getattr(result, "conversation_id", None) or ctx.conversation_id,
+            status=getattr(result, "status", "failed"),
+            output_text=getattr(result, "output_text", ""),
+            turn_count=getattr(result, "turn_count", 0),
+            tool_count=getattr(result, "tool_count", 0),
+            session_end_reason=getattr(result, "session_end_reason", None),
+            session_end_summary=getattr(result, "session_end_summary", ""),
+            verification_status=getattr(result, "verification_status", None),
+            verification_output=getattr(result, "verification_output", None),
+            report_path=getattr(result, "report_path", None),
+        )
+        session.business.update(ctx.business)
+        return await self.interpret(session)
+
+    async def execute_session(self, session: AgentSession) -> None:
+        """Own the issue-specific execution adapter during the transition.
+
+        The host callback is deliberately a single opaque execution seam;
+        Kernel never sees issue/task mapping, reproduction gates, premise
+        checks, or git workspace policy.
+        """
+        from .runner import run_issue_body
+
+        await run_issue_body(self._host, session)
+
+    async def on_kernel_event(self, event: KernelEvent) -> None:
+        """Run the issue-specific periodic loops on Kernel ``POLL_TICK``."""
+        if event.kind is not KernelEventKind.POLL_TICK or self._host is None:
+            return
+        phase = event.payload.get("phase", "all")
+        if phase in ("before_retry", "all"):
+            await self._host._clarification_resolver.poll_clarification_answers()
+        if phase not in ("after_retry", "all"):
+            return
+        await self._host._process_escalated_issues()
+        await self._host._process_review_feedback()
+        await self._host._process_pending_rebase_conflicts()
+        await self._host._process_pr_conflict_scan()
 
     async def prepare_launch(self, issue: Issue) -> PreparedRun | None:
         """执行前业务装配（协议 prepare_run 的 interim 直参形态）。
@@ -785,30 +850,30 @@ class IssueToPrLifecycle:
         ``_apply_control_command`` / ``_handle_gateway_control``（§4.2
         明文；其 sync-context retry 分支随 dispatch-loop 切片迁入）。
         """
-        host = self._host
+        commands = self._commands
 
         async def _review_followup(issue_id: str, extra: str) -> bool:
-            await host._handle_review_followup_control(issue_id, extra)
+            await commands._handle_review_followup_control(issue_id, extra)
             return True
 
         async def _rebase(issue_id: str, extra: str) -> bool:
-            await host._handle_rebase_control(issue_id, extra)
+            await commands._handle_rebase_control(issue_id, extra)
             return True
 
         async def _review_approve(issue_id: str, extra: str) -> bool:
-            await host._handle_review_approve_control(issue_id, extra)
+            await commands._handle_review_approve_control(issue_id, extra)
             return True
 
         async def _review_retry(issue_id: str, extra: str) -> bool:
-            await host._handle_review_retry_control(issue_id, extra)
+            await commands._handle_review_retry_control(issue_id, extra)
             return True
 
         async def _retry(issue_id: str, extra: str) -> bool:
-            await host._handle_retry_control(issue_id, extra)
+            await commands._handle_retry_control(issue_id, extra)
             return True
 
         async def _followup(issue_id: str, extra: str) -> bool:
-            return bool(await host._handle_followup_control(issue_id, extra))
+            return bool(await commands._handle_followup_control(issue_id, extra))
 
         return {
             "review_followup": _review_followup,

@@ -104,7 +104,6 @@ class Application(Protocol):
         """业务模板注册进 PromptRouter（kernel.prompt_core，见 §4.5）。"""
         ...
 
-    def on_kernel_event(self, event: Any) -> None:
-        """订阅机制事件（run started/finished/cancelled），驱动
-        IssueRegistry 状态机、tracker 状态同步、PR 同步。"""
+    def on_kernel_event(self, event: Any) -> Any:
+        """订阅机制事件；实现可返回普通值或 awaitable。"""
         ...

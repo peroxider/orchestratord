@@ -48,6 +48,7 @@ from .kernel.dispatch import (
     split_ready_retries,
 )
 from .kernel.events import KernelHooks
+from .kernel.kernel import OrchestrationKernel
 from .kernel.mode_dispatcher import build_mode_selector, register_collaboration_modes
 from .kernel.sink_router import attach_asciicast_sink, build_base_session_sink
 from .kernel.telemetry import (
@@ -122,6 +123,49 @@ _CONTINUATION_RETRY_DELAY_MS = 1_000
 # them (they are not in the failure guidance table and would otherwise
 # fall back to the generic "未知错误" fallback).
 _SUCCESS_END_REASONS = frozenset({"success"})
+
+# Compatibility lookup only.  Implementations belong to the issue→PR
+# application; keeping this allow-list closed prevents the composition root
+# from silently becoming a general-purpose business service locator.
+_ISSUE_APPLICATION_METHODS = frozenset(
+    {
+        "_dependencies_satisfied",
+        "_process_escalated_issues",
+        "_process_review_feedback",
+        "_process_pending_rebase_conflicts",
+        "_process_pr_conflict_scan",
+        "_resolve_intent",
+        "_resolve_command_intent",
+        "_post_command_acknowledgement",
+        "_is_command_author_eligible",
+        "_reject_unauthorized_command",
+        "_check_retry_rate_limit",
+        "_post_retry_rejection",
+        "_prepare_intent_reset",
+        "_sync_tracker_issue_state",
+        "_check_rebase_rate_limit",
+        "_process_rebase_intent",
+        "_launch_rebase_resolution",
+        "_finalize_rebase_resolution",
+        "_rebase_conflict_resolved",
+        "_prepare_rebase_session",
+        "_prepare_intent_session",
+        "_uses_review_feedback_followup",
+        "_complete_read_only_chat_followup",
+        "_launch_followup_with_pending_reviews",
+        "_launch_review_followup",
+        "_update_issue_summary",
+        "_apply_review_rules",
+        "_reply_to_processed_feedback",
+        "_post_feedback_summary",
+        "_handle_rebase_control",
+        "_handle_review_followup_control",
+        "_handle_review_retry_control",
+        "_handle_review_approve_control",
+        "_handle_retry_control",
+        "_handle_followup_control",
+    }
+)
 
 
 def _operator_failure_detail(exc: BaseException) -> str:
@@ -500,12 +544,28 @@ class Orchestrator:
         # timing contract); lifecycle.py does not touch the
         # orchestration_subsystem seam, so eager construction is safe.
         if application is not None:
-            application._host = self
+            bind_host = getattr(application, "bind_host", None)
+            if callable(bind_host):
+                bind_host(self)
+            else:
+                application._host = self
             self._issue_app = application
         else:
             from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
 
             self._issue_app = IssueToPrLifecycle(self)
+        # The Kernel owns loop cadence, task bookkeeping and poll dispatch.
+        # Keep the historical attributes as aliases for compatibility with
+        # CLI/tests while making the ownership boundary explicit.
+        self._kernel = OrchestrationKernel(
+            runtime=self,
+            state=self._state,
+            shutdown_event=self._shutdown_event,
+            hooks=self._kernel_hooks,
+        )
+        self._semaphore = self._kernel.semaphore
+        self._tasks = self._kernel.tasks
+        self._issue_tasks = self._kernel.run_tasks
         # Do NOT keep a single :class:`ProgressReporter` here.
         # Per-session progress is fanned out via
         # :meth:`_build_session_sink` (a fresh
@@ -515,6 +575,32 @@ class Orchestrator:
         # The shared ``_progress_context`` stays because every
         # per-session :class:`ToolContextProgressSink` writes into the
         # same ``ToolContext.tasks[id].metadata.progress_stages`` dict.
+
+    def __getattr__(self, name: str) -> Any:
+        """Resolve the finite legacy business surface through the app.
+
+        This keeps old integrations that call ``orch._resolve_intent()``
+        source-compatible while ensuring the named implementation is owned
+        by ``applications.issue_pr``. Unknown names fail normally.
+        """
+        if name not in _ISSUE_APPLICATION_METHODS:
+            raise AttributeError(name)
+        try:
+            app = object.__getattribute__(self, "_issue_app")
+        except AttributeError as exc:
+            # Lightweight __new__ test/CLI adapters predate the two-phase
+            # application binding; retain their direct legacy behavior.
+            try:
+                return object.__getattribute__(self, f"_legacy{name}")
+            except AttributeError:
+                raise AttributeError(name) from exc
+        for target in (
+            getattr(app, "_interpretation", None),
+            getattr(app, "_commands", None),
+        ):
+            if target is not None and hasattr(target, name):
+                return getattr(target, name)
+        raise AttributeError(name)
 
     def _build_session_sink(self, task_id: str) -> Any:
         """Build a fresh :class:`CompositeProgressSink` for one session.
@@ -771,7 +857,11 @@ class Orchestrator:
         logger.debug("Updated %s with %d patterns", ignore_path, len(new_patterns))
 
     async def run(self) -> None:
-        """Main polling loop. Runs until cancelled."""
+        """Compatibility entry point; the Kernel owns the daemon loop."""
+        await self._kernel.run()
+
+    async def _kernel_start(self) -> tuple[float, str]:
+        """Prepare host resources for :class:`OrchestrationKernel`."""
         # 宿主钩子（DESIGN §4.7）：在进入轮询/sink 组装前调用 on_kernel_start，
         # 宿主在此完成 IM 网关等会话级装配（取代旧 monkey-patch 的注入时点）。
         if self._kernel_hooks is not None:
@@ -826,59 +916,44 @@ class Orchestrator:
         self._recover_pending_retries()
         await self._recover_persistent_states()
 
-        # Start metadata heartbeat for CLI discovery
-        heartbeat_task = asyncio.create_task(self._metadata_heartbeat_loop())
-        self._tasks.add(heartbeat_task)
+        return orch_start, orch_session_id
 
+    async def _kernel_record_error(self, exc: BaseException) -> None:
         try:
-            while not self._shutdown_event.is_set():
-                await self._poll_and_dispatch()
-                try:
-                    await asyncio.wait_for(
-                        self._shutdown_event.wait(),
-                        timeout=self._state.poll_interval_ms / 1000.0,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+            from orchestratord.telemetry import record_error
 
-            logger.info("Orchestrator shutting down")
-            await self._cancel_all_tasks()
-            exit_status = 0
-        except Exception as exc:
-            # Best-effort error event with stable fingerprint.
-            # Failures are swallowed.
-            try:
-                from orchestratord.telemetry import record_error
+            record_error(session_id=self._derive_orchestrator_session_id(), exc=exc)
+        except Exception:
+            pass
 
-                record_error(session_id=orch_session_id, exc=exc)
-            except Exception:
-                pass
-            exit_status = 1
-            raise
-        finally:
-            # Best-effort session_end + command_run.
-            try:
-                from orchestratord.telemetry import (
-                    record_command_run,
-                    record_session_end,
-                )
+    async def _kernel_apply_outcome(self, item: Any, outcome: Any) -> None:
+        """Runtime bridge for outcomes already interpreted by IssueToPr."""
+        # IssueToPr's interpreter intentionally keeps registry/tracker side
+        # effects together for behavioral parity.  Kernel still records the
+        # decision and owns any future generic scheduling extension.
+        self._last_kernel_outcome = (item.dedup_key, outcome)
 
-                duration_s = time.monotonic() - orch_start
-                record_session_end(
-                    session_id=orch_session_id,
-                    duration_s=duration_s,
-                    exit_status=exit_status,
-                )
-                record_command_run(
-                    session_id=orch_session_id,
-                    command_name="orchestrator",
-                    mode="daemon",
-                    success=(exit_status == 0),
-                    duration_s=duration_s,
-                    exit_status=exit_status,
-                )
-            except Exception:
-                pass
+    async def _kernel_finish(self, started: tuple[float, str], exit_status: int) -> None:
+        try:
+            from orchestratord.telemetry import record_command_run, record_session_end
+
+            orch_start, orch_session_id = started
+            duration_s = time.monotonic() - orch_start
+            record_session_end(
+                session_id=orch_session_id,
+                duration_s=duration_s,
+                exit_status=exit_status,
+            )
+            record_command_run(
+                session_id=orch_session_id,
+                command_name="orchestrator",
+                mode="daemon",
+                success=(exit_status == 0),
+                duration_s=duration_s,
+                exit_status=exit_status,
+            )
+        except Exception:
+            pass
 
     def _derive_orchestrator_session_id(self) -> str:
         """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
@@ -925,7 +1000,7 @@ class Orchestrator:
             remaining = max(0.0, record.next_retry_at - now)
             attempt = record.retry_count or 1
             retry = RetryItem(
-                issue_id=record.issue_id,
+                dedup_key=record.issue_id,
                 attempt=attempt,
                 # Remaining wait until the persisted due time; overdue
                 # plans (``next_retry_at`` in the past, e.g. the daemon
@@ -1051,43 +1126,29 @@ class Orchestrator:
         )
 
     async def _poll_and_dispatch(self) -> None:
-        """Run one poll cycle: mechanism wrappers, then the issue→PR
-        business chain via the WorkProvider seam (DESIGN §4.1)."""
-        self.status_dashboard.on_poll_start()
-        self._state.poll_check_in_progress = True
+        """Compatibility seam for callers that drive one Kernel tick."""
+        kernel = getattr(self, "_kernel", None)
+        if kernel is None:
+            # A few embedders construct a lightweight Orchestrator test
+            # double without running __init__.  Preserve that supported seam
+            # while still routing the actual cycle through Kernel.
+            kernel = OrchestrationKernel(
+                runtime=self,
+                state=self._state,
+                shutdown_event=getattr(self, "_shutdown_event", asyncio.Event()),
+            )
+            self._kernel = kernel
+        else:
+            # Keep compatibility with tests/embedders that replace the state
+            # object after construction.
+            kernel.state = self._state
+        if hasattr(self, "_tasks"):
+            kernel.tasks = self._tasks
+        if hasattr(self, "_issue_tasks"):
+            kernel.run_tasks = self._issue_tasks
+        await kernel.dispatch_once()
 
-        try:
-            self._refresh_dynamic_title_prefix_filter()
-            # Process lifecycle control commands (pause/resume/stop/takeover)
-            await self._process_control_commands()
-
-            # Poll clarification answers (Channel 2 + Channel 3)
-            await self._clarification_resolver.poll_clarification_answers()
-
-            # Process retry queue first
-            await self._process_retry_queue()
-
-            # Handle escalated (clarification-exhausted) issues
-            await self._process_escalated_issues()
-
-            await self._process_review_feedback()
-
-            # Launch agent_rebase for PRs with content conflicts
-            await self._process_pending_rebase_conflicts()
-            # Optional PR mergeable-state scan (opt-in via workflow.md)
-            await self._process_pr_conflict_scan()
-
-            # Issue→PR business chain (fetch → intent gates → launch):
-            # owned by the issue→PR WorkProvider (C2a onward).
-            await self._work_provider.poll()
-
-        finally:
-            self._state.poll_check_in_progress = False
-            self.status_dashboard.on_poll_end()
-            # Poll 结束后广播澄清状态到 dashboard
-            self._broadcast_clarification_status()
-
-    async def _dependencies_satisfied(self, issue: Issue) -> bool:
+    async def _legacy_dependencies_satisfied(self, issue: Issue) -> bool:
         dependencies = [dep for dep in getattr(issue, "depends_on", []) if dep]
         if not dependencies:
             return True
@@ -1106,7 +1167,7 @@ class Orchestrator:
             return False
         return True
 
-    async def _resolve_intent(
+    async def _legacy_resolve_intent(
         self,
         issue: Issue,
     ) -> tuple[Intent, "CommandIntent | None", str | None]:
@@ -1197,7 +1258,7 @@ class Orchestrator:
 
         return merged, command_intent_obj, intent_source
 
-    async def _resolve_command_intent(self, issue: Issue) -> "CommandIntent | None":
+    async def _legacy_resolve_command_intent(self, issue: Issue) -> "CommandIntent | None":
         """Fetch and parse the most recent /agent command.
 
         The returned `CommandIntent` carries the comment
@@ -1223,7 +1284,7 @@ class Orchestrator:
             )
             return None
 
-    async def _post_command_acknowledgement(
+    async def _legacy_post_command_acknowledgement(
         self,
         issue: Issue,
         command: "Command",
@@ -1258,7 +1319,7 @@ class Orchestrator:
     # Role check + rate-limit guard
     # ------------------------------------------------------------------
 
-    def _is_command_author_eligible(
+    def _legacy_is_command_author_eligible(
         self,
         issue: Issue,
         author_login: str | None,
@@ -1300,7 +1361,7 @@ class Orchestrator:
         issue_author = getattr(record, "author_login", None) if record else None
         return bool(issue_author and author_login == issue_author)
 
-    async def _reject_unauthorized_command(
+    async def _legacy_reject_unauthorized_command(
         self,
         issue: Issue,
         command_intent: "CommandIntent",
@@ -1350,7 +1411,7 @@ class Orchestrator:
             author=command_intent.author_login or "unknown",
         )
 
-    def _check_retry_rate_limit(
+    def _legacy_check_retry_rate_limit(
         self,
         issue: Issue,
         *,
@@ -1411,7 +1472,7 @@ class Orchestrator:
             asyncio.run(self._post_retry_rejection(issue_id, current, max_retries))
         return False
 
-    async def _post_retry_rejection(
+    async def _legacy_post_retry_rejection(
         self,
         issue_id: str,
         current: int,
@@ -1493,7 +1554,7 @@ class Orchestrator:
                 exc,
             )
 
-    async def _prepare_intent_reset(self, issue: Issue) -> None:
+    async def _legacy_prepare_intent_reset(self, issue: Issue) -> None:
         """Apply registry-side reset before launching an issue.
 
         Reads the persisted intent from the registry (set in
@@ -1560,7 +1621,7 @@ class Orchestrator:
     # PR Conflict Auto-Resolution
     # ------------------------------------------------------------------
 
-    def _check_rebase_rate_limit(
+    def _legacy_check_rebase_rate_limit(
         self,
         issue: Issue,
         *,
@@ -1600,7 +1661,7 @@ class Orchestrator:
         )
         return False
 
-    async def _process_rebase_intent(
+    async def _legacy_process_rebase_intent(
         self,
         issue: Issue,
         *,
@@ -1693,7 +1754,7 @@ class Orchestrator:
             )
         return result
 
-    async def _process_pending_rebase_conflicts(self) -> None:
+    async def _legacy_process_pending_rebase_conflicts(self) -> None:
         """Launch ``agent_rebase`` for records with content conflicts.
 
         Iterates the registry, picks records with ``has_conflict=True``
@@ -1794,7 +1855,7 @@ class Orchestrator:
 
             task.add_done_callback(_finalize_rebase_callback)
 
-    async def _process_pr_conflict_scan(self) -> None:
+    async def _legacy_process_pr_conflict_scan(self) -> None:
         """Optional daemon scan of PR mergeable state.
 
         Default-disabled (opt-in via ``workflow.pr_conflict_scan.enabled``).
@@ -1855,7 +1916,7 @@ class Orchestrator:
                 )
             await self._process_rebase_intent(issue_obj)
 
-    async def _launch_rebase_resolution(self, issue: Issue) -> AgentSession:
+    async def _legacy_launch_rebase_resolution(self, issue: Issue) -> AgentSession:
         """Launch an ``agent_rebase`` session to resolve a content conflict.
 
         Mirrors ``_launch_issue`` for the conflict-resolution path.
@@ -1956,7 +2017,7 @@ class Orchestrator:
         # never blocks the poll loop.
         return session
 
-    async def _finalize_rebase_resolution(
+    async def _legacy_finalize_rebase_resolution(
         self,
         issue: Issue,
         session: AgentSession,
@@ -2042,7 +2103,7 @@ class Orchestrator:
             issue_id,
         )
 
-    async def _rebase_conflict_resolved(
+    async def _legacy_rebase_conflict_resolved(
         self,
         workspace_path: str | None,
         *,
@@ -2141,7 +2202,7 @@ class Orchestrator:
 
         return await asyncio.to_thread(_check)
 
-    def _prepare_rebase_session(self, session: AgentSession) -> None:
+    def _legacy_prepare_rebase_session(self, session: AgentSession) -> None:
         """Copy registry conflict metadata onto the session.
 
         Sets ``session.conflict_files`` from the registry so the
@@ -2154,7 +2215,7 @@ class Orchestrator:
             return
         session.conflict_files = tuple(record.conflict_files)
 
-    async def _handle_rebase_control(self, issue_id: str, extra: str) -> None:
+    async def _legacy_handle_rebase_control(self, issue_id: str, extra: str) -> None:
         """Handle a CLI-written rebase control file.
 
         Format::
@@ -2217,7 +2278,7 @@ class Orchestrator:
         # operator's explicit --force when set.
         await self._process_rebase_intent(issue_obj, force=force)
 
-    def _prepare_intent_session(self, session: AgentSession) -> None:
+    def _legacy_prepare_intent_session(self, session: AgentSession) -> None:
         """Wire the session for an intent-driven run.
 
         Called from `_launch_issue` immediately after the AgentSession
@@ -2293,7 +2354,7 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _uses_review_feedback_followup(record: Any) -> bool:
+    def _legacy_uses_review_feedback_followup(record: Any) -> bool:
         """Keep command follow-ups distinct from Dashboard conversation turns."""
         return bool(
             record is not None
@@ -2301,7 +2362,7 @@ class Orchestrator:
             and record.intent_source != "chat"
         )
 
-    async def _complete_read_only_chat_followup(
+    async def _legacy_complete_read_only_chat_followup(
         self,
         session: AgentSession,
     ) -> None:
@@ -2332,7 +2393,7 @@ class Orchestrator:
             issue_id,
         )
 
-    async def _process_review_feedback(self) -> None:
+    async def _legacy_process_review_feedback(self) -> None:
         config = self.workflow.review_feedback
         if not config.enabled:
             return
@@ -2370,7 +2431,7 @@ class Orchestrator:
             self._state.claimed.add(issue_id)
             await self._launch_review_followup(followup)
 
-    async def _launch_followup_with_pending_reviews(self, issue: Issue) -> bool:
+    async def _legacy_launch_followup_with_pending_reviews(self, issue: Issue) -> bool:
         """Fetch the PR's unprocessed review feedback and launch a review
         follow-up if any exists. Returns True when a follow-up was launched
         (or the issue has no PR to inspect), False when there is nothing to
@@ -2441,7 +2502,7 @@ class Orchestrator:
         await self._launch_review_followup(followup)
         return True
 
-    async def _launch_review_followup(self, followup: ReviewFollowup) -> None:
+    async def _legacy_launch_review_followup(self, followup: ReviewFollowup) -> None:
         issue = followup.issue
         issue.branch_name = followup.record.branch_name
         prompt = render_review_feedback(
@@ -2602,7 +2663,7 @@ class Orchestrator:
 
         task.add_done_callback(_unregister_issue_task)
 
-    async def _sync_tracker_issue_state(self, issue_id: str, state: str) -> bool:
+    async def _legacy_sync_tracker_issue_state(self, issue_id: str, state: str) -> bool:
         if not issue_id:
             return False
         try:
@@ -2940,696 +3001,10 @@ class Orchestrator:
         )
 
     async def _run_issue(self, session: AgentSession) -> None:
-        """Run agent for one issue with concurrency control."""
-        async with self._semaphore:
-            ran_agent = False
-            workspace_dirty: bool | None = None
-            try:
-                await self.workspace.run_before_run_hook(
-                    session.workspace,
-                    session.issue,
-                )
-                # The Issue-to-PR pipeline owns the mapping from tracker
-                # data to generic work.  Legacy runners still receive the
-                # session for lifecycle compatibility, but prompt building
-                # and all new capability code consume ``session.task``.
-                session.task = issue_to_agent_task(
-                    session.issue,
-                    attempt=session.attempt,
-                    previous_run_ids=session.previous_run_ids,
-                    workspace_path=str(session.workspace.path),
-                    max_turns=self.workflow.agent.max_turns,
-                    timeout_seconds=self.workflow.agent.run_timeout_ms / 1000.0,
-                    clarification_question=session.clarification_question,
-                    clarification_answer=session.clarification_answer,
-                    clarification_source=session.clarification_source,
-                    conflict_files=session.conflict_files,
-                    prompt_override=session.prompt_override,
-                    conversation_id=session.conversation_id,
-                )
-                ran_agent = True
-                try:
-                    # Build a fresh per-session progress sink so
-                    # concurrent issues no longer share the
-                    # ``_current_task_id`` / ``_phase_count`` mutable
-                    # state of the legacy :class:`ProgressReporter`
-                    # singleton. ``AgentRunner.run`` is duck-typed on
-                    # the kwarg: anything with ``on_phase_complete`` /
-                    # ``on_turn_complete`` / ``on_session_complete``
-                    # methods works.
-                    progress_sink = self._build_session_sink(session.issue.id or "")
+        """Compatibility entry point; application owns issue execution."""
+        await self._issue_app.execute_session(session)
 
-                    # Repro-first gate: before any fix work, a dedicated
-                    # reproduction pass must demonstrate the described
-                    # failure (executable check, non-zero exit). A closed
-                    # gate fails the issue with a "cannot reproduce"
-                    # report instead of an unverifiable fix MR.
-                    if self._repro_gate_applies(session):
-                        gate_open = await self._run_repro_gate(session, progress_sink)
-                        if not gate_open:
-                            return
-
-                    # 如果配置了 workflow.yaml，使用声明式工作流引擎
-                    # review_followup 使用专用 prompt（render_review_feedback），
-                    # 不走 workflow.yaml 的完整 stage 流程，避免循环。
-                    if (
-                        self._workflow_orchestrator is not None
-                        and session.run_kind != "review_followup"
-                    ):
-                        await self._run_issue_with_workflow(session, progress_sink)
-                    else:
-                        # Collaboration-mode dispatch. For the
-                        # default ``single`` mode (the only one
-                        # registered in Phase 1) we keep the legacy
-                        # ``stage_runners[run_kind] or agent_runner``
-                        # lookup so 270+ existing tests pass byte-
-                        # identically. For non-single modes registered
-                        # in later phases, we dispatch to the
-                        # ``ModeRunner`` from the registry instead, and
-                        runner = self._resolve_session_runner(session)
-                        run_timeout_seconds = self.workflow.agent.run_timeout_ms / 1000.0
-                        session.timeout_deadline_at = time.time() + run_timeout_seconds
-                        await _await_with_active_timeout(
-                            runner.run(
-                                session,
-                                self.workflow,
-                                status_dashboard=self.status_dashboard,
-                                tracker=self.tracker,
-                                comment_tracker=self.tracker,
-                                clarification_resolver=self._clarification_resolver,
-                                progress_reporter=progress_sink,
-                                diagnostics_callback=self._update_run_diagnostics,
-                                # 应用侧提供 rebase 冲突文件装饰（DESIGN §4.2
-                                # prepare_run seam）：机制侧不再读取 session 业务字段。
-                                conflict_files=session.conflict_files,
-                            ),
-                            session=session,
-                            timeout=run_timeout_seconds,
-                        )
-                    if session.status in (
-                        "completed",
-                        "stagnation",
-                        "read_only_loop",
-                        "loop_detected",
-                        "max_turns_exceeded",
-                    ):
-                        # Honest-exit channel (defect R3): the agent declared
-                        # the issue premise unfulfillable (e.g. it references
-                        # a file that does not exist). Report the finding back
-                        # to the issue and mark FAILED instead of falling
-                        # through to git_sync — which would either open an MR
-                        # around a fabricated fix or an empty branch.
-                        _cannot = read_cannot_proceed(getattr(session.workspace, "path", None))
-                        if _cannot is not None:
-                            _reason = str(_cannot.get("reason", "cannot_proceed"))
-                            session.status = "failed"
-                            session.session_end_reason = "premise_not_met"
-                            session.session_end_summary = str(_cannot.get("details", ""))[:500]
-                            logger.warning(
-                                "Issue %s: agent declared cannot_proceed (%s) — "
-                                "marking FAILED without creating a PR",
-                                session.issue.id,
-                                _reason,
-                            )
-                            self._registry.mark_failed_with_reason(
-                                session.issue.id or "",
-                                f"premise_not_met ({_reason}): agent declared the issue "
-                                "cannot honestly be completed; no PR created.",
-                            )
-                            try:
-                                await self.tracker.create_comment(
-                                    session.issue.id or "",
-                                    format_cannot_proceed_comment(session.issue, _cannot),
-                                )
-                            except Exception:
-                                logger.warning(
-                                    "Issue %s: failed to post cannot_proceed comment",
-                                    session.issue.id,
-                                    exc_info=True,
-                                )
-                            await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                            self.status_dashboard.on_session_complete(session.issue.id or "")
-                            self._state.completed.add(session.issue.id or "")
-                            self._state.failed.add(session.issue.id or "")
-                            return
-                        # Safety net: verify workspace has actual changes before git_sync.
-                        # If agent reported "completed" but workspace is clean (no uncommitted
-                        # changes, no HEAD change), mark as failed to avoid empty PRs.
-                        if session.status == "completed" and session.session_end_reason not in (
-                            "noop_completed",
-                            "already_completed",
-                            "task_complete",
-                        ):
-                            _has_changes = False
-                            try:
-                                _repo_root = get_repo_root(str(session.workspace.path))
-                                if _repo_root:
-                                    _file_status = await asyncio.to_thread(
-                                        get_file_status, _repo_root
-                                    )
-                                    _has_changes = bool(_file_status)
-                                    if not _has_changes:
-                                        _start_sha = getattr(session, "start_commit_sha", None)
-                                        if _start_sha:
-                                            _head_out, _, _rc = _run_git(
-                                                ["rev-parse", "HEAD"], _repo_root
-                                            )
-                                            _has_changes = bool(
-                                                _rc == 0
-                                                and _head_out.strip()
-                                                and _head_out.strip() != _start_sha
-                                            )
-                                else:
-                                    # Non-git workspace: git can't answer the
-                                    # question, so fail open rather than
-                                    # discarding a run that did produce files.
-                                    _has_changes = True
-                            except Exception:
-                                _has_changes = True  # fail-open
-                            if not _has_changes:
-                                if session.run_kind == "agent_followup":
-                                    await self._complete_read_only_chat_followup(session)
-                                    return
-                                logger.warning(
-                                    "Session completed but workspace has no changes "
-                                    "issue_id=%s — marking as failed",
-                                    session.issue.id,
-                                )
-                                session.status = "failed"
-                                session.session_end_reason = "no_changes_produced"
-                                session.session_end_summary = (
-                                    "Agent reported completed but workspace has no file changes"
-                                )
-                        # A followup run passes mode="followup"
-                        # to git_sync so it reuses the existing branch + PR
-                        # instead of creating a new one.
-                        sync_mode = (
-                            "followup"
-                            if session.run_kind
-                            in ("agent_followup", "review_followup", "review_retry")
-                            and not isinstance(
-                                self.tracker,
-                                __import__(
-                                    "orchestratord.local_tracker.adapter",
-                                    fromlist=["LocalTrackerAdapter"],
-                                ).LocalTrackerAdapter,
-                            )
-                            else "default"
-                        )
-                        sync_result = await self.git_sync.sync(session, mode=sync_mode)
-                        # 补遗：daemon 触发了 read-only loop /
-                        # stagnation 等终止场景时，git_sync 不会创建 PR，
-                        # 并在 session_end_reason 中标记 empty_branch_no_commits。
-                        # 这时不能走 mark_synced（会标 SYNCED + 无 PR），
-                        # 必须走 mark_failed_with_reason，让 issue 进入 FAILED。
-                        # （C2b：分类逻辑迁应用侧 interpret_sync_result。）
-                        if await self._issue_app.interpret_sync_result(session, sync_result):
-                            return
-                        if sync_result is not None:
-                            self._registry.update_report(
-                                session.issue.id or "",
-                                report_path=getattr(session, "report_path", None),
-                                verification_status=getattr(session, "verification_status", None),
-                                verification_output=getattr(session, "verification_output", None),
-                                summary_comment_id=getattr(session, "summary_comment_id", None),
-                                # Root-cause fix: persist
-                                # explicit session-end reason so the
-                                # dashboard / verification can
-                                # distinguish stagnation / loop from
-                                # a clean success path.
-                                session_end_reason=getattr(session, "session_end_reason", None),
-                                session_end_summary=getattr(session, "session_end_summary", ""),
-                            )
-                            if session.run_kind == "review_followup":
-                                self._registry.mark_feedback_processed(
-                                    session.issue.id or "",
-                                    list(getattr(session, "feedback_ids", [])),
-                                    commit_sha=sync_result.commit_sha,
-                                )
-                                await self._reply_to_processed_feedback(session)
-                                await self._post_feedback_summary(session, sync_result)
-                                await self._apply_review_rules(session)
-                            elif session.run_kind in ("agent_followup", "review_retry"):
-                                # A follow-up keeps the
-                                # existing pr_number / pr_url / status;
-                                # only the followup_attempt_count and
-                                # last_followup_commit_sha change.
-                                self._registry.increment_followup_attempt(session.issue.id or "")
-                                if sync_result.commit_sha:
-                                    record = self._registry.get(session.issue.id or "")
-                                    if record is not None:
-                                        record.last_followup_commit_sha = sync_result.commit_sha
-                                        self._registry._save()
-                                    if session.run_kind == "review_retry":
-                                        # Keep rejected-review feedback
-                                        # available across failed attempts,
-                                        # but consume it once a follow-up
-                                        # commit has synced so a future reset
-                                        # cannot replay stale advice.
-                                        self._clarification_queue.consume_feedback(
-                                            session.issue.id or ""
-                                        )
-                                logger.info(
-                                    "Issue %s followup committed: %s on %s",
-                                    session.issue.id,
-                                    sync_result.commit_sha,
-                                    sync_result.branch_name,
-                                )
-                            else:
-                                self._registry.mark_synced(
-                                    session.issue.id or "",
-                                    branch_name=sync_result.branch_name,
-                                    commit_sha=sync_result.commit_sha,
-                                    pr_number=sync_result.pull_request.number
-                                    if sync_result.pull_request
-                                    else None,
-                                    pr_url=sync_result.pull_request.url
-                                    if sync_result.pull_request
-                                    else None,
-                                )
-                            pr_url = (
-                                sync_result.pull_request.url
-                                if sync_result.pull_request is not None
-                                else None
-                            )
-                            if pr_url:
-                                is_followup = session.run_kind in (
-                                    "agent_followup",
-                                    "review_followup",
-                                    "review_retry",
-                                )
-                                self._emit_im_event(
-                                    session.issue.id or "",
-                                    "pr.updated" if is_followup else "pr.opened",
-                                    EventLevel.INFO,
-                                    "PR updated" if is_followup else "PR opened",
-                                    self._session_payload(
-                                        session,
-                                        pr=pr_url,
-                                        commit=getattr(sync_result, "commit_sha", None),
-                                    ),
-                                )
-                            # Review gate: after commit, await human review before completion.
-                            # Triggered when GitSyncResult.pending_review is True (LocalTracker
-                            # by default, or any tracker when agent.review_required=True in workflow).
-                            if sync_result.pending_review:
-                                if self.workflow.agent.auto_approve:
-                                    logger.info(
-                                        "Issue %s auto-approved (auto_approve=True) — "
-                                        "skipping pending_review gate",
-                                        session.issue.id,
-                                    )
-                                else:
-                                    self._registry.mark_pending_review(session.issue.id or "")
-                                    await self._sync_tracker_issue_state(
-                                        session.issue.id or "", "pending_review"
-                                    )
-                                    self.status_dashboard.on_session_complete(
-                                        session.issue.id or ""
-                                    )
-                                    self._emit_im_event(
-                                        session.issue.id or "",
-                                        "pr.pending_review_gate",
-                                        EventLevel.WARN,
-                                        "pending human review",
-                                        self._session_payload(session, pr=pr_url),
-                                    )
-                                    self._state.pending_review.add(session.issue.id or "")
-                                    # Do NOT cleanup workspace — human needs to review it
-                                    return
-
-                        # Downstream compatibility deviation (TODO upstream-merge):
-                        # salvage override — when the widened gate above let
-                        # us attempt git_sync for a non-completed agent
-                        # termination, but the sync actually produced a real
-                        # commit + PR, treat the run as a successful salvage:
-                        # override session.status to "completed" and record
-                        # the actual termination reason in
-                        # session_end_reason / session_end_summary so the
-                        # audit trail is preserved. Without this, the
-                        # post-`_run_issue` failure handler would still see
-                        # status=stagnation/loop_detected/etc and route the
-                        # run to retry/abandoned even though the work landed.
-                        # Budget-exhausted terminations (max_turns reached /
-                        # exit_code=... / token exhaustion) must NOT be
-                        # silently salvaged into "completed": the agent ran
-                        # out of budget mid-work, so the收尾 steps (report
-                        # files, pre-commit check) never ran and the PR is
-                        # incomplete. Keep the run failed so retry/human
-                        # review handles it and the Run Summary reflects the
-                        # real termination reason instead of a fake success.
-                        _end_reason = session.session_end_reason or ""
-                        _budget_exhausted = (
-                            _end_reason == "max_turns"
-                            or _end_reason.startswith("exit_code=")
-                        )
-                        if (
-                            session.status != "completed"
-                            and not _budget_exhausted
-                            and sync_result is not None
-                            and sync_result.commit_sha
-                        ):
-                            logger.warning(
-                                "Issue %s session terminated with status=%s "
-                                "but git_sync salvaged commit %s on branch "
-                                "%s — overriding status to completed and "
-                                "recording salvage reason",
-                                session.issue.id,
-                                session.status,
-                                sync_result.commit_sha,
-                                sync_result.branch_name,
-                            )
-                            session.session_end_reason = f"salvaged_after_{session.status}"
-                            session.session_end_summary = (
-                                f"agent terminated with status="
-                                f"{session.status}; git_sync salvaged "
-                                f"commit {sync_result.commit_sha[:12]} on "
-                                f"branch {sync_result.branch_name}"
-                            )
-                            session.status = "completed"
-                            # Persist the salvage reason now: the earlier
-                            # update_report already wrote the pre-salvage
-                            # failure reason, and the completed branch of
-                            # the terminal chain only calls mark_completed.
-                            # `orchestratord issue review --reject` detects
-                            # salvageable completions via this end reason.
-                            self._registry.update_report(
-                                session.issue.id or "",
-                                session_end_reason=session.session_end_reason,
-                                session_end_summary=session.session_end_summary,
-                            )
-                finally:
-                    await self.workspace.run_after_run_hook(
-                        session.workspace,
-                        session.issue,
-                    )
-            except GitSyncPostCommitError as exc:
-                sync_result = exc.result
-                self._registry.update_report(
-                    session.issue.id or "",
-                    report_path=getattr(session, "report_path", None),
-                    verification_status=getattr(session, "verification_status", None),
-                    verification_output=getattr(session, "verification_output", None),
-                    summary_comment_id=getattr(session, "summary_comment_id", None),
-                    session_end_reason=getattr(session, "session_end_reason", None),
-                    session_end_summary=getattr(session, "session_end_summary", ""),
-                )
-                if session.run_kind in ("agent_followup", "review_retry"):
-                    record = self._registry.get(session.issue.id or "")
-                    if record is not None and sync_result.commit_sha:
-                        record.last_followup_commit_sha = sync_result.commit_sha
-                        self._registry._save()
-                elif session.run_kind != "review_followup":
-                    self._registry.mark_synced(
-                        session.issue.id or "",
-                        branch_name=sync_result.branch_name,
-                        commit_sha=sync_result.commit_sha,
-                        pr_number=(
-                            sync_result.pull_request.number if sync_result.pull_request else None
-                        ),
-                        pr_url=(sync_result.pull_request.url if sync_result.pull_request else None),
-                    )
-                logger.warning(
-                    "Post-commit sync failed issue_id=%s commit=%s: %s",
-                    session.issue.id,
-                    sync_result.commit_sha,
-                    exc,
-                )
-                session.status = "verification_failed"
-                session.verification_status = "failed"
-                session.verification_output = exc.output
-                if exc.hook_name:
-                    session.last_hook_error = str(exc.cause)
-                self._emit_im_event(
-                    session.issue.id or "",
-                    "post_commit_failed",
-                    EventLevel.ERROR,
-                    str(exc),
-                    self._session_payload(
-                        session,
-                        pr=sync_result.pull_request.url
-                        if sync_result.pull_request is not None
-                        else None,
-                        commit=getattr(sync_result, "commit_sha", None),
-                    ),
-                )
-            except VerificationFailed as exc:
-                logger.warning(
-                    "Verification failed issue_id=%s: %s",
-                    session.issue.id,
-                    exc,
-                )
-                session.status = "verification_failed"
-                session.verification_status = "failed"
-                session.verification_output = exc.output
-                if session.run_kind == "review_followup":
-                    # 检视处理失败：逐检视失败计数 +1（达到阈值后放弃——
-                    # 不再反复触发防烧 token；最终回复说明放弃原因）。
-                    self._registry.increment_feedback_failure(
-                        session.issue.id or "",
-                        list(getattr(session, "feedback_ids", [])),
-                    )
-                self._emit_im_event(
-                    session.issue.id or "",
-                    "verification.failed",
-                    EventLevel.WARN,
-                    exc.output or str(exc),
-                    self._session_payload(session),
-                )
-            except HookFailedError as exc:
-                logger.warning(
-                    "Hook failed issue_id=%s hook=%s: %s",
-                    session.issue.id,
-                    exc.hook_name,
-                    exc,
-                )
-                session.status = "verification_failed"
-                session.verification_status = "failed"
-                session.verification_output = exc.output
-                session.last_hook_error = str(exc)
-                self._emit_im_event(
-                    session.issue.id or "",
-                    "verification.failed",
-                    EventLevel.WARN,
-                    f"{exc.hook_name}: {exc.output or exc}",
-                    self._session_payload(session),
-                )
-            except asyncio.TimeoutError:
-                reason = (
-                    "Agent run exceeded configured timeout "
-                    f"({self.workflow.agent.run_timeout_ms}ms)"
-                )
-                logger.warning(
-                    "Agent run timed out issue_id=%s timeout_ms=%s",
-                    session.issue.id,
-                    self.workflow.agent.run_timeout_ms,
-                )
-                workspace_dirty = bool(
-                    await asyncio.to_thread(
-                        get_file_status, str(session.workspace.path)
-                    )
-                )
-                append_debug_event(
-                    getattr(session, "debug_log_path", None),
-                    "orchestrator.timeout",
-                    run_id=getattr(session, "run_id", None),
-                    turn_count=getattr(session, "turn_count", 0),
-                    tool_count=getattr(session, "tool_count", 0),
-                    last_event_type=getattr(session, "last_agent_event", None),
-                    last_tool=getattr(session, "last_tool_name", None),
-                    output_len=len(getattr(session, "output_text", "") or ""),
-                    workspace_dirty=workspace_dirty,
-                    timeout_ms=self.workflow.agent.run_timeout_ms,
-                )
-                session.status = "agent_timeout"
-                session.verification_status = "failed"
-                session.verification_output = reason
-                self._emit_im_event(
-                    session.issue.id or "",
-                    "issue.failed",
-                    EventLevel.WARN,
-                    reason,
-                    self._session_payload(
-                        session,
-                        turns=getattr(session, "turn_count", None),
-                    ),
-                )
-            except asyncio.CancelledError:
-                # Root-cause fix: clean cancellation path.
-                # When the stop command cancels the task, capture
-                # the reason so the registry marks the issue as
-                # cancelled instead of silently dropping it.
-                # Also clean up the workspace immediately to avoid
-                # leaking worktrees on unexpected cancellation.
-                if self._shutdown_event.is_set():
-                    # Daemon shutdown (SIGTERM teardown cancels pending
-                    # tasks via asyncio.run) interrupted the run. The
-                    # issue did not fail on its own merits — release the
-                    # claim so the next daemon start re-dispatches it,
-                    # instead of leaving a FAILED record that permanently
-                    # blocks dispatch (terminal registry entries are
-                    # skipped by _poll_and_dispatch).
-                    logger.warning(
-                        "Agent run interrupted by daemon shutdown "
-                        "issue_id=%s — releasing claim for re-dispatch",
-                        session.issue.id,
-                    )
-                    session.status = "released"
-                    session.session_end_reason = "shutdown_released"
-                    session.session_end_summary = (
-                        "daemon shutdown interrupted the run; issue requeued"
-                    )
-                    session.verification_status = None
-                    session.verification_output = None
-                    self._registry.mark_pending(session.issue.id or "")
-                    try:
-                        await self._sync_tracker_issue_state(
-                            session.issue.id or "", "open"
-                        )
-                    except Exception:
-                        logger.debug(
-                            "tracker release sync failed issue_id=%s",
-                            session.issue.id,
-                            exc_info=True,
-                        )
-                    return
-                logger.warning(
-                    "Agent run cancelled issue_id=%s — cleaning up workspace",
-                    session.issue.id,
-                )
-                session.status = "cancelled"
-                session.session_end_reason = "operator_stopped"
-                session.session_end_summary = "cancelled by operator"
-                session.verification_status = "cancelled"
-                session.verification_output = "Operator requested stop"
-                # Best-effort workspace cleanup on cancellation so
-                # worktrees are not left dirty even if the outer
-                # finally block is skipped or interrupted.
-                try:
-                    issue_record = self._registry.get(session.issue.id)
-                    await self.workspace.cleanup(
-                        session.issue,
-                        end_status=session.status,
-                        end_reason=session.session_end_reason,
-                        agent_config=getattr(self, "_agent_config", None),
-                        issue_record=issue_record,
-                    )
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "Workspace cleanup on cancellation failed issue_id=%s: %s",
-                        session.issue.id,
-                        cleanup_exc,
-                    )
-            except Exception as exc:
-                logger.exception(
-                    "Agent run failed issue_id=%s: %s",
-                    session.issue.id,
-                    exc,
-                )
-                session.status = "before_run_failed" if not ran_agent else "failed"
-                # Replace any prior success summary with the actual failure
-                # detail so IM and registry records show the root cause.
-                detail = _operator_failure_detail(exc)
-                session.session_end_reason = session.status
-                session.session_end_summary = detail
-                session.verification_status = "failed"
-                session.verification_output = detail
-                session.last_hook_error = detail
-                setattr(session, "operator_failure_detail", detail)
-            finally:
-                if workspace_dirty is not None:
-                    session.run_workspace_dirty = workspace_dirty
-                self._update_run_diagnostics(session)
-                # Diagnostics saves are throttled; force the final
-                # snapshot to disk in case this path (e.g. pending_review)
-                # ends without a durable status mutation.
-                self._registry.flush()
-
-                if session.issue.id in self._state.running:
-                    del self._state.running[session.issue.id]
-
-                # Push today's telemetry summary after the run ends
-                # (best-effort; no-op unless workflow.telemetry is enabled).
-                self._report_telemetry()
-                # Dashboard journal: one terminal event per run with the
-                # final status plus the session/PR references the issue
-                # accumulated. Best-effort — never raises.
-                if self._viz_journal is not None:
-                    try:
-                        _iid = str(session.issue.id or "")
-                        _rec = self._registry.get(_iid)
-                        if getattr(session, "run_id", None):
-                            self._viz_journal.write_event(
-                                {
-                                    "type": "session_ref",
-                                    "issue_id": _iid,
-                                    "session_id": str(session.run_id),
-                                    "session_path": str(
-                                        Path.home()
-                                        / ".orchestratord"
-                                        / "sessions"
-                                        / str(session.run_id)
-                                    ),
-                                }
-                            )
-                        if _rec is not None and _rec.pr_url:
-                            self._viz_journal.write_event(
-                                {
-                                    "type": "pr_status",
-                                    "issue_id": _iid,
-                                    "pr_url": _rec.pr_url,
-                                    "pr_number": _rec.pr_number,
-                                }
-                            )
-                        _status = str(session.status or "")
-                        if _status == "completed":
-                            self._viz_journal.write_event(
-                                {
-                                    "type": "complete",
-                                    "issue_id": _iid,
-                                    "overall_status": "completed",
-                                }
-                            )
-                        elif _status and _status != "released":
-                            # A shutdown-released run is not an error — the
-                            # issue was requeued, so no journal error event.
-                            self._viz_journal.write_event(
-                                {
-                                    "type": "error",
-                                    "issue_id": _iid,
-                                    "error": getattr(session, "session_end_summary", "") or _status,
-                                }
-                            )
-                    except Exception:
-                        logger.debug("viz journal final event failed", exc_info=True)
-
-                # 业务终态映射链已迁应用侧（C2b，DESIGN §4.2 interpret
-                # seam）：registry 状态机、tracker 同步、IM 通知、run
-                # summary comment 由应用解释并返回 Outcome；Kernel 端
-                # Outcome 消费随 dispatch-loop 切片接入。workspace 清理
-                # （保全策略）与 claimed 释放为机制段，仍留本 finally。
-                await self._issue_app.interpret(session)
-
-                # Cleanup workspace based on preservation policy
-                try:
-                    issue_record = self._registry.get(session.issue.id)
-                    await self.workspace.cleanup(
-                        session.issue,
-                        end_status=getattr(session, "status", None),
-                        end_reason=getattr(session, "session_end_reason", None),
-                        agent_config=getattr(self, "_agent_config", None),
-                        issue_record=issue_record,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Workspace cleanup failed issue_id=%s: %s",
-                        session.issue.id,
-                        exc,
-                    )
-
-                self._state.claimed.discard(session.issue.id or "")
-
-    async def _update_issue_summary(self, session: AgentSession) -> None:
+    async def _legacy_update_issue_summary(self, session: AgentSession) -> None:
         """Update the issue summary comment with final status for failure paths."""
         comment_id = getattr(session, "summary_comment_id", None)
         body_lines = [
@@ -3688,7 +3063,7 @@ class Orchestrator:
                 "Failed to update summary comment issue_id=%s: %s", session.issue.id, exc
             )
 
-    async def _apply_review_rules(self, session: AgentSession) -> None:
+    async def _legacy_apply_review_rules(self, session: AgentSession) -> None:
         """确保 review commit 包含 review metadata。
 
         规则提取已从 follow-up 流水线中移除，改为 CLI 命令
@@ -3699,7 +3074,7 @@ class Orchestrator:
         """
         pass
 
-    async def _reply_to_processed_feedback(self, session: AgentSession) -> None:
+    async def _legacy_reply_to_processed_feedback(self, session: AgentSession) -> None:
         if not self.workflow.review_feedback.reply_to_comments:
             return
         pull_request = getattr(session, "pull_request", None)
@@ -3740,7 +3115,7 @@ class Orchestrator:
                     exc,
                 )
 
-    async def _post_feedback_summary(self, session: AgentSession, sync_result: Any) -> None:
+    async def _legacy_post_feedback_summary(self, session: AgentSession, sync_result: Any) -> None:
         """Post a processing summary comment to the PR after a review follow-up."""
         pull_request = getattr(session, "pull_request", None)
         feedback_ids = list(getattr(session, "feedback_ids", []))
@@ -3786,7 +3161,7 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("Failed to post feedback summary issue_id=%s: %s", session.issue.id, exc)
 
-    async def _handle_review_followup_control(self, issue_id: str, extra: str) -> None:
+    async def _legacy_handle_review_followup_control(self, issue_id: str, extra: str) -> None:
         """Handle a CLI-approved review_followup control command."""
         if not issue_id:
             return
@@ -3930,7 +3305,7 @@ class Orchestrator:
         delay_ms = compute_retry_delay(attempt, base_ms, max_ms)
 
         retry = RetryItem(
-            issue_id=issue_id,
+            dedup_key=issue_id,
             attempt=attempt,
             delay_seconds=delay_ms / 1000.0,
             identifier=session.issue.identifier or "",
@@ -4009,7 +3384,7 @@ class Orchestrator:
             logger.warning("Workspace focus computation failed for issue %s: %s", issue.id, exc)
             return []
 
-    async def _process_escalated_issues(self) -> None:
+    async def _legacy_process_escalated_issues(self) -> None:
         """Check for clarification-exhausted issues and apply escalation policy.
 
         When a clarification item is marked EXHAUSTED, the escalation policy
@@ -4090,6 +3465,11 @@ class Orchestrator:
         """
         return max(1, int(getattr(self.workflow.agent, "max_retry_attempts", 5) or 5))
 
+    @staticmethod
+    def _retry_dedup_key(retry: Any) -> str:
+        """Read the generic key while accepting legacy retry test doubles."""
+        return str(getattr(retry, "dedup_key", None) or getattr(retry, "issue_id", ""))
+
     def _requeue_retry(self, retry: Any, now: float) -> bool:
         """Re-queue a retry with a doubled, capped delay.
 
@@ -4107,10 +3487,10 @@ class Orchestrator:
                 "Retry issue %s exceeded the requeue ceiling (%d) — "
                 "dropping the persisted retry plan; use 'issue retry' "
                 "to run again",
-                retry.issue_id,
+                self._retry_dedup_key(retry),
                 self._retry_requeue_limit(),
             )
-            self._clear_retry_plan(retry.issue_id)
+            self._clear_retry_plan(self._retry_dedup_key(retry))
             return False
         self._state.retry_queue.append(retry)
         return True
@@ -4137,20 +3517,21 @@ class Orchestrator:
 
         for retry in ready:
             # Skip if already running or completed
-            if retry.issue_id in self._state.running or retry.issue_id in self._state.completed:
-                logger.debug("Retry skipped issue_id=%s already running/completed", retry.issue_id)
+            retry_key = self._retry_dedup_key(retry)
+            if retry_key in self._state.running or retry_key in self._state.completed:
+                logger.debug("Retry skipped dedup_key=%s already running/completed", retry_key)
                 continue
 
             # Check concurrency slot
             if len(self._state.running) >= self._state.max_concurrent_agents:
-                logger.debug("Retry deferred issue_id=%s no concurrency slots", retry.issue_id)
+                logger.debug("Retry deferred dedup_key=%s no concurrency slots", retry_key)
                 self._state.retry_queue.append(retry)
                 continue
 
             # Re-fetch issue state from tracker
             try:
-                issues = await self.tracker.fetch_issue_states_by_ids([retry.issue_id])
-                issue = issues.get(retry.issue_id)
+                issues = await self.tracker.fetch_issue_states_by_ids([retry_key])
+                issue = issues.get(retry_key)
                 if issue is None:
                     # A fetch that omits the issue is not a reason
                     # to silently drop the retry — re-queue with an
@@ -4163,13 +3544,13 @@ class Orchestrator:
                         logger.warning(
                             "Retry issue %s missing from tracker fetch — "
                             "re-queued (requeue %d/%d)",
-                            retry.issue_id,
+                            retry_key,
                             retry.requeue_count,
                             self._retry_requeue_limit(),
                         )
                     continue
             except Exception as exc:
-                logger.error("Failed to fetch retry issue %s: %s", retry.issue_id, exc)
+                logger.error("Failed to fetch retry dedup_key %s: %s", retry_key, exc)
                 self._requeue_retry(retry, now)
                 continue
 
@@ -4181,20 +3562,20 @@ class Orchestrator:
                 logger.warning(
                     "Retry issue %s no longer active (state=%s), dropping "
                     "the persisted retry plan",
-                    retry.issue_id,
+                    retry_key,
                     issue.state,
                 )
-                self._clear_retry_plan(retry.issue_id)
+                self._clear_retry_plan(retry_key)
                 continue
 
-            self._state.claimed.add(retry.issue_id)
+            self._state.claimed.add(retry_key)
             # The plan is being executed — clear next_retry_at so
             # the registry reflects reality.
-            self._clear_retry_plan(retry.issue_id)
+            self._clear_retry_plan(retry_key)
             await self._launch_issue(issue)
             logger.info(
                 "Retry launched issue_id=%s attempt=%s",
-                retry.issue_id,
+                retry_key,
                 retry.attempt,
             )
 
@@ -4618,7 +3999,9 @@ class Orchestrator:
             retry_attempts.pop(issue_id, None)
         retry_queue = getattr(self._state, "retry_queue", None)
         if retry_queue is not None:
-            self._state.retry_queue = [retry for retry in retry_queue if retry.issue_id != issue_id]
+            self._state.retry_queue = [
+                retry for retry in retry_queue if self._retry_dedup_key(retry) != issue_id
+            ]
         if record:
             was_pending_review = record.status is IssueStatus.PENDING_REVIEW
             record.status = IssueStatus.PENDING
@@ -4643,7 +4026,7 @@ class Orchestrator:
         self._emit_im_event(issue_id, "intent.retry", EventLevel.INFO, "retry requested")
         return True
 
-    async def _handle_retry_control(self, issue_id: str, reason: str) -> None:
+    async def _legacy_handle_retry_control(self, issue_id: str, reason: str) -> None:
         """Apply a durable retry request and make the tracker eligible for polling."""
         if not self._reset_issue_for_retry(
             issue_id,
@@ -4654,7 +4037,7 @@ class Orchestrator:
             return
         await self._sync_tracker_issue_state(issue_id, "open")
 
-    async def _handle_followup_control(self, issue_id: str, extra: str) -> bool:
+    async def _legacy_handle_followup_control(self, issue_id: str, extra: str) -> bool:
         """Re-launch a completed issue with FOLLOWUP intent.
 
         Unified handler for both CLI ``--mode followup`` and chat follow-up.
@@ -4712,13 +4095,13 @@ class Orchestrator:
         await self._sync_tracker_issue_state(issue_id, "open")
         return True
 
-    async def _handle_review_retry_control(self, issue_id: str, feedback: str) -> None:
+    async def _legacy_handle_review_retry_control(self, issue_id: str, feedback: str) -> None:
         """Queue a rejected review as a follow-up that preserves the existing PR."""
         if not self._reset_issue_for_retry(issue_id, feedback, intent=Intent.FOLLOWUP):
             return
         await self._sync_tracker_issue_state(issue_id, "open")
 
-    async def _handle_review_approve_control(self, issue_id: str, comment: str) -> None:
+    async def _legacy_handle_review_approve_control(self, issue_id: str, comment: str) -> None:
         """Finalize a human approval in registry, daemon state, and remote tracker."""
         record = self._registry.get(issue_id)
         if record is None:
@@ -4912,3 +4295,15 @@ class Orchestrator:
                 task.cancel()
             await asyncio.gather(*self._tasks, return_exceptions=True)
             self._tasks.clear()
+
+
+# Class-level compatibility for callers that used the former static helper.
+# The implementation is kept as an assignment so the business operation's
+# named definition remains in the application boundary.
+Orchestrator._uses_review_feedback_followup = staticmethod(
+    lambda record: bool(
+        record is not None
+        and record.intent is Intent.FOLLOWUP
+        and record.intent_source != "chat"
+    )
+)
