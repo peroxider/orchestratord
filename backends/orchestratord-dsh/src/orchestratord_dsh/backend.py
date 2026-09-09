@@ -195,9 +195,21 @@ class DshBackend:
         )
 
     def create_session(self, spec: SessionSpec) -> AgentSession:
-        session = DshSession(spec)
+        session = DshSession(spec, on_close=self._discard_session)
         self._sessions.append(session)
         return session
+
+    def _discard_session(self, session: DshSession) -> None:
+        """Unregister a closed session so its spec (env / api_key) is released.
+
+        Called from ``DshSession.close()``. Swallows ValueError so a
+        repeated close (idempotency) or a registry already cleared by
+        ``dispose()`` cannot raise.
+        """
+        try:
+            self._sessions.remove(session)
+        except ValueError:
+            pass
 
     def dispose(self) -> None:
         for s in self._sessions:
