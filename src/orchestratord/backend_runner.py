@@ -1044,9 +1044,10 @@ class BackendRunner:
         try:
             await self._create_session_row(live_id, session)
         except Exception:
-            logger.exception(
+            logger.warning(
                 "sessions DB row creation failed for run %s — the API "
-                "will not list this session",
+                "will not list this session.  DB unreachable?  Install "
+                "PostgreSQL or set ORCHESTRATORD_DATABASE_URL to skip.",
                 session.run_id,
             )
         return live_id

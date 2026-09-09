@@ -53,7 +53,7 @@ def pytest_configure(config):
 
 
 async def _ensure_test_db() -> None:
-    admin = await asyncpg.connect(_ADMIN_DSN)
+    admin = await asyncpg.connect(_ADMIN_DSN, timeout=3)
     try:
         exists = await admin.fetchval(
             "SELECT 1 FROM pg_database WHERE datname = $1", _TEST_DB

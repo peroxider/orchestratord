@@ -26,6 +26,11 @@ from orchestratord.db.base import Base
 
 _ENV_NAME: Final = "ORCHESTRATORD_DATABASE_URL"
 
+# Short asyncpg connect timeout: the default is 60s, which turns a
+# black-holed 5432 (SYN dropped, no RST) into a 60s hang per DB touch.
+# 3s keeps the daemon responsive and tests fast when PG is unreachable.
+_DEFAULT_CONNECT_TIMEOUT_S: Final = 3
+
 DEFAULT_DATABASE_URL: Final = (
     "postgresql+asyncpg://multica:multica@127.0.0.1:5432/multica"
 )
@@ -39,7 +44,10 @@ def database_url() -> str:
 
 def build_engine(url: str | None = None) -> AsyncEngine:
     """Construct an async engine for *url* (or the configured default)."""
-    return create_async_engine(url or database_url())
+    return create_async_engine(
+        url or database_url(),
+        connect_args={"timeout": _DEFAULT_CONNECT_TIMEOUT_S},
+    )
 
 
 def build_session_factory(
