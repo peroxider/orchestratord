@@ -1294,6 +1294,21 @@ class BackendRunner:
             timeouts["first_turn"] if timeouts else None
         )
 
+        # Telemetry e2e breakdown — captured during the loop and flushed
+        # with the session_end event on every terminal path (success,
+        # timeout, stop, backend_error).
+        queue_wait_s: float | None = (
+            max(0.0, time.time() - session.created_at)
+            if getattr(session, "created_at", None)
+            else None
+        )
+        first_event_latency_s: float | None = None
+        first_turn_latency_s: float | None = None
+        turn_start_monotonic = run_start
+        paused_total_s = 0.0
+        tool_call_started: dict[str, tuple[str, float]] = {}
+        tool_stats: dict[str, dict[str, float]] = {}
+
         async for event in _poll_events(spi_session.events()):
             # Commands are drained before handling the event so an operator
             # request arriving at a turn boundary is available immediately.
@@ -1317,6 +1332,8 @@ class BackendRunner:
                 paused_for = time.monotonic() - pause_started
                 run_start += paused_for
                 last_event_monotonic += paused_for
+                paused_total_s += paused_for
+                turn_start_monotonic += paused_for
                 if stop_while_paused:
                     session.status = "failed"
                     break
@@ -1365,6 +1382,12 @@ class BackendRunner:
                 turn_has_tool_calls = True
                 if payload.get("name", "") in _MODIFYING_TOOL_NAMES:
                     turn_has_modifying_tool = True
+                call_id = str(payload.get("call_id", "") or "")
+                if call_id:
+                    tool_call_started[call_id] = (
+                        str(payload.get("name", "") or "unknown"),
+                        time.monotonic(),
+                    )
                 self._handle_tool_call_envelope(event, session_context)
                 if progress_reporter is not None and hasattr(progress_reporter, "on_tool_call"):
                     progress_reporter.on_tool_call(
@@ -1384,6 +1407,26 @@ class BackendRunner:
                     progress_reporter.on_tool_result(
                         payload.get("call_id", ""),
                     )
+                # Per-tool telemetry: match the result back to the tracked
+                # TOOL_CALL for name + duration. Results without a tracked
+                # call (telemetry started mid-run) are skipped.
+                result_call_id = str(payload.get("call_id", "") or "")
+                started = tool_call_started.pop(result_call_id, None)
+                if started is not None:
+                    failed = bool(
+                        payload.get("is_error")
+                        or payload.get("error")
+                        or payload.get("success") is False
+                    )
+                    stat = tool_stats.setdefault(
+                        started[0], {"calls": 0.0, "failures": 0.0, "duration_ms": 0.0}
+                    )
+                    stat["calls"] += 1
+                    stat["duration_ms"] += max(
+                        0.0, (time.monotonic() - started[1]) * 1000
+                    )
+                    if failed:
+                        stat["failures"] += 1
                 # Event-driven read-only guard: TURN_COMPLETE may never fire
                 # when the session is aborted mid tool-loop (exit_code=126
                 # path), so track the streak from tool results directly.
@@ -1397,6 +1440,27 @@ class BackendRunner:
             elif kind == EventKind.TURN_COMPLETE:
                 reported_turn = int(payload.get("turn", 0) or 0)
                 session.turn_count = max(session.turn_count + 1, reported_turn)
+                # Per-turn telemetry: wall time of the turn that just ended.
+                now_turn = time.monotonic()
+                turn_duration_s = max(0.0, now_turn - turn_start_monotonic)
+                turn_start_monotonic = now_turn
+                try:
+                    from orchestratord.telemetry import record_turn
+
+                    record_turn(
+                        session_id=getattr(session, "session_id", None) or "",
+                        run_id=getattr(session, "run_id", None) or "",
+                        issue_id=(
+                            session.issue.id
+                            if getattr(session, "issue", None) is not None
+                            else ""
+                        ),
+                        backend=getattr(session, "backend_name", None) or "",
+                        turn=reported_turn,
+                        duration_s=turn_duration_s,
+                    )
+                except Exception:
+                    pass
                 # Check for noop (no file changes).
                 file_changed = await self._check_file_changes(
                     session, last_file_status_snapshot
@@ -1550,8 +1614,12 @@ class BackendRunner:
                             if getattr(session, "issue", None) is not None
                             else ""
                         ),
+                        backend=getattr(session, "backend_name", None) or "",
+                        model=getattr(session, "_snapshot_model", None) or "",
                         cost_usd=session.cost_usd,
                         token_usage=getattr(session, "token_usage", None) or {},
+                        duration_s=max(0.0, time.monotonic() - run_start),
+                        turn_count=session.turn_count or 0,
                     )
                 except Exception:
                     pass
@@ -1569,7 +1637,29 @@ class BackendRunner:
             elif kind == EventKind.ERROR:
                 error_msg = payload.get("message", "unknown error")
                 logger.error("BackendRunner event error: %s", error_msg)
+                first_backend_error = backend_error_message is None
                 backend_error_message = str(error_msg)
+                if first_backend_error:
+                    # Telemetry: only the first backend error per run —
+                    # adapters may emit several ERROR frames before the
+                    # terminal SESSION_COMPLETE.
+                    try:
+                        from orchestratord.telemetry import record_error
+
+                        record_error(
+                            session_id=getattr(session, "session_id", None) or "",
+                            run_id=getattr(session, "run_id", None) or "",
+                            issue_id=(
+                                session.issue.id
+                                if getattr(session, "issue", None) is not None
+                                else ""
+                            ),
+                            backend=getattr(session, "backend_name", None) or "",
+                            reason=str(payload.get("code", "backend_error")),
+                            message=str(error_msg)[:500],
+                        )
+                    except Exception:
+                        pass
                 session.status = "failed"
                 session.session_end_reason = "backend_error"
                 session.session_end_summary = backend_error_message
@@ -1589,9 +1679,11 @@ class BackendRunner:
             if event is not None:
                 if not handshake_complete:
                     handshake_complete = True
+                    first_event_latency_s = now - run_start
                 last_event_monotonic = now
             if kind == EventKind.TURN_COMPLETE and not first_turn_complete:
                 first_turn_complete = True
+                first_turn_latency_s = now - run_start
             elapsed = now - run_start
             gap = now - last_event_monotonic
 
@@ -1674,6 +1766,43 @@ class BackendRunner:
 
         session.completed_at = time.time()
         session.duration_ms = max(0.0, (time.monotonic() - run_start) * 1000)
+
+        # Telemetry: session_end for the agent run — every terminal path
+        # (success / timeout / stop / backend_error) flows through here.
+        # Best-effort: telemetry failures must never fail the run.
+        try:
+            from orchestratord.telemetry import record_session_end
+
+            record_session_end(
+                session_id=getattr(session, "session_id", None) or "",
+                run_id=getattr(session, "run_id", None) or "",
+                issue_id=(
+                    session.issue.id
+                    if getattr(session, "issue", None) is not None
+                    else ""
+                ),
+                backend=getattr(session, "backend_name", None) or "",
+                model=getattr(session, "_snapshot_model", None) or "",
+                duration_s=session.duration_ms / 1000.0,
+                exit_status=0 if session.status == "completed" else 1,
+                status=session.status,
+                end_reason=getattr(session, "session_end_reason", None) or "",
+                turn_count=session.turn_count or 0,
+                first_event_latency_s=first_event_latency_s,
+                first_turn_latency_s=first_turn_latency_s,
+                queue_wait_s=queue_wait_s,
+                paused_s=paused_total_s,
+                backoff_429_s=float(
+                    getattr(session, "total_429_backoff_seconds", 0.0) or 0.0
+                ),
+                consecutive_429=int(
+                    getattr(session, "consecutive_429_count", 0) or 0
+                ),
+                tool_count=session.tool_count,
+                tools=tool_stats,
+            )
+        except Exception:
+            pass
 
         # Final diagnostics snapshot after the event loop ends.
         # The in-loop callback fires BEFORE each event, so the last

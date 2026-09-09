@@ -108,6 +108,10 @@ class RunSession:
     # _update_run_diagnostics.
     cost_usd: float = 0.0
     token_usage: dict = field(default_factory=dict)
+    # Wall-clock construction time. ``started_at`` is set when the backend
+    # actually begins producing events, so (started_at - created_at) is the
+    # queue/dispatch wait captured by the e2e telemetry breakdown.
+    created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     completed_at: float | None = None
     duration_ms: float | None = None
