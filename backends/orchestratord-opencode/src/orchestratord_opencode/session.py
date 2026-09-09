@@ -721,6 +721,29 @@ class OpenCodeSession:
 
     # --- turn body ---------------------------------------------------------
 
+    def _synthesize_deny_terminal(self) -> str:
+        """Synthesize the honest terminal after a denied approval.
+
+        Returns the ``finish`` value (``"denied"``) and emits the
+        structured ``opencode_approval_denied`` ERROR envelope carrying
+        the denial context (tool name + abandonment explanation). Used
+        by the pump both when the grace window expires (silent bus) and
+        when the bus hard-closes before it expires.
+        """
+        self._deny_grace_deadline = None
+        message = (
+            f"approval denied for tool "
+            f"'{self._deny_tool_name}': opencode abandoned "
+            "the turn after the rejection (no step "
+            "completion — synthesized by the backend)"
+        )
+        self._last_error_message = message
+        self._emit(
+            EventKind.ERROR,
+            {"code": "opencode_approval_denied", "message": message},
+        )
+        return "denied"
+
     async def _pump_bus(
         self,
         client: Any,
@@ -768,26 +791,6 @@ class OpenCodeSession:
                     done, pending = await asyncio.wait(
                         pending, return_when=asyncio.FIRST_COMPLETED
                     )
-                    if deny_timer is not None and deny_timer in done:
-                        # Deny grace expired: opencode abandoned the turn
-                        # after the rejection (verified live) — synthesize
-                        # the honest terminal instead of burning the
-                        # core's inactivity budget.
-                        self._deny_grace_deadline = None
-                        deny_timer = None
-                        message = (
-                            f"approval denied for tool "
-                            f"'{self._deny_tool_name}': opencode abandoned "
-                            "the turn after the rejection (no step "
-                            "completion — synthesized by the backend)"
-                        )
-                        self._last_error_message = message
-                        self._emit(
-                            EventKind.ERROR,
-                            {"code": "opencode_approval_denied", "message": message},
-                        )
-                        finish = "denied"
-                        break
                     if prompt_task in done:
                         # Re-raises a prompt rejection (400/404/409…).
                         prompt_task.result()
@@ -795,16 +798,30 @@ class OpenCodeSession:
                         try:
                             line = next_line.result()
                         except StopAsyncIteration:
+                            # opencode may hard-close the bus after a
+                            # rejection instead of leaving it open-but-
+                            # silent — synthesize the denial terminal
+                            # so the failure reason stays honest.
+                            if self._deny_grace_deadline is not None:
+                                finish = self._synthesize_deny_terminal()
                             break
                         next_line = asyncio.ensure_future(anext(aiter))
                         pending.add(next_line)
                         payload = self._parse_sse_line(line)
-                        if payload is None:
-                            continue
-                        frame_finish = self._ingest_frame(payload, sid)
-                        if frame_finish is not None:
-                            finish = frame_finish
+                        if payload is not None:
+                            frame_finish = self._ingest_frame(payload, sid)
+                            if frame_finish is not None:
+                                finish = frame_finish
+                                break
+                    # Deny watch: the timer only fires when the deadline
+                    # is still armed — a frame processed above may have
+                    # cleared it (model activity), making the timer stale.
+                    if deny_timer is not None and deny_timer in done:
+                        if self._deny_grace_deadline is not None:
+                            deny_timer = None
+                            finish = self._synthesize_deny_terminal()
                             break
+                        deny_timer = None  # stale — deadline was cleared
                     # Maintain the deny watch across the wait set: cleared
                     # by model-level activity, kept (absolute deadline) by
                     # the expected post-rejection tool frames.
