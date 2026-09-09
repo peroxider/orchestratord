@@ -149,19 +149,35 @@ class PeerMessageDispatcher:
         ordering: str | int | None = None,
         payload: dict[str, Any] | None = None,
         execute: Callable[[], Awaitable[Any]],
+        precomputed_out_of_order: bool | None = None,
     ) -> DispatchOutcome:
         """Run dedup → order-check → execute → optional auto-schedule.
 
         On a dedup hit ``execute`` is not called at all; the caller
         answers with :meth:`cached_result`'s body.
+
+        ``precomputed_out_of_order`` lets the caller thread the ordering
+        flag into a handler's payload (audit row, RESULT body). When
+        provided, the dispatcher **trusts** the value and skips the
+        internal :meth:`check_ordering` call — the caller is responsible
+        for having updated ``_ordering`` via :meth:`check_ordering`
+        first. When ``None`` (the default) the dispatcher computes the
+        flag itself (the historical behavior).
         """
         if self.cached_result(orch_id, msg_id) is not None:
             return DispatchOutcome(
                 duplicate=True, out_of_order=False, scheduled=False
             )
-        out_of_order = session_id is not None and not self.check_ordering(
-            orch_id, session_id, ordering
-        )
+        if precomputed_out_of_order is None:
+            out_of_order = session_id is not None and not self.check_ordering(
+                orch_id, session_id, ordering
+            )
+        else:
+            # Caller already called ``check_ordering`` and updated
+            # ``_ordering``; skip the internal re-check to avoid
+            # double-incrementing the per-session chain (which would
+            # mark every subsequent message as out_of_order).
+            out_of_order = precomputed_out_of_order
         result = await execute()
         self.remember_result(orch_id, msg_id, result)
         scheduled = False
