@@ -173,18 +173,105 @@ class RepositoryPullRequestMixin:
     ) -> dict[str, Any] | None:
         """Post a reply to a pull request feedback item.
 
+        Inline review replies go through the platform's
+        ``pulls/{n}/comments/{id}/replies`` endpoint. Some platforms
+        (GitCode v5) do not implement it and answer 404 — in that case the
+        reply degrades to an issue-level comment (``issues/{n}/comments``,
+        GitCode's PR conversation stream) with a ``Re: <file>:<line>``
+        prefix for location context. The incapability is cached so later
+        replies skip the failing endpoint (probe once per client).
+
         Returns:
             The created reply payload, or None on a non-dict response.
         """
         if pull_request.number is None:
             return None
         if feedback.source == "inline_review" and feedback.id:
+            # A previous 404 taught us the platform has no inline-reply
+            # endpoint; go straight to the issue-comment fallback.
+            if getattr(self, "_inline_reply_supported", None) is False:
+                return await self._reply_inline_as_issue_comment(
+                    pull_request=pull_request,
+                    feedback=feedback,
+                    body=body,
+                    issue_id=issue_id,
+                )
             comment_id = feedback.id.split(":", 1)[1] if ":" in feedback.id else feedback.id
-            endpoint = f"/repos/{self.owner}/{self.repo}/pulls/{pull_request.number}/comments/{comment_id}/replies"
-        else:
             endpoint = (
-                f"/repos/{self.owner}/{self.repo}/issues/{issue_id or pull_request.number}/comments"
+                f"/repos/{self.owner}/{self.repo}/pulls/{pull_request.number}"
+                f"/comments/{comment_id}/replies"
             )
+            try:
+                result = await self._request_json(
+                    "POST",
+                    endpoint,
+                    json={"body": body} if self.platform.auth_mode == "bearer" else None,
+                    data={"body": body} if self.platform.auth_mode != "bearer" else None,
+                )
+                if getattr(self, "_inline_reply_supported", None) is None:
+                    self._inline_reply_supported = True
+                return result if isinstance(result, dict) else None
+            except RepositoryTrackerError as exc:
+                if not _is_not_found_error(exc):
+                    raise
+                # 404 — the platform does not support inline replies. Cache
+                # the incapability and degrade to an issue-level comment.
+                self._inline_reply_supported = False
+                return await self._reply_inline_as_issue_comment(
+                    pull_request=pull_request,
+                    feedback=feedback,
+                    body=body,
+                    issue_id=issue_id,
+                )
+        return await self._post_issue_comment(
+            pr_number=pull_request.number,
+            body=body,
+            issue_id=issue_id,
+        )
+
+    async def _reply_inline_as_issue_comment(
+        self,
+        *,
+        pull_request: PullRequestRef,
+        feedback: PullRequestFeedback,
+        body: str,
+        issue_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Degrade an inline reply to an issue-level comment.
+
+        The ``Re: <file>:<line>`` prefix keeps the location context when the
+        reply can no longer be anchored to the original inline thread.
+        """
+        location_parts: list[str] = []
+        if feedback.file_path:
+            location_parts.append(feedback.file_path)
+        if feedback.line is not None:
+            location_parts.append(f":{feedback.line}")
+        location = "".join(location_parts)
+        if location:
+            body = f"Re: {location}\n\n{body}"
+        return await self._post_issue_comment(
+            pr_number=pull_request.number,
+            body=body,
+            issue_id=issue_id,
+        )
+
+    async def _post_issue_comment(
+        self,
+        *,
+        pr_number: str,
+        body: str,
+        issue_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Post a comment to the issue/PR conversation stream.
+
+        GitCode's PR conversation is the issue comment stream, so
+        ``issues/{n}/comments`` is the supported endpoint for both issue-level
+        replies and degraded inline replies.
+        """
+        endpoint = (
+            f"/repos/{self.owner}/{self.repo}/issues/{issue_id or pr_number}/comments"
+        )
         payload = {"body": body}
         result = await self._request_json(
             "POST",
