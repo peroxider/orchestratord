@@ -67,8 +67,10 @@ EXPECTED_INDEX_NAMES = {
 }
 
 
-def test_version_table_is_schema_migrations() -> None:
-    assert "version_table = schema_migrations" in INI.read_text(encoding="utf-8")
+def test_version_table_is_application_specific() -> None:
+    assert "version_table = orchestratord_schema_migrations" in INI.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_no_foreign_key_or_cascade_in_migrations() -> None:
