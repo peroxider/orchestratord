@@ -316,6 +316,23 @@ class RepositoryTrackerAdapter(TrackerAdapter):
             base_branch=base_branch,
         )
 
+    async def list_pull_requests(
+        self,
+        *,
+        state: str = "open",
+        head: str | None = None,
+    ) -> list[PullRequestRef]:
+        """List pull requests from the remote repository.
+
+        Used by ``GitSyncService._find_pr_fallback`` to backfill a
+        just-created PR's ``number``/``url`` when the create response
+        (notably GitCode) omits them.
+        """
+        return await self.client.list_pull_requests(
+            state=state,
+            head=head,
+        )
+
     async def ensure_pull_request(
         self,
         *,

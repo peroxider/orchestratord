@@ -91,10 +91,12 @@ def _normalize_pull_request(payload: Any) -> PullRequestRef | None:
     number = payload.get("number") or payload.get("iid") or payload.get("id")
     url = payload.get("html_url") or payload.get("url")
     title = payload.get("title")
+    head_ref = _extract_ref_name(payload.get("head") or payload.get("source_branch"))
     return PullRequestRef(
         number=str(number) if number is not None else None,
         url=url if isinstance(url, str) else None,
         title=title if isinstance(title, str) else None,
+        head_ref=head_ref,
     )
 
 
