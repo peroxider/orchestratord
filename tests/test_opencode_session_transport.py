@@ -1251,6 +1251,171 @@ def test_tool_failed_uses_error_message() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Tool result content fallbacks — ExecuteResult / file-block / attachments
+# ---------------------------------------------------------------------------
+
+
+def test_read_tool_result_uses_structured_output() -> None:
+    """The read tool's ExecuteResult shape carries the text in
+    ``structured.output`` with an EMPTY ``content`` list — the
+    translation must prefer the readable text over a raw JSON dump.
+    """
+    lines = [
+        _frame("session.next.prompt.admitted", sessionID=OC_SID),
+        _frame(
+            "session.next.tool.success",
+            sessionID=OC_SID,
+            callID="call_r2",
+            structured={
+                "title": "README.md",
+                "output": (
+                    "<path>/tmp/README.md</path>\n"
+                    "<type>file</type>\n"
+                    "<content>\n"
+                    "1: MARKER-LINE-1\n"
+                    "2: MARKER-LINE-2\n"
+                    "</content>"
+                ),
+                "metadata": {
+                    "display": {
+                        "type": "file",
+                        "path": "/tmp/README.md",
+                        "text": "MARKER-LINE-1\nMARKER-LINE-2",
+                        "lineStart": 1,
+                        "lineEnd": 2,
+                    },
+                },
+            },
+            content=[],
+            outputPaths=[],
+        ),
+        _frame(
+            "session.next.step.ended",
+            sessionID=OC_SID,
+            finish="stop",
+            tokens={},
+        ),
+    ]
+    client = _FakeClient(lines)
+    session = _session(client)
+    events = _send_and_drain(session)
+    results = [e for e in events if e.kind is EventKind.TOOL_RESULT]
+    assert len(results) == 1
+    # Must match the clean text from ``structured.output``, not a JSON dump.
+    expected = (
+        "<path>/tmp/README.md</path>\n"
+        "<type>file</type>\n"
+        "<content>\n"
+        "1: MARKER-LINE-1\n"
+        "2: MARKER-LINE-2\n"
+        "</content>"
+    )
+    assert results[0].payload["output"] == expected
+
+
+def test_read_tool_result_with_content_file_blocks() -> None:
+    """``content`` may contain ``{type: "file", uri: "..."}`` blocks
+    (e.g. media/PDF reads).  The translation must surface the URI rather
+    than dropping the block from the transcript.
+    """
+    lines = [
+        _frame("session.next.prompt.admitted", sessionID=OC_SID),
+        _frame(
+            "session.next.tool.success",
+            sessionID=OC_SID,
+            callID="call_m1",
+            content=[
+                {"type": "file", "uri": "data:image/png;base64,MARKER-ATTACHMENT", "mime": "image/png"},
+            ],
+            structured={},
+            outputPaths=[],
+        ),
+        _frame(
+            "session.next.step.ended",
+            sessionID=OC_SID,
+            finish="stop",
+            tokens={},
+        ),
+    ]
+    client = _FakeClient(lines)
+    session = _session(client)
+    events = _send_and_drain(session)
+    results = [e for e in events if e.kind is EventKind.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].payload["output"] == "data:image/png;base64,MARKER-ATTACHMENT"
+
+
+def test_read_tool_result_with_structured_attachments() -> None:
+    """Image/PDF reads put their payload in ``structured.attachments``
+    — the transcript must surface the attachment URL rather than a raw
+    JSON dump.
+    """
+    lines = [
+        _frame("session.next.prompt.admitted", sessionID=OC_SID),
+        _frame(
+            "session.next.tool.success",
+            sessionID=OC_SID,
+            callID="call_a1",
+            structured={
+                "title": "img.png",
+                "output": "Image read successfully",
+                "metadata": {},
+                "attachments": [
+                    {"type": "file", "mime": "image/png", "url": "data:image/png;base64,iVBORw0KGgo"},
+                ],
+            },
+            content=[],
+            outputPaths=[],
+        ),
+        _frame(
+            "session.next.step.ended",
+            sessionID=OC_SID,
+            finish="stop",
+            tokens={},
+        ),
+    ]
+    client = _FakeClient(lines)
+    session = _session(client)
+    events = _send_and_drain(session)
+    results = [e for e in events if e.kind is EventKind.TOOL_RESULT]
+    assert len(results) == 1
+    assert results[0].payload["output"] == "Image read successfully"
+
+
+def test_read_tool_result_falls_back_to_output_paths() -> None:
+    """When both ``content`` and ``structured`` are empty / null, the
+    transcription must surface ``outputPaths`` rather than dropping
+    the result entirely.
+    """
+    lines = [
+        _frame("session.next.prompt.admitted", sessionID=OC_SID),
+        _frame(
+            "session.next.tool.success",
+            sessionID=OC_SID,
+            callID="call_o1",
+            structured={},
+            content=[],
+            outputPaths=["/tmp/truncated-output.txt", "/tmp/truncated-meta.json"],
+        ),
+        _frame(
+            "session.next.step.ended",
+            sessionID=OC_SID,
+            finish="stop",
+            tokens={},
+        ),
+    ]
+    client = _FakeClient(lines)
+    session = _session(client)
+    events = _send_and_drain(session)
+    results = [e for e in events if e.kind is EventKind.TOOL_RESULT]
+    assert len(results) == 1
+    output = results[0].payload["output"]
+    assert output is not None
+    assert "/tmp/truncated-output.txt" in output
+    assert "/tmp/truncated-meta.json" in output
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle edges
 # ---------------------------------------------------------------------------
 

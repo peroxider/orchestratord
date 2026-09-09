@@ -102,6 +102,68 @@ def _is_sse_response(resp: Any) -> bool:
     return "text/event-stream" in content_type.lower()
 
 
+def _block_text(block: Any) -> str | None:
+    """Extract displayable text from one ToolContent block."""
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") == "text":
+        return str(block.get("text", ""))
+    if block.get("type") == "file":
+        # Media / data-URL blocks carry their payload in ``uri`` — surface
+        # it rather than dropping the block from the transcript.
+        return str(block.get("uri", ""))
+    return None
+
+
+def _content_blocks_text(content: Any) -> str | None:
+    """Flatten a ``content`` array (or a bare string) into displayable text."""
+    if isinstance(content, str):
+        return content if content else None
+    if not isinstance(content, list):
+        return None
+    parts: list[str] = []
+    for block in content:
+        text = _block_text(block)
+        if text:
+            parts.append(text)
+    return "\n".join(parts) if parts else None
+
+
+def _structured_text(structured: dict[str, Any]) -> str | None:
+    """Extract the tool payload text out of a ``tool.success`` structured field.
+
+    read/glob/grep carry their payload in ``structured.content`` (verified
+    live, with an EMPTY top-level ``content`` list) or in the tool
+    ExecuteResult shape ``structured.output`` / ``structured.metadata.display.text``
+    with ``content=[]``; image/PDF reads put the payload in
+    ``structured.attachments``. Returns ``None`` when no readable text is present.
+    """
+    text = _content_blocks_text(structured.get("content"))
+    if text:
+        return text
+    output = structured.get("output")
+    if isinstance(output, str) and output:
+        return output
+    metadata = structured.get("metadata")
+    if isinstance(metadata, dict):
+        display = metadata.get("display")
+        if isinstance(display, dict):
+            display_text = display.get("text")
+            if isinstance(display_text, str) and display_text:
+                return display_text
+    attachments = structured.get("attachments")
+    if isinstance(attachments, list):
+        parts: list[str] = []
+        for attachment in attachments:
+            if isinstance(attachment, dict):
+                uri = attachment.get("url") or attachment.get("uri")
+                if isinstance(uri, str) and uri:
+                    parts.append(uri)
+        if parts:
+            return "\n".join(parts)
+    return None
+
+
 class OpenCodeSession:
     """Adapts one ``opencode serve`` instance into an AgentSession.
 
@@ -521,21 +583,28 @@ class OpenCodeSession:
             parts: list[str] = []
             if isinstance(content, list):
                 for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(str(block.get("text", "")))
+                    text = _block_text(block)
+                    if text:
+                        parts.append(text)
             output = "\n".join(parts) if parts else None
             if output is None and isinstance(data.get("structured"), dict):
                 # read/glob/grep carry their payload in
                 # ``structured.content`` with an EMPTY ``content`` list
-                # (verified live) — fall back rather than dropping the
-                # result from the transcript.
-                structured = data["structured"]
-                structured_content = structured.get("content")
-                output = (
-                    str(structured_content)
-                    if structured_content is not None
-                    else json.dumps(structured, ensure_ascii=False)[:500]
-                )
+                # (verified live) or in the tool ExecuteResult shape
+                # ``structured.output`` / ``structured.metadata.display.text``
+                # / ``structured.attachments`` with ``content=[]`` — walk all
+                # of them before falling back to a raw JSON dump, so the
+                # transcript keeps the readable text rather than dropping
+                # the result.
+                output = _structured_text(data["structured"])
+            if output is None and data.get("outputPaths"):
+                # Large tool outputs are spilled to these files — surface
+                # the paths so the transcript still points at the full
+                # payload instead of dropping the result entirely.
+                paths = [str(path) for path in data["outputPaths"]]
+                output = "tool output written to:\n" + "\n".join(paths)
+            if output is None and isinstance(data.get("structured"), dict):
+                output = json.dumps(data["structured"], ensure_ascii=False)[:500]
             if output is None and not ok:
                 # tool.failed carries its reason under ``error.message``.
                 error = data.get("error")
