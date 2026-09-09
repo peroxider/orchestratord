@@ -417,7 +417,12 @@ def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
 
             try:
                 data = json.loads(metadata_path.read_text(encoding="utf-8"))
-                return metadata_path, data
+                # Slug is a lossy index (only the last 3 path segments); a
+                # different workspace may share the same slug.  Verify the
+                # stored workspace_root before adopting the metadata, or fall
+                # through to the full scan below.
+                if _same_root(data.get("workspace_root")):
+                    return metadata_path, data
             except Exception:
                 pass
         # Fallback: search by workspace_root matching
