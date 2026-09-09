@@ -1304,16 +1304,11 @@ def _run_orchestrator(
         agent = config.agent
         # Mirror BackendRunner._build_session_spec so daemon startup validates
         # the same named provider routes that a real run will receive.
-        from ..backend_runner import providers_extra
+        from ..backend_runner import agent_spec_fields, providers_extra
 
         spec = SessionSpec(
             cwd=str(getattr(config.workspace, "root", "") or "."),
-            provider=getattr(agent, "provider", None),
-            model=getattr(agent, "model", None),
-            base_url=getattr(agent, "base_url", None),
-            api_key=getattr(agent, "api_key", None),
-            cordis=getattr(agent, "cordis", None),
-            runtime_bin=getattr(agent, "runtime_bin", None),
+            **agent_spec_fields(agent),
             env=getattr(agent, "env", None) or {},
             extra=providers_extra(agent),
         )

@@ -6,8 +6,8 @@ Covers the three layers of the feature:
   ``ProviderConfig`` entries (raw api_key preserved);
 * generation — ``orchestratord_dsh.cordis_gen`` validates the route
   table, resolves credentials through the environment only, and
-  text-appends an ``llm-pi-ai`` plugin block to the bundled default
-  cordis config (preserving its ``!!js`` runtime tags byte-for-byte);
+  emits an ``llm-pi-ai`` plugin block (semantically equivalent to the
+  runtime's profile — no longer byte-identical to a bundled default);
 * preflight — ``DshBackend.preflight`` accepts declared routes and
   rejects undeclared ones with actionable messages, while the legacy
   deepseek-official path keeps its exact historical behavior.
@@ -752,6 +752,66 @@ def test_providers_extra_wraps_registry_under_providers_key() -> None:
     extra = providers_extra(agent)
     assert set(extra) == {"providers"}
     assert extra["providers"]["gw"]["api"] == "openai-completions"
+
+
+def test_preflight_spec_forwards_permission_mode() -> None:
+    """Regression: the daemon-startup preflight in cli/server.py once
+    built a SessionSpec without permission_mode, so DshBackend.preflight
+    never saw bypassPermissions and could not generate the approval-policy
+    cordis block. Both spec-build sites must now go through the shared
+    ``agent_spec_fields`` helper so the preflight and runtime field shapes
+    stay consistent (permission_mode included).
+    """
+    from dataclasses import asdict
+
+    from orchestratord.backend_runner import agent_spec_fields, providers_extra
+    from orchestratord.spi.backend import SessionSpec
+
+    # Agent config with all agent-spec fields populated.
+    agent = SimpleNamespace(
+        permission_mode="bypassPermissions",
+        provider="dsh",
+        model="deepseek-v4-flash",
+        base_url="https://gw.example/v1",
+        api_key="$KEY",
+        cordis=None,
+        runtime_bin=None,
+        env={"FOO": "bar"},
+    )
+    # Preflight shape — same field set as cli/server.py's daemon startup.
+    preflight = SessionSpec(
+        cwd="/workspace",
+        **agent_spec_fields(agent),
+        env=agent.env,
+        extra=providers_extra(agent),
+    )
+    # Runtime shape — the authoritative superset from
+    # BackendRunner._build_session_spec (agent-config-derived fields only).
+    runtime = SessionSpec(
+        cwd="/workspace",
+        **agent_spec_fields(agent),
+        tools_allow=None,
+        tools_deny=[],
+        env=agent.env,
+        extra=providers_extra(agent),
+    )
+
+    def populated(spec: SessionSpec) -> set[str]:
+        return {k for k, v in asdict(spec).items() if v not in (None, {}, [])}
+
+    pre_keys = populated(preflight)
+    run_keys = populated(runtime)
+
+    # Every preflight-populated field must be a valid runtime field.
+    unexpected = pre_keys - run_keys
+    assert not unexpected, (
+        f"preflight populates fields unknown to the runtime spec: {unexpected}"
+    )
+    # permission_mode must be forwarded.
+    assert "permission_mode" in pre_keys, (
+        "preflight SessionSpec must include permission_mode"
+    )
+    assert preflight.permission_mode == "bypassPermissions"
 
 
 def test_session_factory_parks_sdk_transcripts_outside_git_tree(
