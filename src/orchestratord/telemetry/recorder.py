@@ -64,6 +64,16 @@ def record_tool_summary(**kw: Any) -> None:
     append_event(_event("tool_summary", **kw))
 
 
+def record_verification(**kw: Any) -> None:
+    """One verification-gate attempt (outcome: passed*/blocked/error)."""
+    append_event(_event("verification", **kw))
+
+
+def record_crash(**kw: Any) -> None:
+    """One process-death signal (kind: daemon_unclean_shutdown/backend_worker)."""
+    append_event(_event("crash", **kw))
+
+
 def get_recorder():
     """Minimal recorder handle — the module functions record directly.
 
@@ -80,5 +90,7 @@ def get_recorder():
         record_turn = staticmethod(record_turn)
         record_usage = staticmethod(record_usage)
         record_tool_summary = staticmethod(record_tool_summary)
+        record_verification = staticmethod(record_verification)
+        record_crash = staticmethod(record_crash)
 
     return _Recorder()

@@ -13,24 +13,28 @@ under ``reporters/``.
 from .recorder import (
     get_recorder,
     record_command_run,
+    record_crash,
     record_error,
     record_session_end,
     record_session_start,
     record_tool_summary,
     record_turn,
     record_usage,
+    record_verification,
 )
 from .storage import events_dir, read_events, telemetry_dir
 
 __all__ = [
     "get_recorder",
     "record_command_run",
+    "record_crash",
     "record_error",
     "record_session_end",
     "record_session_start",
     "record_tool_summary",
     "record_turn",
     "record_usage",
+    "record_verification",
     "events_dir",
     "read_events",
     "telemetry_dir",

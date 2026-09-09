@@ -110,6 +110,15 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
         "end_reasons_failed": Counter(),
         "errors_by_reason": Counter(),
         "tools": {},
+        "verification": {
+            "attempts": 0,
+            "blocked": 0,
+            "error": 0,
+            "outcomes": Counter(),
+            "blocked_by": Counter(),
+            "interception_rate": 0.0,
+        },
+        "crashes": {"total": 0, "by_kind": Counter()},
     }
 
     durations: list[float] = []
@@ -199,6 +208,7 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
                 turns = payload.get("turn_count")
                 if isinstance(turns, (int, float)):
                     bucket["turns"] += int(turns)
+                    summary["turns"]["total"] += int(turns)
                 for name, stat in (payload.get("tools") or {}).items():
                     if not isinstance(stat, dict):
                         continue
@@ -213,6 +223,22 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             duration = _num(payload.get("duration_s"))
             if duration is not None:
                 turn_durations.append(duration)
+        elif etype == "verification":
+            gate = summary["verification"]
+            gate["attempts"] += 1
+            outcome = str(payload.get("outcome") or "unknown")
+            gate["outcomes"][outcome] += 1
+            if outcome == "blocked":
+                gate["blocked"] += 1
+                gate["blocked_by"][
+                    str(payload.get("blocked_by") or "unknown")
+                ] += 1
+            elif outcome == "error":
+                gate["error"] += 1
+        elif etype == "crash":
+            crashes = summary["crashes"]
+            crashes["total"] += 1
+            crashes["by_kind"][str(payload.get("kind") or "unknown")] += 1
         elif etype == "usage":
             summary["usage_events"] += 1
             cost = payload.get("cost_usd")
@@ -252,6 +278,19 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     turns["total_s"] = sum(turn_durations)
     turns["avg_s"] = (
         turns["total_s"] / turns["turn_events"] if turns["turn_events"] else 0.0
+    )
+    verification = summary["verification"]
+    if verification["attempts"]:
+        verification["interception_rate"] = (
+            verification["blocked"] / verification["attempts"]
+        )
+    agent_sessions = sum(
+        b.get("sessions", 0) for b in summary["by_backend"].values()
+    )
+    crashes = summary["crashes"]
+    crashes["backend_worker"] = crashes["by_kind"].get("backend_worker", 0)
+    crashes["backend_rate_per_session"] = (
+        crashes["backend_worker"] / agent_sessions if agent_sessions else None
     )
     return summary
 
@@ -387,5 +426,54 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
                 f"| {m.get('cost_usd', 0.0):.4f} |"
             )
         lines.append("")
+
+    verification = summary.get("verification") or {}
+    if verification.get("attempts"):
+        rate = verification.get("interception_rate") or 0.0
+        lines += [
+            "## 验证门",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
+            f"| 验证尝试 | {verification.get('attempts', 0)} |",
+            f"| 拦截 (blocked) | {verification.get('blocked', 0)} |",
+            f"| 缺陷拦截率 | {rate * 100:.1f}% |",
+            f"| 错误 (error) | {verification.get('error', 0)} |",
+            "",
+        ]
+        blocked_by = verification.get("blocked_by") or {}
+        if blocked_by:
+            lines += [
+                "| 拦截原因 | 次数 |",
+                "|----------|------|",
+            ]
+            for reason, count in sorted(blocked_by.items(), key=lambda kv: -kv[1]):
+                lines.append(f"| {reason} | {count} |")
+            lines.append("")
+
+    crashes = summary.get("crashes") or {}
+    if crashes.get("total"):
+        backend_rate = crashes.get("backend_rate_per_session")
+        rate_text = (
+            f"{backend_rate:.3f}/session" if backend_rate is not None else "-"
+        )
+        lines += [
+            "## 崩溃",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
+            f"| 崩溃总数 | {crashes.get('total', 0)} |",
+            f"| backend worker 崩溃 | {crashes.get('backend_worker', 0)} ({rate_text}) |",
+            "",
+        ]
+        by_kind = crashes.get("by_kind") or {}
+        if by_kind:
+            lines += [
+                "| 类型 | 次数 |",
+                "|------|------|",
+            ]
+            for kind, count in sorted(by_kind.items(), key=lambda kv: -kv[1]):
+                lines.append(f"| {kind} | {count} |")
+            lines.append("")
 
     return "\n".join(lines)

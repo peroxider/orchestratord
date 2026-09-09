@@ -54,3 +54,20 @@ def read_events(day: str | None = None) -> list[dict]:
                 except json.JSONDecodeError:
                     continue
     return out
+
+
+def local_days() -> list[str]:
+    """List the days that have a local events file, oldest first.
+
+    Day keys come from the ``<YYYY-MM-DD>.jsonl`` filenames; anything
+    that does not parse as a date (stray files) is ignored.
+    """
+    days: list[str] = []
+    for path in _EVENTS_DIR.glob("*.jsonl"):
+        name = path.stem
+        try:
+            time.strptime(name, "%Y-%m-%d")
+        except ValueError:
+            continue
+        days.append(name)
+    return sorted(days)
