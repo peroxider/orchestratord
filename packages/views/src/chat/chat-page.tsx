@@ -31,7 +31,7 @@ export function ChatPage({ client, workspaceId }: ChatPageProps) {
   const locale = useLocale()
   const c = chatCopy[locale]
   const chatSessions = (sessions.data ?? [])
-    .filter((session) => session.issue_id === null)
+    .filter((session) => session.origin.kind === 'direct')
     .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
   const selected = chatSessions.find((session) => session.id === sessionId)
 

@@ -13,12 +13,14 @@ export function FailureCard({
   busy,
   onResolve,
   onDismiss,
+  resolveResource,
 }: InboxKindCardProps) {
   const { locale } = useTranslation()
   return (
     <InboxCardShell
       item={item}
       workspaceId={workspaceId}
+      resolveResource={resolveResource}
       actions={
         <div className="inbox-card__actions">
           <Button size="sm" variant="primary" disabled={busy} onClick={onResolve}>

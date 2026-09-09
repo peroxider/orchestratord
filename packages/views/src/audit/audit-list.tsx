@@ -10,13 +10,15 @@ import { Badge, Button, Card } from '@orchestratord/ui'
 import { useTranslation } from '../i18n'
 import { auditActorTypeLabel } from './audit-labels'
 import { redactSensitive } from '../sessions/redact-sensitive'
+import type { ResourcePresentation, ResourceRef } from '@orchestratord/app-contracts'
 
 export interface AuditListProps {
   client: ApiClient
   workspaceId: string
+  resolveResource: (ref: ResourceRef) => ResourcePresentation
 }
 
-export function AuditList({ client, workspaceId }: AuditListProps) {
+export function AuditList({ client, workspaceId, resolveResource }: AuditListProps) {
   const [actorType, setActorType] = useState<AuditActorType | ''>('')
   const [action, setAction] = useState('')
   const [targetType, setTargetType] = useState('')
@@ -89,7 +91,7 @@ export function AuditList({ client, workspaceId }: AuditListProps) {
               </tr>
             </thead>
             <tbody>
-              {(data ?? []).map((entry) => (
+              {(data ?? []).map((entry) => { const target = resolveResource(entry.target_ref); return (
                 <Fragment key={entry.id}><tr>
                   <td>
                     <Badge tone="neutral">
@@ -98,22 +100,17 @@ export function AuditList({ client, workspaceId }: AuditListProps) {
                     <small className="audit-table__actor-id">{entry.actor_id.slice(0, 8)}</small>
                   </td>
                   <td>{entry.action}</td>
-                  <td>{activityTargetHref(entry.target_type, entry.target_id) ? <a href={activityTargetHref(entry.target_type, entry.target_id)!}>{entry.target_type} · {entry.target_id.slice(0, 8)}</a> : entry.target_type}</td>
+                  <td>{target.href ? <a href={target.href}>{target.label}</a> : target.label}</td>
                   <td>{new Date(entry.created_at).toLocaleString(locale)}</td>
                   <td>{entry.payload_jsonb && <Button size="sm" variant="ghost" aria-expanded={expanded.has(entry.id)} onClick={() => setExpanded(current => { const next = new Set(current); if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id); return next })}>{expanded.has(entry.id) ? c.hide : c.evidence}</Button>}</td>
                 </tr>{entry.payload_jsonb && expanded.has(entry.id) && <tr className="audit-table__evidence"><td colSpan={5}><pre>{JSON.stringify(redactSensitive(entry.payload_jsonb), null, 2)}</pre></td></tr>}</Fragment>
-              ))}
+              )})}
             </tbody>
           </table>
         </Card>
       )}
     </div>
   )
-}
-
-function activityTargetHref(type: string, id: string): string | null {
-  const collection = ({ issue: 'issues', session: 'sessions', agent: 'agents', runtime: 'runtimes', project: 'projects', squad: 'squads', autopilot: 'autopilots' } as Record<string, string>)[type]
-  return collection ? `/${collection}/${encodeURIComponent(id)}` : null
 }
 
 const activityCopy = {

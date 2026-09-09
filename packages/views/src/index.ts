@@ -1,9 +1,3 @@
-export { IssuesList } from './issues/issues-list'
-export type { IssuesListProps } from './issues/issues-list'
-export { KanbanBoard } from './issues/kanban-board'
-export type { KanbanBoardProps } from './issues/kanban-board'
-export { IssueDetail } from './issues/issue-detail'
-export type { IssueDetailProps } from './issues/issue-detail'
 export { EventTimeline } from './sessions/event-timeline'
 export type { EventTimelineProps } from './sessions/event-timeline'
 export { SessionDetail } from './sessions/session-detail'
@@ -67,7 +61,6 @@ export { ChatComposer } from './chat/chat-composer'
 export type { ChatComposerProps } from './chat/chat-composer'
 export { useChatStream } from './chat/use-chat-stream'
 export type { ChatStream } from './chat/use-chat-stream'
-export { PR_STATE_TONE, prStateLabel, prStateTone } from './vcs/pr-labels'
 export {
   I18nProvider,
   useI18n,

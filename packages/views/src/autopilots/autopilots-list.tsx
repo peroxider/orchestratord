@@ -10,17 +10,19 @@ import {
 import { Badge, Button, Card, Input } from '@orchestratord/ui'
 import { cronSummary } from './schedule'
 import { useLocale } from '../i18n'
+import type { TargetDescriptor } from '@orchestratord/app-contracts'
 
 export interface AutopilotsListProps {
   client: ApiClient
   workspaceId: string
+  targets: readonly TargetDescriptor[]
 }
 
-export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
+export function AutopilotsList({ client, workspaceId, targets }: AutopilotsListProps) {
   const [name, setName] = useState('')
   const [cron, setCron] = useState('')
   const [prompt, setPrompt] = useState('')
-  const [targetKind, setTargetKind] = useState('issue')
+  const [targetKind, setTargetKind] = useState(targets[0]?.kind ?? 'squad')
   const [targetId, setTargetId] = useState('')
 
   const { data, isPending, isError, error } = useAutopilots(client, workspaceId)
@@ -50,7 +52,7 @@ export function AutopilotsList({ client, workspaceId }: AutopilotsListProps) {
           <label className="autopilots__field autopilots__field--name"><span>{c.name}</span><Input value={name} onChange={(e) => setName(e.target.value)} placeholder={c.name} /></label>
           <label className="autopilots__field autopilots__field--cron"><span>{c.schedule}</span><Input value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 * * * *" />{cron.trim() && <small className="autopilots__schedule-preview">{cronSummary(cron, locale)}</small>}</label>
           <label className="autopilots__field autopilots__field--prompt"><span>{c.prompt}</span><Input value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={c.prompt} /></label>
-          <label className="autopilots__field autopilots__field--kind"><span>{c.targetKind}</span><select value={targetKind} onChange={(e) => setTargetKind(e.target.value)}><option value="issue">Issue</option><option value="squad">Squad</option></select></label>
+          <label className="autopilots__field autopilots__field--kind"><span>{c.targetKind}</span><select value={targetKind} onChange={(e) => setTargetKind(e.target.value)}>{targets.map(target => <option key={target.id} value={target.kind}>{target.label[locale]}</option>)}</select></label>
           <label className="autopilots__field autopilots__field--target"><span>{c.targetId}</span><Input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder={c.targetId} /></label>
           <Button
             size="sm"

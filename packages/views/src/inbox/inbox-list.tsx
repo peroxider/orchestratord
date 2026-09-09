@@ -15,6 +15,7 @@ import { ClarificationCard } from './clarification-card'
 import { FailureCard } from './failure-card'
 import type { InboxKindCardProps } from './inbox-shared'
 import { useLocale } from '../i18n'
+import type { ResourcePresentation, ResourceRef } from '@orchestratord/app-contracts'
 
 /** §7.4 — one differentiated card view per inbox kind (§7.5 acceptance). */
 const KIND_CARDS: Record<InboxKind, ComponentType<InboxKindCardProps>> = {
@@ -26,9 +27,10 @@ const KIND_CARDS: Record<InboxKind, ComponentType<InboxKindCardProps>> = {
 export interface InboxListProps {
   client: ApiClient
   workspaceId: string
+  resolveResource?: (ref: ResourceRef) => ResourcePresentation
 }
 
-export function InboxList({ client, workspaceId }: InboxListProps) {
+export function InboxList({ client, workspaceId, resolveResource }: InboxListProps) {
   const locale = useLocale()
   const c = FILTER_COPY[locale]
   const [kind, setKind] = useState<InboxKind | 'all'>('all')
@@ -74,6 +76,7 @@ export function InboxList({ client, workspaceId }: InboxListProps) {
             onResolve={() => item.kind === 'approval_request' ? decision.mutate({ item, decision: 'approve' }) : resolve.mutate({ itemId: item.id })}
             onDismiss={() => item.kind === 'approval_request' ? decision.mutate({ item, decision: 'deny' }) : dismiss.mutate({ itemId: item.id })}
             onAnswer={(value) => answer.mutate({ itemId: item.id, answer: value })}
+            resolveResource={resolveResource}
           />
         )
       })}

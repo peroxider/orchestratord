@@ -15,6 +15,7 @@ export function ClarificationCard({
   busy,
   onDismiss,
   onAnswer,
+  resolveResource,
 }: InboxKindCardProps) {
   const { locale } = useTranslation()
   const [answer, setAnswer] = useState('')
@@ -27,6 +28,7 @@ export function ClarificationCard({
     <InboxCardShell
       item={item}
       workspaceId={workspaceId}
+      resolveResource={resolveResource}
       actions={
         <div className="inbox-card__clarification"><Textarea value={answer} onChange={event => setAnswer(event.target.value)} placeholder={labels.placeholder} disabled={busy} /><div className="inbox-card__actions">
           <Button size="sm" variant="primary" disabled={busy || !answer.trim() || !onAnswer} onClick={() => onAnswer?.(answer.trim())}>

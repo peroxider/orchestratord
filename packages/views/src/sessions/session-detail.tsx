@@ -17,6 +17,7 @@ import { useLocale } from '../i18n'
 export interface SessionDetailProps {
   client: ApiClient
   sessionId: string
+  resolveSource?: (session: NonNullable<ReturnType<typeof useSession>['data']>, locale: 'en' | 'zh-CN' | 'ja') => string
 }
 
 const STATUS_TONE: Record<string, BadgeTone> = {
@@ -27,7 +28,7 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   failed: 'bad',
 }
 
-export function SessionDetail({ client, sessionId }: SessionDetailProps) {
+export function SessionDetail({ client, sessionId, resolveSource }: SessionDetailProps) {
   const locale = useLocale()
   const c = sessionCopy[locale]
   const [requestedControl, setRequestedControl] = useState<'pause' | 'resume' | 'stop' | null>(null)
@@ -117,7 +118,7 @@ export function SessionDetail({ client, sessionId }: SessionDetailProps) {
 
       <dl className="session-detail__facts">
         <div><dt>{c.mode}</dt><dd>{data.mode}</dd></div>
-        <div><dt>{c.source}</dt><dd>{data.issue_id ? `${c.issue} ${data.issue_id.slice(0, 8)}` : c.direct}</dd></div>
+        <div><dt>{c.source}</dt><dd>{resolveSource?.(data, locale) ?? (data.origin.kind === 'direct' ? c.direct : `${data.origin.source.kind} · ${data.origin.source.id}`)}</dd></div>
         <div><dt>Agent</dt><dd>{data.agent_id ? data.agent_id.slice(0, 8) : c.auto}</dd></div>
         <div><dt>{c.started}</dt><dd>{new Date(data.created_at).toLocaleString(locale)}</dd></div>
       </dl>

@@ -2,13 +2,11 @@ import { describe, expect, it } from 'vitest'
 import type {
   AuditActorType,
   InboxItemStatus,
-  PullRequestState,
   RuntimeStatus,
   SessionEventKind,
   UsageGroup,
 } from '@orchestratord/core'
 import { EVENT_TONE, eventKindLabel, eventSummary } from './sessions/event-kind'
-import { ISSUE_STATUSES, STATUS_TONE, issueStatusLabel } from './issues/status'
 import { capabilityLabels } from './agents/capability-labels'
 import {
   USAGE_DIMENSIONS,
@@ -24,7 +22,6 @@ import {
 } from './inbox/inbox-status'
 import { RUNTIME_STATUS_TONE, runtimeStatusLabel } from './runtimes/runtime-status'
 import { auditActorTypeLabel } from './audit/audit-labels'
-import { PR_STATE_TONE, prStateLabel, prStateTone } from './vcs/pr-labels'
 import { translate, type TranslationKey } from './i18n'
 import { en } from './i18n/locales/en'
 import { zhCN } from './i18n/locales/zh-CN'
@@ -129,34 +126,6 @@ describe('EVENT_TONE', () => {
     for (const kind of kinds) {
       expect(EVENT_TONE[kind]).toBeTruthy()
     }
-  })
-})
-
-describe('ISSUE_STATUSES / STATUS_TONE', () => {
-  it('lists the 8 display statuses in board order', () => {
-    expect(ISSUE_STATUSES).toEqual([
-      'queued',
-      'pending',
-      'running',
-      'pending_review',
-      'completed',
-      'failed',
-      'abandoned',
-      'verification_failed',
-    ])
-  })
-
-  it('has a tone for every status', () => {
-    for (const status of ISSUE_STATUSES) {
-      expect(STATUS_TONE[status]).toBeTruthy()
-    }
-  })
-
-  it('labels statuses in title case and Chinese', () => {
-    expect(issueStatusLabel('queued')).toBe('Queued')
-    expect(issueStatusLabel('pending_review')).toBe('Pending review')
-    expect(issueStatusLabel('queued', 'zh-CN')).toBe('排队中')
-    expect(issueStatusLabel('verification_failed', 'zh-CN')).toBe('验证失败')
   })
 })
 
@@ -310,32 +279,6 @@ describe('auditActorTypeLabel', () => {
   it('translates actor types into Chinese', () => {
     expect(auditActorTypeLabel('member', 'zh-CN')).toBe('本地操作人')
     expect(auditActorTypeLabel('agent', 'zh-CN')).toBe('智能体')
-  })
-})
-
-describe('PR_STATE_TONE / prStateLabel / prStateTone', () => {
-  it('covers every PullRequestState', () => {
-    const states: PullRequestState[] = ['open', 'closed', 'merged']
-    for (const state of states) {
-      expect(PR_STATE_TONE[state]).toBeTruthy()
-    }
-  })
-
-  it('maps lifecycle tones', () => {
-    expect(PR_STATE_TONE.open).toBe('good')
-    expect(PR_STATE_TONE.merged).toBe('purple')
-    expect(PR_STATE_TONE.closed).toBe('neutral')
-  })
-
-  it('labels states in title case', () => {
-    expect(prStateLabel('open')).toBe('Open')
-    expect(prStateLabel('merged')).toBe('Merged')
-    expect(prStateLabel('closed')).toBe('Closed')
-  })
-
-  it('falls back safely for unknown states', () => {
-    expect(prStateLabel('unknown')).toBe('unknown')
-    expect(prStateTone('unknown')).toBe('neutral')
   })
 })
 
