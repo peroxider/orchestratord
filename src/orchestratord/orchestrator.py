@@ -2385,6 +2385,7 @@ class Orchestrator:
             for fb in abandoned:
                 try:
                     await self.tracker.reply_to_pull_request_feedback(
+                        pull_request=pull_request,
                         feedback=fb,
                         body="（编排器）该检视经多次处理仍未解决——已放弃自动重试。"
                         "请人工确认或重新提出。",
