@@ -18,25 +18,22 @@ Legacy semantic enums remain available for wire compatibility only.
 
 The client is a pure dispatcher with injectable handlers so it is
 unit-testable without a live orchestrator. The daemon wiring binds the
-real handlers. Production ``orchestrator_cli`` commands run in a bounded
-child process, so a timeout can terminate the command without mutating the
-daemon's process-global ``sys.argv`` or stdio. The injectable synchronous
-runner remains available for deterministic unit tests.
+real handlers. Production commands call the shared application service in the
+orchestrator process, with request-local output and cancellable async waits.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import inspect
 import logging
-import sys
 import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from orchestratord.commands.models import CommandService
 from orchestratord.im_gateway.origin_utils import is_concrete_im_origin
 from orchestratord.im_gateway.repl_command_gate import check_orchestrator_command
 from orchestratord.im_gateway.semantics import (
@@ -47,14 +44,6 @@ from orchestratord.im_gateway.semantics import (
 from orchestratord.ipc.models import InboundMessage, MessageSemantics
 
 logger = logging.getLogger(__name__)
-
-_CLI_CHILD_CODE = (
-    "import sys; "
-    "from orchestratord.cli.main import app; "
-    "sys.argv = ['orchestratord', *sys.argv[1:]]; "
-    "app()"
-)
-
 
 @dataclass
 class OrchestratorHandlers:
@@ -80,21 +69,19 @@ class OrchestratorGatewayClient:
         pending_retry_base_seconds: float = 60.0,
         pending_retry_max_seconds: float = 300.0,
         clock: Callable[[], float] = time.monotonic,
-        cli_runner: Callable[[list[str]], tuple[int, str, str]] | None = None,
         cli_timeout_seconds: float = 60.0,
+        command_service: CommandService | None = None,
     ) -> None:
         self._h = handlers
         self._commands = command_router or CommandRouter()
         self._control = control_bridge or ControlBridge()
         self._ipc = ipc_client
         self._origin = origin
-        self._cli_runner = cli_runner
-        # Commands serialize on one lock. Production execution uses a
-        # terminable subprocess; the tracked task only protects the injected
-        # synchronous test runner, whose worker thread cannot be cancelled.
-        self._cli_lock = asyncio.Lock()
-        self._cli_timeout_seconds = max(0.01, cli_timeout_seconds)
-        self._cli_run_task: asyncio.Task[tuple[int, str, str]] | None = None
+        from orchestratord.commands.service import OrchestratorCommandService
+
+        self._command_service = command_service or OrchestratorCommandService(
+            timeout_seconds=cli_timeout_seconds, runtime_supplier=lambda: None
+        )
         self._pending_outbound: deque[str] = deque()
         # A parallel envelope queue keeps metadata/routing aligned with each
         # queued message. It intentionally permits identical text for
@@ -511,29 +498,6 @@ class OrchestratorGatewayClient:
             return "orchestrator_cli_invalid"
 
         noun, verb = argv[0], argv[1]
-        if noun == "issue" and verb in {"stop", "pause", "resume"}:
-            issue_id = route.issue_hint or self._arg_value(argv, "--id")
-            if not issue_id:
-                self._queue_command_reply(
-                    route.payload,
-                    2,
-                    "",
-                    "error: --id is required",
-                    origin=reply_origin,
-                    in_reply_to=in_reply_to,
-                )
-                return "orchestrator_cli_invalid"
-            self._h.control_verb(verb, issue_id)
-            self._queue_command_reply(
-                route.payload,
-                0,
-                f"Control command '{verb}' sent for issue {issue_id}",
-                "",
-                origin=reply_origin,
-                in_reply_to=in_reply_to,
-            )
-            return f"orchestrator_cli_issue_{verb}"
-
         if noun == "issue" and verb == "tail":
             self._queue_command_reply(
                 route.payload,
@@ -557,99 +521,18 @@ class OrchestratorGatewayClient:
         return f"orchestrator_cli_{noun}_{verb}" if rc == 0 else "orchestrator_cli_failed"
 
     async def _run_cli_isolated(self, argv: list[str]) -> tuple[int, str, str]:
-        """Run one CLI command serially with a real execution timeout.
+        """Parse command text and call the shared application service in-process."""
+        from orchestratord.commands.models import CommandRequest
+        from orchestratord.commands.parsing import CommandParseError, parse_command
 
-        Production commands execute in a child Python process. Timeout or
-        cancellation terminates that process, so the daemon read loop stays
-        responsive and no command can retain process-global argv/stdio.
-        Injected synchronous runners use a worker thread solely as a test seam;
-        their unkillable task remains serialized until it actually finishes.
-        """
-        async with self._cli_lock:
-            if self._cli_runner is not None:
-                return await self._run_injected_cli(argv)
-            return await self._run_cli_subprocess(argv)
-
-    async def _run_injected_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        prior = self._cli_run_task
-        if prior is not None and not prior.done():
-            with contextlib.suppress(Exception):
-                await prior
-        task: asyncio.Task[tuple[int, str, str]] = asyncio.create_task(
-            asyncio.to_thread(self._run_orchestrator_cli, list(argv))
-        )
-        self._cli_run_task = task
-        task.add_done_callback(self._on_cli_run_done)
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(task), timeout=self._cli_timeout_seconds
-            )
-        except TimeoutError:
-            return self._cli_timeout_result(argv)
-
-    async def _run_cli_subprocess(self, argv: list[str]) -> tuple[int, str, str]:
-        try:
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-c",
-                _CLI_CHILD_CODE,
-                *argv,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except OSError as exc:
-            return 1, "", f"error: unable to start orchestrator command: {exc}"
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._cli_timeout_seconds
-            )
-        except TimeoutError:
-            await self._terminate_cli_process(process)
-            return self._cli_timeout_result(argv)
-        except asyncio.CancelledError:
-            await self._terminate_cli_process(process)
-            raise
-        return (
-            int(process.returncode or 0),
-            stdout.decode("utf-8", errors="replace"),
-            stderr.decode("utf-8", errors="replace"),
-        )
-
-    async def _terminate_cli_process(self, process) -> None:
-        if process.returncode is not None:
-            return
-        with contextlib.suppress(ProcessLookupError):
-            process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except TimeoutError:
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-
-    def _cli_timeout_result(self, argv: list[str]) -> tuple[int, str, str]:
-        timeout = f"{self._cli_timeout_seconds:g}"
-        logger.warning(
-            "orchestrator IM command timed out after %ss: %s",
-            timeout,
-            " ".join(argv)[:64],
-        )
-        return 124, "", f"error: command timed out after {timeout}s"
-
-    def _on_cli_run_done(self, task: asyncio.Task[tuple[int, str, str]]) -> None:
-        """Clear the tracked CLI task and absorb its (unused) outcome."""
-        if self._cli_run_task is task:
-            self._cli_run_task = None
-        if not task.cancelled() and task.exception() is not None:
-            logger.debug(
-                "orchestrator IM command worker failed after timeout",
-                exc_info=task.exception(),
-            )
-
-    def _run_orchestrator_cli(self, argv: list[str]) -> tuple[int, str, str]:
-        if self._cli_runner is None:
-            raise RuntimeError("the in-process CLI runner is disabled")
-        return self._cli_runner(list(argv))
+            request = parse_command(argv)
+        except CommandParseError as exc:
+            return 2, "", f"error: {exc}"
+        if request.resource == "issue" and request.action in {"stop", "pause", "resume"}:
+            request = CommandRequest(request.resource, request.action, {**request.options, "yes": True, "no_wait": True})
+        result = await self._command_service.execute(request)
+        return result.exit_code, result.stdout, result.stderr
 
     def _queue_command_reply(
         self,

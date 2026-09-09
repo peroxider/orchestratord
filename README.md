@@ -411,217 +411,55 @@ membership is local state.
 
 ## IM Message Gateway
 
-An optional gateway daemon that bridges orchestratord to IM channels (Feishu,
-WeChat, Slack, Discord): chat messages become orchestrator input, and
-orchestrator events flow back to the chat. v1 is POSIX/WSL only (UDS socket).
+An optional, standalone daemon for **Feishu App WebSocket** and **WeChat iLink** private messages. Feishu/Slack/Discord webhooks support outbound reports only. Runtime requires **POSIX/WSL**. IM access is **command-only**: authorized users can query or control issues and receive replies and event reports; ordinary chat messages do not start agent tasks.
 
-### Architecture
-
-```
-┌────────────────┐  UDS JSONL   ┌──────────────────────┐
-│ orchestratord   │◄────────────►│  gateway daemon     │◄──► feishu / wechat /
-│ (opt-in peer)  │  DELIVER /   │ ~/.orchestratord/    │     slack / discord
-│                │  OUTBOUND    │ gateway/gateway.sock │     (channel adapters)
-└────────────────┘              └──────────────────────┘
+```mermaid
+flowchart LR
+    IM["Feishu / WeChat"] <-->|"Commands / replies / reports"| GW["Message Gateway"]
+    GW <-->|"Local IPC"| ORCH["Orchestrator"]
+    ORCH <-->|"Tasks / results"| AGENT["Agent backend"]
 ```
 
-- The gateway runs as its own daemon (`orchestratord gateway start`); an
-  orchestrator opts in with `server start --gateway` and registers as an IPC
-  peer for the origins it binds (`im:direct:*:*` by default).
-- Inbound: channel adapter → dedupe → classify → route → command allowlist →
-  DELIVER push to the registered orchestrator.
-- Outbound: the orchestrator event sink (events carry `issue_id`,
-  `event_type`, `level`, and `markdown` metadata) → OUTBOUND frame → the
-  gateway resolves the origin and delivers to the channel, with NACK
-  backoff retry, outbox, and dead-letter handling.
-
-### Install
-
-The base install already covers the webhook channels (Feishu/Slack/Discord
-webhooks) — `import orchestratord` never fails without extras. App-based
-modes pull their SDKs through extras:
-
-| Extra            | Adds                   | Needed for                              |
-| ---------------- | ---------------------- | --------------------------------------- |
-| `gateway-feishu` | `lark-oapi`, `qrcode`  | Feishu websocket mode + QR setup        |
-| `gateway-wechat` | `cryptography`         | WeChat iLink channel                    |
-| `gateway-all`    | both extras above      | everything                              |
+**Quick start (WSL):**
 
 ```bash
-pip install 'orchestratord[gateway-feishu]'
-pip install 'orchestratord[gateway-wechat]'
-pip install 'orchestratord[gateway-all]'
-```
+# Install channel dependencies; use gateway-feishu or gateway-wechat for one channel
+uv pip install --python ~/.venvs/orchestratord/bin/python -e '.[gateway-all]'
+source ~/.venvs/orchestratord/bin/activate
 
-### Quick start (WSL)
-
-```bash
-# 1. Configure channels — interactive wizard (add/edit/remove; feishu scan
-#    or manual, wechat QR login, slack/discord webhook fields)
+# Configure channels and authorized senders; setup restarts the daemon automatically
 orchestratord gateway setup
-
-# 2. Start the daemon and check its health
-orchestratord gateway start
 orchestratord gateway status
 
-# 3. Attach an orchestrator
+# Connect an orchestrator at startup
 orchestratord server start --workflow WORKFLOW.md --backend codex --gateway
-```
 
-`--gateway` opts the orchestrator into all supported direct/private messages;
-`--gateway-origin` narrows the binding and `--gateway-sock` relocates the
-socket (env equivalents: `ORCHESTRATORD_GATEWAY_ORIGIN` /
-`ORCHESTRATORD_GATEWAY_SOCK`; the same flags work on `daemon start`). A
-running orchestrator can attach or detach without a restart — these write
-control files that the daemon picks up:
-
-```bash
+# Or connect/disconnect an already-running orchestrator
 orchestratord server connect-gateway
 orchestratord server disconnect-gateway
 ```
 
-Per-channel operations:
+Feishu and WeChat can run together; `--gateway` connects all enabled private message channels. Configure authorized senders in `~/.orchestratord/gateway/channels.yaml`: Feishu uses `extra.allowed_user_open_id`, WeChat uses `extra.allowed_users`. Missing or empty sender allowlists reject inbound messages. Set `report_targets` when reports should reach multiple channels or recipients; command replies return to the sender.
 
-```bash
-orchestratord gateway login wechat        # WeChat iLink QR login
-orchestratord gateway restart feishu      # rebuild one channel adapter
-orchestratord gateway disconnect feishu   # drop that channel connection
-orchestratord gateway stop                # stop the daemon
-```
+**IM commands:**
 
-### IM command surface
-
-Orchestratord's gateway is **command-only**. It accepts two kinds of traffic:
-
-1. **Event reports** — orchestrator lifecycle, issue status, and run results
-   pushed to the authorized IM recipient.
-2. **Whitelisted slash commands** — `/server status` and `/issue ...` queries
-   or controls issued by an authorized sender, with bounded replies.
-
-Plain (non-slash) text is **never** forwarded to the orchestrator or any agent
-handler; the sender gets a bounded "commands only" notice instead. There is no
-semantic chat surface (`newPrompt` / `followUp` / `approval` / `interrupt` /
-`contextOnly` are not part of the orchestratord gateway scope).
-
-Sender authorization fails closed: each command-capable channel must be
-configured with an explicit sender allowlist (`extra.allowed_users` for WeChat,
-`extra.allowed_user_open_id` for Feishu). An empty or missing allowlist rejects
-ALL inbound messages, and unauthorized senders leave no trace.
-
-Slash commands recognized for the orchestrator host:
-
-```
+```text
 /server status
 /issue list|show|tail|stop|pause|resume|clarify|inject|feedback|review|retry|workspace|rebase
 ```
 
-Commands outside the allowlist are not pushed to the orchestrator; the sender
-gets a bounded notice instead.
+Every issue command except `list` requires `--id`, for example `/issue show --id ISSUE-1`. `/issue tail` returns a notice to use the local CLI. Review, feedback and retry commands can schedule further agent work. `command_allowlists.orchestrator` in `channels.yaml` can restrict the supported commands; restart the gateway after manual configuration changes.
 
-Every issue command except `list` requires an explicit `--id`. The gateway
-validates the concrete channel account and sender before forwarding, and the
-orchestrator checks that attestation and the supported command surface again.
-Structured chat semantics and legacy `/agent` or direct `/pause` commands
-cannot bypass these checks. `command_allowlists` can restrict the supported
-commands; adding a name does not implement a new client command.
+**Lifecycle and troubleshooting:**
 
-Commands execute sequentially on a bounded worker queue, so slow commands do
-not block heartbeat or outbound ACK reads. CLI errors and timeouts complete
-processing as failures; delivering an error reply does not turn them into
-successes. Disconnecting cancels active delivery and drops queued commands.
-
-Outbound event reports use the configured `report_targets` when present, with
-one send per destination. Per-channel wildcard targets only resolve when that
-channel has exactly one authorized user; zero or multiple authorized users are
-rejected rather than guessed. With no `report_targets`, `im:direct:*:*` keeps
-the compatibility behavior of selecting the first uniquely authorized IM
-channel (WeChat before Feishu). Command replies do not use this wildcard: they
-return to the concrete channel and user that issued the command.
-
-The current recipient allowlist is checked before every private-message send,
-including retries and persisted outbox replay. Revoked recipients produce a
-nonretryable authorization failure. Feishu replies address the authorized
-open ID directly, so a stale chat context cannot redirect them.
-
-`gateway restart <channel>` validates and starts the replacement before
-swapping it into service. Invalid credentials, startup errors, or readiness
-timeouts retain the previous adapter and configuration and return a NACK.
-Startup and health waiting share a 60-second budget; the reload client waits
-65 seconds for its final result while ordinary ACK requests keep their own timeout.
-Only exact connected/login-ready states count as ready; `disconnected` does not.
-
-### Configuration reference
-
-Channels are configured in `~/.orchestratord/gateway/channels.yaml` (normally
-maintained by `gateway setup`). Key fields:
-
-```yaml
-enabled: true
-state_dir: ~/.orchestratord/gateway
-# Optional explicit fan-out for orchestrator event reports. Bare channel names
-# address target-less webhook channels such as slack/discord/Feishu webhook.
-report_targets:
-  - wechat:direct:*:*
-  - feishu:dm:*:*
-  # - slack-main
-channels:
-  - name: slack-main
-    type: slack
-    webhook_url: https://hooks.slack.com/services/...
-    enabled: true
-  - name: wechat
-    type: wechat
-    enabled: true
-    extra:
-      account_id: default
-      # REQUIRED for inbound: only these senders may drive the bot.
-      # An empty/missing allowlist rejects ALL inbound (fail closed).
-      allowed_users:
-        - "operator@im.wechat"
-  - name: feishu
-    type: feishu
-    enabled: true
-    extra:
-      connection_mode: websocket
-      # REQUIRED for inbound: the single authorized operator open_id.
-      allowed_user_open_id: "ou_xxxxxxxx"
+```bash
+orchestratord gateway start               # Start with saved configuration
+orchestratord gateway stop
+orchestratord gateway restart --verbose   # Restart with detailed logs
+orchestratord gateway status feishu       # Or: wechat
+orchestratord gateway login wechat        # Renew WeChat QR login
+tail -f ~/.orchestratord/gateway/gateway.log
 ```
-
-State-dir layout (`~/.orchestratord/gateway`, created owner-only `0700`; files
-hold credentials and are written `0600`):
-
-| File                        | Purpose                                     |
-| --------------------------- | ------------------------------------------- |
-| `channels.yaml`             | channel + reliability configuration         |
-| `gateway.pid`, `gateway.lock` | daemon PID and single-instance lock        |
-| `gateway.sock`              | UDS JSONL IPC socket                        |
-| `health.json`               | daemon health snapshot                      |
-| `gateway.log`               | rotating daemon log                         |
-| `processed_inbound.ndjson`  | inbound dedupe ledger                       |
-| `outbox.ndjson`             | durable outbound ledger — records left pending by a crash are replayed at daemon startup (at-least-once) |
-| `dead_letter.ndjson`        | exhausted retries / unreplayable records   |
-| `audit.ndjson`              | redacted audit trail (secrets never logged)  |
-
-Environment variables:
-
-| Variable                          | Purpose                                            |
-| --------------------------------- | -------------------------------------------------- |
-| `ORCHESTRATORD_IM_SECRET`         | Fernet key encrypting WeChat credentials at rest   |
-| `ORCHESTRATORD_GATEWAY_ORIGIN`    | default gateway origin for `--gateway` opt-in      |
-| `ORCHESTRATORD_GATEWAY_SOCK`      | gateway socket override (client and daemon)       |
-| `ORCHESTRATORD_GATEWAY_LOG_LEVEL` | pin the daemon log level (`INFO`, `DEBUG`, …)     |
-| `ORCHESTRATORD_DEBUG`             | set to `1` for DEBUG logging                       |
-
-### FAQ
-
-**What if the gateway is not running when I start `server ... --gateway`?**
-The orchestrator does not crash — it keeps retrying by heartbeat and attaches
-as soon as the gateway daemon appears.
-
-**Why is a timed-out outbound message not retried?**
-A timeout is ambiguous: the message may already be in the chat, and retrying
-could duplicate it. Timed-out sends stay pending without automatic resend,
-while explicit NACK failures retry with backoff (dead-lettered when exhausted).
 
 ## Development
 

@@ -622,14 +622,18 @@ async def test_command_reply_threads_in_reply_to_delivery_id() -> None:
     in_reply_to."""
     ipc = _RecordingIpc()
 
-    def _run_cli(argv):
-        return 0, "ISSUE-1 done", ""
+    from types import SimpleNamespace
+
+    from orchestratord.commands.models import CommandResult
+
+    async def _run_cli(request):
+        return CommandResult(0, "ISSUE-1 done")
 
     client = OrchestratorGatewayClient(
         _noop_handlers(),
         ipc_client=ipc,
         origin="im:direct:*:*",
-        cli_runner=_run_cli,
+        command_service=SimpleNamespace(execute=_run_cli),
     )
 
     await client._on_pushed_deliver(

@@ -24,6 +24,8 @@ from orchestratord.channels.results import (
     ChannelSendResult,
     ErrorCategory,
 )
+from orchestratord.commands.models import CommandResult
+from orchestratord.commands.service import OrchestratorCommandService
 from orchestratord.im_gateway.config import GatewayConfig, save_config
 from orchestratord.im_gateway.gateway import MessageGateway
 from orchestratord.im_gateway_client import (
@@ -91,7 +93,7 @@ async def link(tmp_path):
         handlers,
         ipc_client=client,
         origin="im:direct:*:*",
-        cli_runner=lambda argv: (0, "ok", ""),
+        command_service=SimpleNamespace(execute=AsyncMock(return_value=CommandResult(0, "ok"))),
     )
 
     async def push(message):
@@ -204,7 +206,7 @@ async def test_real_cli_show_roundtrip(link, monkeypatch):
     registry = IssueRegistry(link.tmp / ".orchestratord_issue_registry.json")
     registry.register("I1", "Gateway integration fixture")
     monkeypatch.setenv("ORCHESTRATORD_WORKSPACE_ROOT", str(link.tmp))
-    link.wrapper._cli_runner = None
+    link.wrapper._command_service = OrchestratorCommandService(workspace_root=link.tmp)
     await link.inbound("/issue show --id I1")
     await _until(lambda: link.adapter.on_processing_complete.await_count)
     await _until(lambda: link.provider.sent)
@@ -280,11 +282,12 @@ async def test_authorized_inbound_executes_real_pause_handler_once_and_replies(l
     orch.im_event_deliver = None
     calls = []
 
-    def control(verb, issue_id):
+    def control(verb, issue_id, extra):
         calls.append((verb, issue_id))
-        orch._apply_control_command(verb, issue_id, "")
+        Orchestrator._apply_control_command(orch, verb, issue_id, extra)
 
-    link.wrapper._h.control_verb = control
+    orch._apply_control_command = control
+    link.wrapper._command_service = OrchestratorCommandService(workspace_root=link.tmp, runtime_supplier=lambda: orch)
     await link.inbound("/issue pause --id I1")
     await _until(lambda: link.provider.sent)
     await link.inbound("/issue pause --id I1")  # same message id: deduplicated
@@ -399,11 +402,8 @@ async def test_deliver_worker_serializes_and_drops_queued_commands_on_disconnect
 
 @pytest.mark.parametrize("rc", [0, 2, 124])
 async def test_processing_outcome_follows_command_result_not_reply_delivery(link, rc):
-    link.wrapper._cli_runner = lambda argv: (
-        rc,
-        "ok" if not rc else "",
-        "failed" if rc else "",
-    )
+    link.wrapper._command_service = SimpleNamespace(execute=AsyncMock(
+        return_value=CommandResult(rc, "ok" if not rc else "", "failed" if rc else "")))
     await link.inbound("/server status")
     await _until(lambda: link.adapter.on_processing_complete.await_count)
     await _until(lambda: link.provider.sent)

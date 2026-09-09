@@ -213,12 +213,12 @@ class TestReviewSalvageGate(unittest.TestCase):
                 id="21", approve=False, reject=True, feedback="wrong approach"
             )
             with mock.patch(
-                "orchestratord.cli.issue._write_control", return_value=0
+                "orchestratord.commands.issue._write_control", return_value=0
             ) as write_control:
                 rc = _run_review(registry_path, args, workspace_root=tmp)
             self.assertEqual(rc, 0)
-            write_control.assert_called_once()
-            self.assertEqual(write_control.call_args.args[0], "review_retry")
+            write_control.assert_awaited_once()
+            self.assertEqual(write_control.call_args.args[1], "review_retry")
 
     def test_reject_plain_completion_is_refused(self) -> None:
         from unittest import mock
@@ -235,7 +235,7 @@ class TestReviewSalvageGate(unittest.TestCase):
                 id="22", approve=False, reject=True, feedback="nope"
             )
             with mock.patch(
-                "orchestratord.cli.issue._write_control", return_value=0
+                "orchestratord.commands.issue._write_control", return_value=0
             ) as write_control:
                 rc = _run_review(registry_path, args, workspace_root=tmp)
             self.assertEqual(rc, 1)

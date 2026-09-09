@@ -4466,8 +4466,16 @@ class Orchestrator:
         )
         session_id = f"orchestrator-{os.getpid()}-{int(time.time() * 1000)}"
         ipc = GatewayIpcClient(sock, instance_id=session_id)
+        from orchestratord.commands.service import OrchestratorCommandService
+
+        command_service = OrchestratorCommandService(
+            workspace_root=self._workspace_root,
+            workflow_path=getattr(self, "_workflow_path", None),
+            runtime_supplier=lambda: self,
+        )
         wrapper = OrchestratorGatewayClient(
-            handlers, ipc_client=ipc, origin=origin, command_router=None, control_bridge=None
+            handlers, ipc_client=ipc, origin=origin, command_router=None, control_bridge=None,
+            command_service=command_service
         )
         try:
             await ipc.connect()
