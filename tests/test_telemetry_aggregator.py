@@ -113,6 +113,7 @@ async def test_runner_emits_enriched_session_end(telemetry_home) -> None:
 
     # Per-turn stats from the two TURN_COMPLETE events.
     assert summary["turns"]["turn_events"] == 2
+    assert summary["turns"]["total"] == 2
     assert summary["turns"]["total_s"] >= 0.0
 
     # Per-backend rollup merges session_end + usage events.
@@ -214,3 +215,91 @@ def test_empty_day_renders_base_tables_only(telemetry_home) -> None:
     rendered = render_summary_markdown(summary)
     assert "## 汇总" in rendered
     assert "## 耗时 (agent 会话)" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_verification_gate_records_blocked_and_passed(telemetry_home) -> None:
+    from orchestratord.git.sync import GitSyncService
+    from orchestratord.kernel.lifecycle import VerificationFailed
+
+    async def _blocked(*_args: Any) -> None:
+        raise VerificationFailed("test verification failed", "output")
+
+    async def _passed(*_args: Any) -> None:
+        pass
+
+    session = _session(
+        session_id=None,
+        backend_session_id="bs-1",
+        verification_status=None,
+        issue=SimpleNamespace(id="7"),
+    )
+    runner = object.__new__(GitSyncService)
+    runner._run_pre_push_verification_checks = _blocked  # type: ignore[method-assign]
+
+    with pytest.raises(VerificationFailed):
+        await runner._run_pre_push_verification("/tmp/repo", session)
+
+    events = [ev for ev in telemetry_home.read_events() if ev.get("type") == "verification"]
+    assert len(events) == 1
+    assert events[0]["payload"]["outcome"] == "blocked"
+    assert events[0]["payload"]["blocked_by"] == "test verification failed"
+    # session_id falls back: session_id → backend_session_id → run_id.
+    assert events[0]["session_id"] == "bs-1"
+    assert events[0]["issue_id"] == "7"
+
+    runner._run_pre_push_verification_checks = _passed  # type: ignore[method-assign]
+    session.verification_status = "passed"
+    await runner._run_pre_push_verification("/tmp/repo", session)
+
+    events = [ev for ev in telemetry_home.read_events() if ev.get("type") == "verification"]
+    assert len(events) == 2
+    assert events[1]["payload"]["outcome"] == "passed"
+
+
+def test_verification_and_crash_aggregation(telemetry_home) -> None:
+    from orchestratord.telemetry import record_crash, record_verification
+    from orchestratord.telemetry.aggregator import aggregate_day, render_summary_markdown
+
+    record_verification(outcome="blocked", blocked_by="test verification failed")
+    record_verification(outcome="passed")
+    record_verification(outcome="blocked", blocked_by="repro verification failed")
+    record_crash(kind="daemon_unclean_shutdown", previous_pid=123)
+    record_crash(kind="backend_worker", detail="worker exited")
+
+    summary = aggregate_day()
+
+    gate = summary["verification"]
+    assert gate["attempts"] == 3
+    assert gate["blocked"] == 2
+    assert gate["interception_rate"] == pytest.approx(2 / 3)
+    assert gate["blocked_by"]["test verification failed"] == 1
+    assert gate["blocked_by"]["repro verification failed"] == 1
+
+    crashes = summary["crashes"]
+    assert crashes["total"] == 2
+    assert crashes["by_kind"]["daemon_unclean_shutdown"] == 1
+    assert crashes["by_kind"]["backend_worker"] == 1
+    # No agent sessions that day → per-session backend crash rate unknown.
+    assert crashes["backend_rate_per_session"] is None
+
+    rendered = render_summary_markdown(summary)
+    assert "## 验证门" in rendered
+    assert "缺陷拦截率 | 66.7%" in rendered
+    assert "## 崩溃" in rendered
+    assert "daemon_unclean_shutdown | 1 |" in rendered
+
+
+def test_read_orchestrator_metadata(tmp_path, monkeypatch) -> None:
+    import os
+
+    from orchestratord import workspace_locator as wl
+
+    monkeypatch.setattr(wl, "ORCHESTRATORD_ORCHESTRATOR_DIR", tmp_path)
+    assert wl.read_orchestrator_metadata(tmp_path / "ws") is None
+
+    wl.write_orchestrator_metadata(workspace_root=tmp_path / "ws", started_at=123.0)
+    meta = wl.read_orchestrator_metadata(tmp_path / "ws")
+    assert meta is not None
+    assert meta["pid"] == os.getpid()
+    assert meta["started_at"] == 123.0
