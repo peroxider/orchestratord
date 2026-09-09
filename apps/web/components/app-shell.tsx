@@ -13,17 +13,19 @@ import {
 } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import {
-  useCreateIssue,
   useInbox,
   useInstance,
   useRealtimeBridge,
   useSessions,
   type InstanceBootstrap,
 } from '@orchestratord/core'
-import { Button, Input, Textarea } from '@orchestratord/ui'
+import type { ActionContribution, ApplicationRegistry, ResourceRef } from '@orchestratord/app-contracts'
+import { Button } from '@orchestratord/ui'
 import { LocaleSwitcher, useLocale } from '@orchestratord/views'
 import { apiClient } from '@/lib/api'
 import { useTheme } from '@/app/web-providers'
+import { registryForInstance } from '@/lib/registered-applications'
+import { ApplicationRegistryProvider } from './application-registry'
 
 const InstanceContext = createContext<InstanceBootstrap | null>(null)
 
@@ -66,26 +68,26 @@ function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
 }
 
 const copy = {
-  en: { groups: ['Attention', 'Work', 'Orchestration', 'System'], newIssue: 'New issue', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', reconnecting: 'Reconnecting', degraded: 'Degraded', offline: 'Offline', create: 'Create issue', title: 'Issue title', description: 'Describe the desired outcome…', cancel: 'Cancel', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', reconnectNote: 'Realtime is taking longer than expected to reconnect. You can keep working with the data already loaded.', degradedNote: 'Live updates are degraded. Loaded data remains available while the console continues reconnecting.', recovered: 'Realtime connection restored.', noResults: 'No matching issues, sessions, agents, or commands.', creating: 'Creating…' },
-  'zh-CN': { groups: ['需要关注', '工作', '编排', '系统'], newIssue: '新建任务', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', reconnecting: '正在重连', degraded: '服务降级', offline: '离线', create: '创建任务', title: '任务标题', description: '描述期望结果…', cancel: '取消', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', reconnectNote: '实时连接恢复时间超出预期。你仍可继续处理已加载的数据。', degradedNote: '实时更新已降级。已加载数据仍可使用，控制台会继续尝试重连。', recovered: '实时连接已恢复。', noResults: '没有匹配的任务、会话、Agent 或命令。', creating: '正在创建…' },
-  ja: { groups: ['要対応', '作業', 'オーケストレーション', 'システム'], newIssue: 'Issue を作成', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', reconnecting: '再接続中', degraded: '機能低下', offline: 'オフライン', create: 'Issue を作成', title: 'Issue タイトル', description: '期待する結果を説明…', cancel: 'キャンセル', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', reconnectNote: 'リアルタイム接続の復旧に時間がかかっています。読み込み済みのデータは引き続き操作できます。', degradedNote: 'ライブ更新の機能が低下しています。読み込み済みデータは利用でき、再接続を継続します。', recovered: 'リアルタイム接続が復旧しました。', noResults: '一致する Issue、セッション、エージェント、コマンドはありません。', creating: '作成中…' },
+  en: { workflows: 'Workflows', newAction: 'New', search: 'Search or run a command', connected: 'Connected', connecting: 'Connecting', reconnecting: 'Reconnecting', degraded: 'Degraded', offline: 'Offline', offlineNote: 'Realtime is offline. Existing data is safe; reconnect the local service to receive live updates.', reconnectNote: 'Realtime is taking longer than expected to reconnect. You can keep working with the data already loaded.', degradedNote: 'Live updates are degraded. Loaded data remains available while the console continues reconnecting.', recovered: 'Realtime connection restored.', noResults: 'No matching pages, resources, or commands.' },
+  'zh-CN': { workflows: '业务流', newAction: '新建', search: '搜索或运行命令', connected: '已连接', connecting: '连接中', reconnecting: '正在重连', degraded: '服务降级', offline: '离线', offlineNote: '实时连接已离线。现有数据不会受影响；重新连接本地服务后即可接收更新。', reconnectNote: '实时连接恢复时间超出预期。你仍可继续处理已加载的数据。', degradedNote: '实时更新已降级。已加载数据仍可使用，控制台会继续尝试重连。', recovered: '实时连接已恢复。', noResults: '没有匹配的页面、资源或命令。' },
+  ja: { workflows: '業務フロー', newAction: '新規', search: '検索またはコマンド', connected: '接続済み', connecting: '接続中', reconnecting: '再接続中', degraded: '機能低下', offline: 'オフライン', offlineNote: 'リアルタイム接続がオフラインです。既存データは安全です。ローカルサービスを再接続すると更新を受信できます。', reconnectNote: 'リアルタイム接続の復旧に時間がかかっています。読み込み済みのデータは引き続き操作できます。', degradedNote: 'ライブ更新の機能が低下しています。読み込み済みデータは利用でき、再接続を継続します。', recovered: 'リアルタイム接続が復旧しました。', noResults: '一致するページ、リソース、コマンドはありません。' },
 } as const
 
-const NAV = [
-  [{ href: '/', icon: 'overview', labels: ['Overview', '总览', '概要'] }, { href: '/inbox', icon: 'inbox', labels: ['Inbox', '收件箱', '受信箱'] }, { href: '/chat', icon: 'chat', labels: ['Chat', '对话', 'チャット'] }],
-  [{ href: '/issues', icon: 'issues', labels: ['Issues', '任务', 'Issue'] }, { href: '/projects', icon: 'projects', labels: ['Projects', '项目', 'プロジェクト'] }],
-  [{ href: '/sessions', icon: 'sessions', labels: ['Sessions', '会话', 'セッション'] }, { href: '/agents', icon: 'agents', labels: ['Agents', 'Agent', 'エージェント'] }, { href: '/squads', icon: 'squads', labels: ['Squads', 'Agent 小组', 'Squad'] }, { href: '/autopilots', icon: 'autopilots', labels: ['Autopilots', '自动任务', '自動タスク'] }],
-  [{ href: '/runtimes', icon: 'runtimes', labels: ['Runtimes', '运行时', 'ランタイム'] }, { href: '/skills', icon: 'skills', labels: ['Skills', '技能', 'スキル'] }, { href: '/usage', icon: 'usage', labels: ['Usage', '用量', '使用量'] }, { href: '/activity', icon: 'activity', labels: ['Activity', '活动', 'アクティビティ'] }],
-] as const
+type NavItem = { href: string; icon: IconName; labels: readonly [string, string, string] }
+const PLATFORM_NAV: Array<{ labels: readonly [string, string, string]; items: NavItem[] }> = [
+  { labels: ['Attention', '需要关注', '要対応'], items: [{ href: '/', icon: 'overview', labels: ['Overview', '总览', '概要'] }, { href: '/inbox', icon: 'inbox', labels: ['Inbox', '收件箱', '受信箱'] }, { href: '/chat', icon: 'chat', labels: ['Chat', '对话', 'チャット'] }] },
+  { labels: ['Orchestration', '编排', 'オーケストレーション'], items: [{ href: '/sessions', icon: 'sessions', labels: ['Sessions', '会话', 'セッション'] }, { href: '/agents', icon: 'agents', labels: ['Agents', 'Agent', 'エージェント'] }, { href: '/squads', icon: 'squads', labels: ['Squads', 'Agent 小组', 'Squad'] }, { href: '/autopilots', icon: 'autopilots', labels: ['Autopilots', '自动任务', '自動タスク'] }] },
+  { labels: ['System', '系统', 'システム'], items: [{ href: '/projects', icon: 'projects', labels: ['Projects', '项目', 'プロジェクト'] }, { href: '/runtimes', icon: 'runtimes', labels: ['Runtimes', '运行时', 'ランタイム'] }, { href: '/skills', icon: 'skills', labels: ['Skills', '技能', 'スキル'] }, { href: '/usage', icon: 'usage', labels: ['Usage', '用量', '使用量'] }, { href: '/activity', icon: 'activity', labels: ['Activity', '活动', 'アクティビティ'] }] },
+]
 
 const detailsCopy = {
-  en: { help: 'Keyboard shortcuts', diagnostics: 'Connection diagnostics', rest: 'REST API', realtime: 'Realtime', runtime: 'Runtime target', status: 'Status', local: 'Local instance', close: 'Close', nav: 'Navigate', shortcuts: [['⌘/Ctrl K', 'Search and commands'], ['C', 'Create an issue'], ['G then O', 'Go to Overview'], ['G then I', 'Go to Inbox'], ['G then W', 'Go to Issues'], ['G then S', 'Go to Sessions'], ['?', 'Open shortcut help'], ['Esc', 'Close the top layer']] },
-  'zh-CN': { help: '键盘快捷键', diagnostics: '连接诊断', rest: 'REST API', realtime: '实时连接', runtime: '运行时目标', status: '状态', local: '本地实例', close: '关闭', nav: '导航', shortcuts: [['⌘/Ctrl K', '搜索与命令'], ['C', '创建任务'], ['G 再按 O', '前往总览'], ['G 再按 I', '前往收件箱'], ['G 再按 W', '前往任务'], ['G 再按 S', '前往会话'], ['?', '打开快捷键帮助'], ['Esc', '关闭最上层界面']] },
-  ja: { help: 'キーボードショートカット', diagnostics: '接続診断', rest: 'REST API', realtime: 'リアルタイム', runtime: 'ランタイム接続先', status: '状態', local: 'ローカルインスタンス', close: '閉じる', nav: '移動', shortcuts: [['⌘/Ctrl K', '検索とコマンド'], ['C', 'Issue を作成'], ['G → O', '概要へ移動'], ['G → I', '受信箱へ移動'], ['G → W', 'Issue へ移動'], ['G → S', 'セッションへ移動'], ['?', 'ショートカットを表示'], ['Esc', '最前面を閉じる']] },
+  en: { help: 'Keyboard shortcuts', diagnostics: 'Connection diagnostics', rest: 'REST API', realtime: 'Realtime', runtime: 'Runtime target', status: 'Status', local: 'Local instance', close: 'Close', nav: 'Navigate', shortcuts: [['⌘/Ctrl K', 'Search and commands'], ['G then O', 'Go to Overview'], ['G then I', 'Go to Inbox'], ['G then S', 'Go to Sessions'], ['?', 'Open shortcut help'], ['Esc', 'Close the top layer']] },
+  'zh-CN': { help: '键盘快捷键', diagnostics: '连接诊断', rest: 'REST API', realtime: '实时连接', runtime: '运行时目标', status: '状态', local: '本地实例', close: '关闭', nav: '导航', shortcuts: [['⌘/Ctrl K', '搜索与命令'], ['G 再按 O', '前往总览'], ['G 再按 I', '前往收件箱'], ['G 再按 S', '前往会话'], ['?', '打开快捷键帮助'], ['Esc', '关闭最上层界面']] },
+  ja: { help: 'キーボードショートカット', diagnostics: '接続診断', rest: 'REST API', realtime: 'リアルタイム', runtime: 'ランタイム接続先', status: '状態', local: 'ローカルインスタンス', close: '閉じる', nav: '移動', shortcuts: [['⌘/Ctrl K', '検索とコマンド'], ['G → O', '概要へ移動'], ['G → I', '受信箱へ移動'], ['G → S', 'セッションへ移動'], ['?', 'ショートカットを表示'], ['Esc', '最前面を閉じる']] },
 } as const
 
-const GO_ROUTES: Record<string, string> = { o: '/', i: '/inbox', c: '/chat', w: '/issues', p: '/projects', s: '/sessions', a: '/agents', q: '/squads', u: '/autopilots', r: '/runtimes', k: '/skills', g: '/usage', v: '/activity' }
-type CommandItem = { label: string; type: string; href: string }
+const GO_ROUTES: Record<string, string> = { o: '/', i: '/inbox', c: '/chat', p: '/projects', s: '/sessions', a: '/agents', q: '/squads', u: '/autopilots', r: '/runtimes', k: '/skills', g: '/usage', v: '/activity' }
+type CommandItem = { label: string; type: string; href: string; resource?: ResourceRef }
 const RECENT_KEY = 'orchestratord.recent-items'
 
 function recentItems(): CommandItem[] {
@@ -103,9 +105,9 @@ function rememberItem(item: CommandItem): CommandItem[] {
 }
 
 const paletteCopy = {
-  en: { recent: 'Recent', browse: 'browse', open: 'open', newIssue: 'new issue', close: 'close', palette: 'Command palette' },
-  'zh-CN': { recent: '最近访问', browse: '选择', open: '打开', newIssue: '新建任务', close: '关闭', palette: '命令面板' },
-  ja: { recent: '最近使った項目', browse: '選択', open: '開く', newIssue: 'Issue を作成', close: '閉じる', palette: 'コマンドパレット' },
+  en: { recent: 'Recent', browse: 'browse', open: 'open', create: 'create', close: 'close', palette: 'Command palette' },
+  'zh-CN': { recent: '最近访问', browse: '选择', open: '打开', create: '新建', close: '关闭', palette: '命令面板' },
+  ja: { recent: '最近使った項目', browse: '選択', open: '開く', create: '新規', close: '閉じる', palette: 'コマンドパレット' },
 } as const
 
 function localeIndex(locale: string) { return locale === 'zh-CN' ? 1 : locale === 'ja' ? 2 : 0 }
@@ -145,24 +147,34 @@ export function AppShell({ children }: { children: ReactNode }) {
   const instance = useInstance(apiClient)
   if (instance.isPending) return <BootstrapState />
   if (instance.isError) return <BootstrapState error={instance.error?.message} retry={() => instance.refetch()} />
-  return <InstanceContext.Provider value={instance.data}><ShellContent instance={instance.data}>{children}</ShellContent></InstanceContext.Provider>
+  const registry = registryForInstance(instance.data)
+  return <InstanceContext.Provider value={instance.data}><ApplicationRegistryProvider registry={registry}><ShellContent instance={instance.data} registry={registry}>{children}</ShellContent></ApplicationRegistryProvider></InstanceContext.Provider>
 }
 
 function BootstrapState({ error, retry }: { error?: string; retry?: () => void }) {
   return <main className="bootstrap-state"><div className="brand-mark">O</div><p className="bootstrap-state__eyebrow">LOCAL CONTROL PLANE</p><h1>{error ? 'Instance unavailable' : 'Opening execution ledger'}</h1><p>{error ? `The local API could not initialize the console. Your data has not been changed. ${error}` : 'Resolving the local instance and execution context…'}</p>{retry && <Button onClick={retry}>Retry connection</Button>}</main>
 }
 
-function ShellContent({ instance, children }: { instance: InstanceBootstrap; children: ReactNode }) {
+function ShellContent({ instance, registry, children }: { instance: InstanceBootstrap; registry: ApplicationRegistry; children: ReactNode }) {
   const pathname = usePathname() ?? '/'
   const router = useRouter()
   const locale = useLocale()
   const c = copy[locale]
   const idx = localeIndex(locale)
+  const workflowGroups = registry.applications().map(application => ({
+    labels: [application.displayName.en, application.displayName['zh-CN'], application.displayName.ja] as const,
+    items: registry.navigation().filter(item => item.applicationId === application.id).map(item => ({ href: item.href, icon: item.icon as IconName, labels: [item.label.en, item.label['zh-CN'], item.label.ja] as const })),
+    workflow: true,
+  }))
+  const navGroups = [PLATFORM_NAV[0]!, ...workflowGroups, ...PLATFORM_NAV.slice(1)]
+  const allNav = navGroups.flatMap(group => group.items)
+  const actions = registry.globalActions()
   const { theme, toggleTheme } = useTheme()
   const [mobileOpen, setMobileOpen] = useState(false)
   const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && localStorage.getItem('orchestratord.sidebar') === 'collapsed')
   const [searchOpen, setSearchOpen] = useState(false)
-  const [createOpen, setCreateOpen] = useState(false)
+  const [createMenuOpen, setCreateMenuOpen] = useState(false)
+  const [selectedAction, setSelectedAction] = useState<ActionContribution | null>(null)
   const [infoOpen, setInfoOpen] = useState<'help' | 'diagnostics' | null>(null)
   const [returnFocus, setReturnFocus] = useState<HTMLElement | null>(null)
   const goPrefix = useRef<number | null>(null)
@@ -212,8 +224,8 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
     degradedTimer.current = null
     setReconnectNotice(false)
     setConnection('offline')
-  }, [])
-  useRealtimeBridge({ url: instance.realtime_url, workspaceId: instance.workspace_id, onStatus: onRealtimeStatus })
+  }, [setConnection, setReconnectNotice, setRecovered])
+  useRealtimeBridge({ url: instance.realtime_url, workspaceId: instance.workspace_id, onStatus: onRealtimeStatus, applicationContributions: registry.realtime() })
 
   useEffect(() => () => {
     if (reconnectTimer.current !== null) window.clearTimeout(reconnectTimer.current)
@@ -224,15 +236,16 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
   const openSearch = useCallback(() => {
     setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
     setSearchOpen(true)
-  }, [])
+  }, [setReturnFocus, setSearchOpen])
   const openCreate = useCallback(() => {
     setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
-    setCreateOpen(true)
-  }, [])
+    if (actions.length === 1) setSelectedAction(actions[0]!)
+    else if (actions.length > 1) setCreateMenuOpen(true)
+  }, [actions, setReturnFocus, setSelectedAction, setCreateMenuOpen])
   const openInfo = useCallback((kind: 'help' | 'diagnostics') => {
     setReturnFocus(document.activeElement instanceof HTMLElement ? document.activeElement : null)
     setInfoOpen(kind)
-  }, [])
+  }, [setReturnFocus, setInfoOpen])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -243,17 +256,17 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
       if (!typing && !event.metaKey && !event.ctrlKey && key === 'g') { event.preventDefault(); if (goPrefix.current !== null) window.clearTimeout(goPrefix.current); goPrefix.current = window.setTimeout(() => { goPrefix.current = null }, 1_200); return }
       if (!typing && !event.metaKey && !event.ctrlKey && key === 'c') { event.preventDefault(); openCreate() }
       if (!typing && !event.metaKey && !event.ctrlKey && event.key === '?') { event.preventDefault(); openInfo('help') }
-      if (event.key === 'Escape') { setSearchOpen(false); setCreateOpen(false); setInfoOpen(null); setMobileOpen(false) }
+      if (event.key === 'Escape') { setSearchOpen(false); setCreateMenuOpen(false); setSelectedAction(null); setInfoOpen(null); setMobileOpen(false) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [openCreate, openInfo, openSearch, router])
 
-  const active = NAV.flat().find((item) => item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)) ?? NAV[0][0]
+  const active = allNav.find((item) => item.href === '/' ? pathname === '/' : pathname.startsWith(item.href)) ?? PLATFORM_NAV[0]!.items[0]!
   const title = active.labels[idx]
   const connectionText = connection === 'connected' ? c.connected : connection === 'connecting' ? c.connecting : connection === 'reconnecting' ? c.reconnecting : connection === 'degraded' ? c.degraded : c.offline
   const navigate = (href: string) => {
-    const item = NAV.flat().find(value => value.href === href)
+    const item = allNav.find(value => value.href === href)
     if (item) rememberItem({ label: item.labels[idx], type: 'Navigate', href })
     router.push(href); setMobileOpen(false)
   }
@@ -263,29 +276,41 @@ function ShellContent({ instance, children }: { instance: InstanceBootstrap; chi
     <aside className={`app-sidebar${mobileOpen ? ' app-sidebar--open' : ''}`}>
       <div className="app-sidebar__brand"><span className="brand-mark">O</span><span className="app-sidebar__brand-copy"><strong>{instance.instance_name}</strong><small>EXECUTION LEDGER</small></span><button className="icon-button app-sidebar__mobile-close" aria-label="Close navigation" onClick={() => setMobileOpen(false)}><Icon name="close" /></button></div>
       <nav className="app-nav" aria-label="Primary navigation">
-        {NAV.map((group, groupIndex) => <section className="app-nav__group" key={c.groups[groupIndex]}><p className="app-nav__label">{c.groups[groupIndex]}</p>{group.map((item) => { const selected = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href); const count = item.href === '/inbox' ? inboxCount : item.href === '/sessions' ? activeSessionCount : 0; return <button key={item.href} className="app-nav__item" data-selected={selected || undefined} onClick={() => navigate(item.href)} title={item.labels[idx]}><Icon name={item.icon} /><span>{item.labels[idx]}</span>{count > 0 && <i className="app-nav__badge">{count}</i>}{item.href === '/runtimes' && connection !== 'connected' && <i className={`nav-connection-dot connection-dot connection-dot--${connection}`} aria-hidden="true" />}</button> })}</section>)}
+        <NavGroup group={PLATFORM_NAV[0]!} idx={idx} pathname={pathname} navigate={navigate} inboxCount={inboxCount} activeSessionCount={activeSessionCount} connection={connection} />
+        {workflowGroups.length > 0 && <section className="app-nav__group app-nav__group--workflows"><p className="app-nav__label">{c.workflows}</p>{workflowGroups.map(group => <div className="app-nav__workflow" key={group.labels[idx]}><p className="app-nav__workflow-label">{group.labels[idx]}</p>{group.items.map(item => { const selected = pathname.startsWith(item.href); return <button key={item.href} className="app-nav__item" data-selected={selected || undefined} onClick={() => navigate(item.href)} title={`${group.labels[idx]} · ${item.labels[idx]}`} aria-label={`${group.labels[idx]} · ${item.labels[idx]}`}><Icon name={item.icon} /><span>{item.labels[idx]}</span></button> })}</div>)}</section>}
+        {PLATFORM_NAV.slice(1).map(group => <NavGroup key={group.labels[idx]} group={group} idx={idx} pathname={pathname} navigate={navigate} inboxCount={inboxCount} activeSessionCount={activeSessionCount} connection={connection} />)}
       </nav>
       <div className="app-sidebar__footer"><button className="runtime-summary" onClick={() => openInfo('diagnostics')}><span className={`connection-dot connection-dot--${connection}`} /><div><strong>{connectionText}</strong><small>localhost · v{instance.server_version}</small></div></button><button className="icon-button sidebar-help" onClick={() => openInfo('help')} aria-label={detailsCopy[locale].help}><Icon name="help" /></button><button className="sidebar-collapse" onClick={() => { const next = !collapsed; setCollapsed(next); localStorage.setItem('orchestratord.sidebar', next ? 'collapsed' : 'expanded') }} aria-label="Toggle sidebar">{collapsed ? '›' : '‹'}</button></div>
     </aside>
     <div className="app-main">
-      <header className="page-header"><div className="page-header__identity"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><Icon name={active.icon} /><h1>{title}</h1></div><div className="page-header__actions"><button className="search-trigger" onClick={openSearch}><Icon name="search" /><span>{c.search}</span><kbd>⌘ K</kbd></button><button className="connection-button" onClick={() => openInfo('diagnostics')} title={`${instance.realtime_url} · REST 127.0.0.1:9000`}><span className={`connection-dot connection-dot--${connection}`} /><span>{connectionText}</span></button><button className="icon-button" aria-label="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button><LocaleSwitcher /><Button onClick={openCreate}><Icon name="plus" />{c.newIssue}</Button></div></header>
+      <header className="page-header"><div className="page-header__identity"><button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button><Icon name={active.icon} /><h1>{title}</h1></div><div className="page-header__actions"><button className="search-trigger" onClick={openSearch}><Icon name="search" /><span>{c.search}</span><kbd>⌘ K</kbd></button><button className="connection-button" onClick={() => openInfo('diagnostics')} title={`${instance.realtime_url} · REST API`}><span className={`connection-dot connection-dot--${connection}`} /><span>{connectionText}</span></button><button className="icon-button" aria-label="Toggle theme" onClick={toggleTheme}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button><LocaleSwitcher />{actions.length > 0 && <Button onClick={openCreate}><Icon name="plus" />{actions.length === 1 ? actions[0]!.label[locale] : c.newAction}</Button>}</div></header>
       {connection === 'offline' && <div className="connection-banner">{c.offlineNote}</div>}
       {reconnectNotice && (connection === 'reconnecting' || connection === 'degraded') && <div className="connection-banner">{connection === 'degraded' ? c.degradedNote : c.reconnectNote}</div>}
       <main className="page-canvas">{children}</main>
     </div>
-    {searchOpen && <CommandPalette instance={instance} close={() => setSearchOpen(false)} navigate={navigate} returnFocus={returnFocus} />}
-    {createOpen && <CreateIssueDialog workspaceId={instance.workspace_id} close={() => setCreateOpen(false)} labels={c} navigate={navigate} returnFocus={returnFocus} />}
-    {infoOpen && <InfoDialog kind={infoOpen} instance={instance} connection={connection} close={() => setInfoOpen(null)} returnFocus={returnFocus} />}
+    {searchOpen && <CommandPalette instance={instance} registry={registry} navItems={allNav} close={() => setSearchOpen(false)} navigate={navigate} returnFocus={returnFocus} />}
+    {createMenuOpen && <ActionMenu actions={actions} locale={locale} choose={action => { setCreateMenuOpen(false); setSelectedAction(action) }} close={() => setCreateMenuOpen(false)} />}
+    {selectedAction?.render({ workspaceId: instance.workspace_id, navigate, close: () => setSelectedAction(null) })}
+    {infoOpen && <InfoDialog kind={infoOpen} instance={instance} connection={connection} actions={actions} close={() => setInfoOpen(null)} returnFocus={returnFocus} />}
     {recovered && <div className="sync-toast" role="status"><span className="connection-dot connection-dot--connected" />{c.recovered}</div>}
   </div>
 }
 
-function InfoDialog({ kind, instance, connection, close, returnFocus }: { kind: 'help' | 'diagnostics'; instance: InstanceBootstrap; connection: string; close: () => void; returnFocus?: HTMLElement | null }) {
-  const locale = useLocale(); const c = detailsCopy[locale]; const ref = useRef<HTMLElement>(null); const onKeyDown = useDialogFocus(ref, returnFocus)
-  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={ref} onKeyDown={onKeyDown} className="info-dialog" role="dialog" aria-modal="true" aria-label={kind === 'help' ? c.help : c.diagnostics}><header><div><p className="dialog-eyebrow">{kind === 'help' ? c.nav : c.local}</p><h2>{kind === 'help' ? c.help : c.diagnostics}</h2></div><button autoFocus type="button" className="icon-button" aria-label={c.close} onClick={close}><Icon name="close" /></button></header>{kind === 'help' ? <dl className="shortcut-list">{c.shortcuts.map(([keys, label]) => <div key={keys}><dt><kbd>{keys}</kbd></dt><dd>{label}</dd></div>)}</dl> : <dl className="diagnostic-list"><div><dt>{c.status}</dt><dd><span className={`connection-dot connection-dot--${connection}`} />{connection}</dd></div><div><dt>{c.rest}</dt><dd><code>http://127.0.0.1:9000</code></dd></div><div><dt>{c.realtime}</dt><dd><code>{instance.realtime_url}</code></dd></div><div><dt>{c.runtime}</dt><dd>localhost · v{instance.server_version}</dd></div></dl>}</section></div>
+function NavGroup({ group, idx, pathname, navigate, inboxCount, activeSessionCount, connection }: { group: { labels: readonly [string, string, string]; items: NavItem[] }; idx: number; pathname: string; navigate(href: string): void; inboxCount: number; activeSessionCount: number; connection: string }) {
+  return <section className="app-nav__group"><p className="app-nav__label">{group.labels[idx]}</p>{group.items.map(item => { const selected = item.href === '/' ? pathname === '/' : pathname.startsWith(item.href); const count = item.href === '/inbox' ? inboxCount : item.href === '/sessions' ? activeSessionCount : 0; return <button key={item.href} className="app-nav__item" data-selected={selected || undefined} onClick={() => navigate(item.href)} title={item.labels[idx]}><Icon name={item.icon} /><span>{item.labels[idx]}</span>{count > 0 && <i className="app-nav__badge">{count}</i>}{item.href === '/runtimes' && connection !== 'connected' && <i className={`nav-connection-dot connection-dot connection-dot--${connection}`} aria-hidden="true" />}</button> })}</section>
 }
 
-function CommandPalette({ instance, close, navigate, returnFocus }: { instance: InstanceBootstrap; close: () => void; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
+function ActionMenu({ actions, locale, choose, close }: { actions: readonly ActionContribution[]; locale: 'en' | 'zh-CN' | 'ja'; choose(action: ActionContribution): void; close(): void }) {
+  return <div className="dialog-layer" onMouseDown={event => { if (event.target === event.currentTarget) close() }}><section className="action-menu" role="dialog" aria-modal="true" aria-label={copy[locale].newAction}><header><p className="dialog-eyebrow">{copy[locale].workflows}</p><h2>{copy[locale].newAction}</h2></header>{actions.map(action => <button key={action.id} autoFocus={action === actions[0]} onClick={() => choose(action)}><Icon name={action.icon as IconName} /><span>{action.label[locale]}</span>{action.shortcut && <kbd>{action.shortcut}</kbd>}</button>)}</section></div>
+}
+
+function InfoDialog({ kind, instance, connection, actions, close, returnFocus }: { kind: 'help' | 'diagnostics'; instance: InstanceBootstrap; connection: string; actions: readonly ActionContribution[]; close: () => void; returnFocus?: HTMLElement | null }) {
+  const locale = useLocale(); const c = detailsCopy[locale]; const ref = useRef<HTMLElement>(null); const onKeyDown = useDialogFocus(ref, returnFocus)
+  const shortcuts = [...c.shortcuts, ...actions.flatMap(action => action.shortcut ? [[action.shortcut, action.label[locale]] as const] : [])]
+  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={ref} onKeyDown={onKeyDown} className="info-dialog" role="dialog" aria-modal="true" aria-label={kind === 'help' ? c.help : c.diagnostics}><header><div><p className="dialog-eyebrow">{kind === 'help' ? c.nav : c.local}</p><h2>{kind === 'help' ? c.help : c.diagnostics}</h2></div><button autoFocus type="button" className="icon-button" aria-label={c.close} onClick={close}><Icon name="close" /></button></header>{kind === 'help' ? <dl className="shortcut-list">{shortcuts.map(([keys, label]) => <div key={keys}><dt><kbd>{keys}</kbd></dt><dd>{label}</dd></div>)}</dl> : <dl className="diagnostic-list"><div><dt>{c.status}</dt><dd><span className={`connection-dot connection-dot--${connection}`} />{connection}</dd></div><div><dt>{c.rest}</dt><dd><code>http://127.0.0.1:9000</code></dd></div><div><dt>{c.realtime}</dt><dd><code>{instance.realtime_url}</code></dd></div><div><dt>{c.runtime}</dt><dd>localhost · v{instance.server_version}</dd></div></dl>}</section></div>
+}
+
+function CommandPalette({ instance, registry, navItems, close, navigate, returnFocus }: { instance: InstanceBootstrap; registry: ApplicationRegistry; navItems: NavItem[]; close: () => void; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
   const locale = useLocale(); const idx = localeIndex(locale)
   const p = paletteCopy[locale]
   const [query, setQuery] = useState('')
@@ -296,17 +321,17 @@ function CommandPalette({ instance, close, navigate, returnFocus }: { instance: 
   const [entities, setEntities] = useState<CommandItem[]>([])
   useEffect(() => {
     let live = true
+    const controller = new AbortController()
     Promise.allSettled([
-      apiClient.request<Array<{ id: string; title: string }>>(`/api/workspaces/${instance.workspace_id}/issues`),
-      apiClient.request<Array<{ id: string; mode: string }>>(`/api/workspaces/${instance.workspace_id}/sessions`),
-      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/agents`),
-      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/projects`),
-      apiClient.request<Array<{ id: string; hostname: string }>>(`/api/workspaces/${instance.workspace_id}/runtimes`),
-      apiClient.request<Array<{ name: string; display_name: string }>>('/api/skills'),
-      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/autopilots`),
-      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/squads`),
-    ]).then(([issues, sessions, agents, projects, runtimes, skills, autopilots, squads]) => { if (!live) return; setEntities([
-      ...(issues.status === 'fulfilled' ? issues.value.map(x => ({ label: x.title, type: 'Issue', href: `/issues/${x.id}` })) : []),
+      apiClient.request<Array<{ id: string; mode: string }>>(`/api/workspaces/${instance.workspace_id}/sessions`, { signal: controller.signal }),
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/agents`, { signal: controller.signal }),
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/projects`, { signal: controller.signal }),
+      apiClient.request<Array<{ id: string; hostname: string }>>(`/api/workspaces/${instance.workspace_id}/runtimes`, { signal: controller.signal }),
+      apiClient.request<Array<{ name: string; display_name: string }>>('/api/skills', { signal: controller.signal }),
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/autopilots`, { signal: controller.signal }),
+      apiClient.request<Array<{ id: string; name: string }>>(`/api/workspaces/${instance.workspace_id}/squads`, { signal: controller.signal }),
+      ...registry.searchProviders().map(provider => provider.search('', { workspaceId: instance.workspace_id, signal: controller.signal })),
+    ]).then(([sessions, agents, projects, runtimes, skills, autopilots, squads, ...applicationResults]) => { if (!live) return; setEntities([
       ...(sessions.status === 'fulfilled' ? sessions.value.map(x => ({ label: `${x.mode} · ${x.id.slice(0, 8)}`, type: 'Session', href: `/sessions/${x.id}` })) : []),
       ...(agents.status === 'fulfilled' ? agents.value.map(x => ({ label: x.name, type: 'Agent', href: `/agents/${x.id}` })) : []),
       ...(projects.status === 'fulfilled' ? projects.value.map(x => ({ label: x.name, type: 'Project', href: `/projects/${x.id}` })) : []),
@@ -314,21 +339,14 @@ function CommandPalette({ instance, close, navigate, returnFocus }: { instance: 
       ...(skills.status === 'fulfilled' ? skills.value.map(x => ({ label: x.display_name, type: 'Skill', href: `/skills/${encodeURIComponent(x.name)}` })) : []),
       ...(autopilots.status === 'fulfilled' ? autopilots.value.map(x => ({ label: x.name, type: 'Autopilot', href: `/autopilots/${x.id}` })) : []),
       ...(squads.status === 'fulfilled' ? squads.value.map(x => ({ label: x.name, type: 'Squad', href: `/squads/${x.id}` })) : []),
+      ...applicationResults.flatMap(result => result.status === 'fulfilled' ? result.value.map(item => { const presentation = registry.resolveResource(item.resource, locale); return presentation.href ? { label: item.title, type: presentation.applicationName ?? item.resource.kind, href: presentation.href, resource: item.resource } : [] }).flat() : []),
     ]) })
-    return () => { live = false }
-  }, [instance.workspace_id])
-  const navItems: CommandItem[] = NAV.flat().map(x => ({ label: x.labels[idx], type: 'Navigate', href: x.href }))
-  const source = query ? [...navItems, ...entities] : recent.length > 0 ? recent : navItems
+    return () => { live = false; controller.abort() }
+  }, [instance.workspace_id, locale, registry])
+  const commands: CommandItem[] = navItems.map(x => ({ label: x.labels[idx], type: 'Navigate', href: x.href }))
+  const source = query ? [...commands, ...entities] : recent.length > 0 ? recent : commands
   const results = source.filter(x => !query || `${x.label} ${x.type}`.toLowerCase().includes(query.toLowerCase())).slice(0, 12)
   const groups = query ? [...new Set(results.map(item => item.type))].map(type => ({ label: type, items: results.map((item, index) => ({ item, index })).filter(entry => entry.item.type === type) })) : [{ label: recent.length > 0 ? p.recent : 'Navigate', items: results.map((item, index) => ({ item, index })) }]
   const openItem = (index: number) => { const item = results[index]; if (!item) return; setRecent(rememberItem(item)); navigate(item.href); close() }
-  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label={p.palette}><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{groups.map(group => <section className="command-group" key={group.label}><p className="command-group__label">{group.label}</p>{group.items.map(({ item, index }) => <button key={`${item.type}-${item.href}-${index}`} data-active={index === activeIndex || undefined} onMouseEnter={() => setActiveIndex(index)} onClick={() => openItem(index)}><span>{item.label}</span><small>{item.type}</small></button>)}</section>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> {p.browse}</span><span><kbd>↵</kbd> {p.open}</span><span><kbd>C</kbd> {p.newIssue}</span><span><kbd>esc</kbd> {p.close}</span></footer></section></div>
-}
-
-function CreateIssueDialog({ workspaceId, close, labels, navigate, returnFocus }: { workspaceId: string; close: () => void; labels: typeof copy[keyof typeof copy]; navigate: (href: string) => void; returnFocus?: HTMLElement | null }) {
-  const create = useCreateIssue(apiClient, workspaceId)
-  const [title, setTitle] = useState(''); const [description, setDescription] = useState('')
-  const dialogRef = useRef<HTMLFormElement>(null)
-  const onDialogKeyDown = useDialogFocus(dialogRef, returnFocus)
-  return <div className="dialog-layer" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><form ref={dialogRef} onKeyDown={onDialogKeyDown} className="create-dialog" role="dialog" aria-modal="true" onSubmit={e => { e.preventDefault(); if (!title.trim()) return; create.mutate({ title: title.trim(), description }, { onSuccess: issue => { close(); navigate(`/issues/${issue.id}`) } }) }}><header><div><span className="dialog-eyebrow">ISSUE / NEW</span><h2>{labels.newIssue}</h2></div><button type="button" className="icon-button" aria-label="Close" onClick={close}><Icon name="close" /></button></header><label>{labels.title}<Input autoFocus value={title} onChange={e => setTitle(e.target.value)} /></label><label>{labels.description}<Textarea value={description} onChange={e => setDescription(e.target.value)} placeholder={labels.description} /></label>{create.isError && <p className="form-error">Could not create the issue. Your draft is still here; check the local API and try again.</p>}<footer><Button type="button" variant="ghost" onClick={close}>{labels.cancel}</Button><Button type="submit" disabled={!title.trim() || create.isPending}>{create.isPending ? labels.creating : labels.create}</Button></footer></form></div>
+  return <div className="dialog-layer" role="presentation" onMouseDown={e => { if (e.target === e.currentTarget) close() }}><section ref={dialogRef} onKeyDown={onDialogKeyDown} className="command-dialog" role="dialog" aria-modal="true" aria-label={p.palette}><div className="command-dialog__input"><Icon name="search" /><input autoFocus value={query} onChange={e => { setQuery(e.target.value); setActiveIndex(0) }} onKeyDown={e => { if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(current => results.length ? (current + 1) % results.length : 0) } else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(current => results.length ? (current - 1 + results.length) % results.length : 0) } else if (e.key === 'Enter') { e.preventDefault(); openItem(activeIndex) } }} placeholder={copy[locale].search} /></div><div className="command-results">{groups.map(group => <section className="command-group" key={group.label}><p className="command-group__label">{group.label}</p>{group.items.map(({ item, index }) => <button key={`${item.type}-${item.href}-${index}`} data-active={index === activeIndex || undefined} onMouseEnter={() => setActiveIndex(index)} onClick={() => openItem(index)}><span>{item.label}</span><small>{item.type}</small></button>)}</section>)}{results.length === 0 && <p>{copy[locale].noResults}</p>}</div><footer><span><kbd>↑↓</kbd> {p.browse}</span><span><kbd>↵</kbd> {p.open}</span><span><kbd>C</kbd> {p.create}</span><span><kbd>esc</kbd> {p.close}</span></footer></section></div>
 }

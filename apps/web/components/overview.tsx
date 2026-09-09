@@ -1,11 +1,12 @@
 'use client'
 
-import { useInbox, useIssues, useRuntimes, useSessions, useWorkspaceUsage } from '@orchestratord/core'
+import { useInbox, useRuntimes, useSessions, useWorkspaceUsage } from '@orchestratord/core'
 import { Button } from '@orchestratord/ui'
 import { useRouter } from 'next/navigation'
 import { useLocale } from '@orchestratord/views'
 import { apiClient } from '@/lib/api'
 import { useInstanceContext } from './app-shell'
+import { useApplicationRegistry } from './application-registry'
 
 const ACTIVE = new Set(['running', 'pending', 'queued', 'paused', 'waiting'])
 
@@ -26,32 +27,33 @@ export function Overview() {
   const router = useRouter()
   const locale = useLocale()
   const c = overviewCopy[locale]
-  const issues = useIssues(apiClient, workspace_id)
+  const registry = useApplicationRegistry()
   const sessions = useSessions(apiClient, workspace_id)
   const inbox = useInbox(apiClient, workspace_id)
   const runtimes = useRuntimes(apiClient, workspace_id)
   const usage = useWorkspaceUsage(apiClient, workspace_id, { group_by: 'day' })
-  const loading = issues.isPending || sessions.isPending || inbox.isPending || runtimes.isPending
+  const loading = sessions.isPending || inbox.isPending || runtimes.isPending
   if (loading) return <OverviewSkeleton label={c.loading} />
-  const issueList = issues.data ?? []
   const sessionList = sessions.data ?? []
   const inboxList = inbox.data ?? []
   const runtimeList = runtimes.data ?? []
   const active = sessionList.filter(s => ACTIVE.has(s.status)).slice(0, 6)
   const openAttention = inboxList.filter(i => i.status === 'open' || i.status === 'assigned')
   const offline = runtimeList.filter(r => r.status !== 'online')
+  const widgets = registry.overviewWidgets()
+  const onboarding = registry.onboarding()
 
   return <div className="overview">
     <section className="overview-intro"><div><p className="section-eyebrow">{c.live}</p><h2>{c.lead}<br/><span>{c.accent}</span></h2></div><p className="overview-intro__note">{c.note}</p></section>
     {(openAttention.length > 0 || offline.length > 0) && <section className="attention-strip" aria-label={c.attention}><div className="attention-strip__lead"><span className="attention-beacon"/><strong>{c.attention}</strong></div><button onClick={() => router.push('/inbox')}><b>{openAttention.filter(i => i.kind === 'approval_request').length}</b><span>{c.approvals}</span></button><button onClick={() => router.push('/inbox')}><b>{openAttention.filter(i => i.kind === 'clarification').length}</b><span>{c.questions}</span></button><button onClick={() => router.push('/sessions')}><b>{sessionList.filter(s => s.status === 'failed').length}</b><span>{c.failed}</span></button><button onClick={() => router.push('/runtimes')}><b>{offline.length}</b><span>{c.offline}</span></button></section>}
-    {issueList.length === 0 && sessionList.length === 0 && runtimeList.length === 0 ? <FirstRun router={router} copy={c} /> : <div className="overview-grid">
-      <section className="ledger-panel overview-sessions"><header className="section-header"><div><p className="section-eyebrow">{c.spine}</p><h3>{c.active}</h3></div><button className="text-action" onClick={() => router.push('/sessions')}>{c.all}</button></header>{active.length === 0 ? <div className="quiet-empty"><span>○</span><p>{c.quiet}</p></div> : <ol className="execution-spine">{active.map((session, index) => <li key={session.id} className={`spine-node spine-node--${session.status}`}><div className="spine-node__marker"><span>{String(index + 1).padStart(2, '0')}</span></div><button onClick={() => router.push(`/sessions/${session.id}`)}><div><strong>{session.mode} {c.sessionSuffix}</strong><small>{session.issue_id ? c.issueExecution : c.direct} · {new Date(session.created_at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}</small></div><div className="spine-node__state"><i/>{session.status}</div></button></li>)}</ol>}</section>
+    {sessionList.length === 0 && runtimeList.length === 0 ? <FirstRun router={router} copy={c} onboarding={onboarding} locale={locale} /> : <div className="overview-grid">
+      <section className="ledger-panel overview-sessions"><header className="section-header"><div><p className="section-eyebrow">{c.spine}</p><h3>{c.active}</h3></div><button className="text-action" onClick={() => router.push('/sessions')}>{c.all}</button></header>{active.length === 0 ? <div className="quiet-empty"><span>○</span><p>{c.quiet}</p></div> : <ol className="execution-spine">{active.map((session, index) => { const source = session.origin.kind === 'resource' ? registry.resolveResource(session.origin.source, locale).label : c.direct; return <li key={session.id} className={`spine-node spine-node--${session.status}`}><div className="spine-node__marker"><span>{String(index + 1).padStart(2, '0')}</span></div><button onClick={() => router.push(`/sessions/${session.id}`)}><div><strong>{session.mode} {c.sessionSuffix}</strong><small>{source} · {new Date(session.created_at).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}</small></div><div className="spine-node__state"><i/>{session.status}</div></button></li> })}</ol>}</section>
       <aside className="overview-side"><section className="ledger-panel"><header className="section-header"><div><p className="section-eyebrow">{c.runtime}</p><h3>{c.control}</h3></div></header><dl className="health-list"><div><dt>{c.nodes}</dt><dd><b>{runtimeList.filter(r => r.status === 'online').length}</b> / {runtimeList.length} {c.online}</dd></div><div><dt>{c.backends}</dt><dd>{new Set(runtimeList.flatMap(r => r.probed_backends.map(b => b.name))).size}</dd></div><div><dt>{c.executions}</dt><dd>{active.length}</dd></div></dl></section><section className="ledger-panel"><header className="section-header"><div><p className="section-eyebrow">{c.pulse}</p><h3>{c.window}</h3></div></header><dl className="usage-pulse"><div><dt>{c.tokens}</dt><dd>{formatCompact(usage.data?.totals.tokens_total, locale)}</dd></div><div><dt>{c.sessions}</dt><dd>{usage.data?.totals.sessions ?? '—'}</dd></div><div><dt>{c.cost}</dt><dd>{usage.data && usage.data.totals.cost_usd > 0 ? `$${usage.data.totals.cost_usd.toFixed(2)}` : c.noPricing}</dd></div></dl></section></aside>
-      <section className="ledger-panel overview-work"><header className="section-header"><div><p className="section-eyebrow">{c.recent}</p><h3>{c.latest}</h3></div><button className="text-action" onClick={() => router.push('/issues')}>{c.openIssues}</button></header><div className="work-table"><div className="work-table__head"><span>{c.issue}</span><span>{c.status}</span><span>{c.created}</span></div>{issueList.slice(0, 5).map(issue => <button key={issue.id} onClick={() => router.push(`/issues/${issue.id}`)}><span><i>{issue.id.slice(0, 4).toUpperCase()}</i>{issue.title}</span><span data-status={issue.status}>{issue.status.replaceAll('_', ' ')}</span><time>{new Date(issue.created_at).toLocaleDateString(locale)}</time></button>)}</div></section>
+      {widgets.map(widget => { const Widget = widget.component; return <Widget key={widget.id} workspaceId={workspace_id} locale={locale} navigate={href => router.push(href)} /> })}
     </div>}
   </div>
 }
 
 function formatCompact(value: number | undefined, locale: string) { if (value == null) return '—'; return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(value) }
 function OverviewSkeleton({ label }: { label: string }) { return <div className="overview-skeleton" aria-label={label}><div/><div/><div/><div/></div> }
-function FirstRun({ router, copy: c }: { router: ReturnType<typeof useRouter>; copy: typeof overviewCopy[keyof typeof overviewCopy] }) { return <section className="first-run"><p className="section-eyebrow">{c.first}</p><h3>{c.prepare}</h3><div><article><b>01</b><h4>{c.runtimeStep}</h4><p>{c.runtimeNote}</p><Button variant="secondary" onClick={() => router.push('/runtimes')}>{c.openRuntimes}</Button></article><article><b>02</b><h4>{c.agentStep}</h4><p>{c.agentNote}</p><Button variant="secondary" onClick={() => router.push('/agents')}>{c.openAgents}</Button></article><article><b>03</b><h4>{c.issueStep}</h4><p>{c.issueNote}</p><Button onClick={() => router.push('/issues')}>{c.openIssueList}</Button></article></div></section> }
+function FirstRun({ router, copy: c, onboarding, locale }: { router: ReturnType<typeof useRouter>; copy: typeof overviewCopy[keyof typeof overviewCopy]; onboarding: ReturnType<ReturnType<typeof useApplicationRegistry>['onboarding']>; locale: 'en' | 'zh-CN' | 'ja' }) { const steps = [{ title: c.runtimeStep, description: c.runtimeNote, action: c.openRuntimes, href: '/runtimes' }, { title: c.agentStep, description: c.agentNote, action: c.openAgents, href: '/agents' }, ...onboarding.map(item => ({ title: item.title[locale], description: item.description[locale], action: item.actionLabel[locale], href: item.href }))]; return <section className="first-run"><p className="section-eyebrow">{c.first}</p><h3>{c.prepare}</h3><div>{steps.map((step, index) => <article key={step.href}><b>{String(index + 1).padStart(2, '0')}</b><h4>{step.title}</h4><p>{step.description}</p><Button variant={index === steps.length - 1 ? 'primary' : 'secondary'} onClick={() => router.push(step.href)}>{step.action}</Button></article>)}</div></section> }

@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@orchestratord/app-contracts": "workspace:*",
+    "@orchestratord/app-issue-pr": "workspace:*",
     "@orchestratord/core": "workspace:*",
     "@orchestratord/ui": "workspace:*",
     "@orchestratord/views": "workspace:*",
