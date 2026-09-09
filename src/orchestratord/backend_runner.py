@@ -834,8 +834,13 @@ class BackendRunner:
 
         # Fail fast on a spec the backend cannot serve (e.g. a
         # provider with no matching runtime adapter) instead of dying
-        # mid-stage with an opaque runtime error.
-        if not self._preflight_spec(spec, session):
+        # mid-stage with an opaque runtime error.  Preflight is
+        # deliberately moved off the event loop: some backends perform
+        # heavy synchronous I/O here (dsh scans an 8MB runtime
+        # executable for the llm-pi-ai plugin), which would otherwise
+        # stall every session, control command, and heartbeat in the
+        # daemon for seconds on a cold start.
+        if not await asyncio.to_thread(self._preflight_spec, spec, session):
             return
 
         # Create the SPI session.
