@@ -285,6 +285,7 @@ class PullRequestRef:
     number: str | None = None
     url: str | None = None
     title: str | None = None
+    head_ref: str | None = None
 
 
 # ---------------------------------------------------------------------------

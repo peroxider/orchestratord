@@ -224,6 +224,57 @@ class RepositoryPullRequestMixin:
         )
         return _normalize_pull_request(result)
 
+    async def list_pull_requests(
+        self,
+        *,
+        state: str = "open",
+        head: str | None = None,
+    ) -> list[PullRequestRef]:
+        """List pull requests for the repository, normalized via
+        ``_normalize_pull_request``.
+
+        Args:
+            state: PR state filter (``"open"``, ``"closed"``, ``"all"``).
+            head: Optional head branch filter.  For GitHub the value is
+                  sent as ``owner:head``; for other platforms it is sent
+                  as-is.
+
+        Returns:
+            The list of matching ``PullRequestRef`` objects.
+        """
+        params: dict[str, Any] = {
+            "state": state,
+            "per_page": _PAGE_SIZE,
+            "page": 1,
+        }
+        if head is not None:
+            if self.platform.name == "github":
+                params["head"] = f"{self.owner}:{head}"
+            else:
+                params["head"] = head
+
+        page = 1
+        results: list[PullRequestRef] = []
+        while True:
+            params["page"] = page
+            payload = await self._request_json(
+                "GET",
+                f"/repos/{self.owner}/{self.repo}/pulls",
+                params=params,
+            )
+            if not isinstance(payload, list):
+                break
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                pr = _normalize_pull_request(item)
+                if pr is not None:
+                    results.append(pr)
+            if len(payload) < _PAGE_SIZE:
+                break
+            page += 1
+        return results
+
     async def close_pull_request(
         self,
         pull_request: PullRequestRef,

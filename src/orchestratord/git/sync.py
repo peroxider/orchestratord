@@ -1732,10 +1732,22 @@ class GitSyncService:
                         or getattr(candidate, "source_branch", None)
                         or ""
                     )
-                    if candidate_head == head_branch:
+                    if _normalize_head_ref(candidate_head) == _normalize_head_ref(head_branch):
                         return candidate
             await asyncio.sleep(2)
         return pr_ref
+
+
+def _normalize_head_ref(value: str) -> str:
+    """Extract the bare branch name from a head ref string.
+
+    Some trackers (notably GitCode) may return the head field in
+    ``owner:branch``, ``owner/repo:branch``, or bare ``branch``
+    format, while the caller may have passed the fork-mode
+    ``owner/repo:branch`` form.  Normalize all of them to just the
+    branch name so the two sides can be compared.
+    """
+    return value.rsplit(":", 1)[-1] if value else ""
 
 
 def _slugify(value: str) -> str:
