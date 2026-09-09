@@ -193,6 +193,49 @@ def test_validate_providers_rejects_env_referenced_header_values() -> None:
     assert "apiKeyEnv" in message or "api_key" in message
 
 
+def test_validate_providers_rejects_deepseek_official_as_route_name() -> None:
+    """The stock adapter name must not be redeclared as a custom route:
+    backend/session treat it as the legacy adapter (no DSH_ROUTE_*_KEY
+    injection, no apiKeyEnv) while cordis generation mounts it as a
+    route — the three-way inconsistency this regression pins down."""
+    with pytest.raises(cordis_gen.CordisConfigError) as raised:
+        cordis_gen.validate_providers({"deepseek-official": _route()})
+    message = str(raised.value)
+    assert "deepseek-official" in message
+    assert "reserved" in message
+    # The error guides the operator to the legacy configuration.
+    assert "agent.provider" in message
+
+
+def test_validate_providers_rejects_deepseek_official_among_other_routes() -> None:
+    """The rejection applies per-route: mixing the reserved name into an
+    otherwise valid table must still fail, naming the offending route."""
+    with pytest.raises(cordis_gen.CordisConfigError) as raised:
+        cordis_gen.validate_providers(
+            {"my-gateway": _route(), "deepseek-official": _route()}
+        )
+    assert "deepseek-official" in str(raised.value)
+
+
+def test_validate_providers_other_route_names_unaffected() -> None:
+    """Rejecting the reserved name must not leak to ordinary custom
+    route names (including ones that merely look similar)."""
+    cordis_gen.validate_providers(
+        {
+            "my-gateway": _route(),
+            "deepseek-official-gw": _route(),
+            "deepseek-official-2": _route(),
+        }
+    )
+
+
+def test_default_model_constant_is_shared() -> None:
+    """ST6: the deepseek-v4-flash default must be a single module
+    constant consumed by backend preflight and session resolution —
+    not a drifting literal."""
+    assert cordis_gen.DEFAULT_MODEL == "deepseek-v4-flash"
+
+
 # ---------------------------------------------------------------------------
 # cordis_gen: text generation
 # ---------------------------------------------------------------------------
@@ -502,6 +545,21 @@ def test_preflight_deepseek_official_uses_legacy_credential_chain(
 
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     DshBackend().preflight(spec)  # must not raise
+
+
+def test_preflight_rejects_deepseek_official_as_route_name(
+    monkeypatch: pytest.MonkeyPatch, patched_probe
+) -> None:
+    """Declaring deepseek-official in the providers registry must fail
+    preflight — the stock adapter cannot be redeclared as a custom route."""
+    spec = _spec_with_routes(
+        {"deepseek-official": _route()}, provider="deepseek-official"
+    )
+    with pytest.raises(RuntimeError) as raised:
+        DshBackend().preflight(spec)
+    message = str(raised.value)
+    assert "deepseek-official" in message
+    assert "reserved" in message
 
 
 def test_preflight_probe_failure_names_the_plugin(monkeypatch: pytest.MonkeyPatch, gw_key) -> None:
