@@ -29,7 +29,32 @@ async def test_instance_resolves_hidden_default_workspace(client, db) -> None:
         "workspace_name": "Local control plane",
         "server_version": "0.1.0",
         "realtime_url": "ws://127.0.0.1:9000/ws",
-        "features": {},
+        "applications": [
+            {
+                "id": "issue_pr",
+                "enabled": True,
+                "capabilities": [
+                    "issues.read",
+                    "issues.write",
+                    "pull_requests.read",
+                    "clarification.respond",
+                ],
+            }
+        ],
+        "features": {
+            "applications": [
+                {
+                    "id": "issue_pr",
+                    "enabled": True,
+                    "capabilities": [
+                        "issues.read",
+                        "issues.write",
+                        "pull_requests.read",
+                        "clarification.respond",
+                    ],
+                }
+            ]
+        },
     }
 
 

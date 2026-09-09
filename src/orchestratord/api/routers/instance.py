@@ -17,10 +17,23 @@ from orchestratord.seed import DEFAULT_WORKSPACE_SLUG
 
 router = APIRouter(tags=["instance"])
 
+_WEB_APPLICATIONS = [
+    {
+        "id": "issue_pr",
+        "enabled": True,
+        "capabilities": [
+            "issues.read",
+            "issues.write",
+            "pull_requests.read",
+            "clarification.respond",
+        ],
+    }
+]
+
 
 @router.get("/api/instance")
 async def get_instance(
-    repos: Repositories = Depends(get_repositories),
+    repos: Repositories = Depends(get_repositories),  # noqa: B008 - FastAPI DI
 ) -> dict:
     workspace = await repos.workspaces.by_slug(DEFAULT_WORKSPACE_SLUG)
     if workspace is None:
@@ -34,5 +47,6 @@ async def get_instance(
         "workspace_name": workspace.name,
         "server_version": "0.1.0",
         "realtime_url": os.environ.get("ORCHESTRATORD_REALTIME_URL", "ws://127.0.0.1:9000/ws"),
-        "features": {},
+        "applications": _WEB_APPLICATIONS,
+        "features": {"applications": _WEB_APPLICATIONS},
     }
