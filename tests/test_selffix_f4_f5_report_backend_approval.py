@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from orchestratord.approval_policy import (
+from orchestratord.kernel.approval import (
     AskApprovalPolicy,
     NeverApprovalPolicy,
     ToolCallEvent,
@@ -157,7 +157,7 @@ class TestWorkflowPathBackfillsSnapshotBackend(unittest.TestCase):
 
         # Create a session with empty _snapshot_backend.
         session = RunSession(
-            issue=SimpleNamespace(id="1", identifier="I-1", title="t"),
+            subject=SimpleNamespace(id="1", identifier="I-1", title="t"),
             workspace=SimpleNamespace(path=Path("/tmp")),
         )
 
