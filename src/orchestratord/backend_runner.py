@@ -108,6 +108,30 @@ def providers_extra(agent_config: Any) -> dict[str, Any]:
         }
     }
 
+
+def agent_spec_fields(agent_config: Any) -> dict[str, Any]:
+    """Serialize the agent-config-derived ``SessionSpec`` fields shared by
+    the daemon startup preflight (``cli/server.py``) and the per-run spec
+    build (``BackendRunner._build_session_spec``) so both validate against
+    the same field shape.
+
+    ``permission_mode`` is included deliberately: the runtime forwards it
+    (the dsh backend maps ``bypassPermissions`` to a ``policy: never``
+    approval cordis block), and a preflight that drops it would validate a
+    different spec than the one actually run. Empty-string values are
+    normalized to ``None`` exactly like the per-run spec build does, so
+    both sites produce identical field shapes.
+    """
+    return {
+        "provider": getattr(agent_config, "provider", None) or None,
+        "model": getattr(agent_config, "model", None) or None,
+        "base_url": getattr(agent_config, "base_url", None) or None,
+        "api_key": getattr(agent_config, "api_key", None) or None,
+        "cordis": getattr(agent_config, "cordis", None) or None,
+        "runtime_bin": getattr(agent_config, "runtime_bin", None) or None,
+        "permission_mode": getattr(agent_config, "permission_mode", None) or None,
+    }
+
 # Reuse the same noop-detection threshold as AgentRunner.
 _NOOP_DETECTION_MAX_TURNS = 5
 
@@ -742,13 +766,7 @@ class BackendRunner:
         return SessionSpec(
             cwd=str(session.workspace.path),
             system_prompt=system_prompt or None,
-            model=self.agent_config.model or None,
-            provider=self.agent_config.provider or None,
-            base_url=getattr(self.agent_config, "base_url", None) or None,
-            api_key=getattr(self.agent_config, "api_key", None) or None,
-            cordis=getattr(self.agent_config, "cordis", None) or None,
-            runtime_bin=getattr(self.agent_config, "runtime_bin", None) or None,
-            permission_mode=self.agent_config.permission_mode or None,
+            **agent_spec_fields(self.agent_config),
             tools_allow=tools_allow,
             tools_deny=getattr(self.agent_config, "tools_deny", []) or [],
             env=self._build_env(session),
