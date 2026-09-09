@@ -22,7 +22,7 @@ from orchestratord.kernel.approval import (
 from orchestratord.config.schema import SandboxConfig
 from orchestratord.orchestrator import Orchestrator
 from orchestratord.report_writer import RunReport, _render_markdown, write
-from orchestratord.session_state import RunSession
+from orchestratord.session_state import RunSession, RunSubject
 
 # ── F4: report Backend field ──────────────────────────────────────────
 
@@ -142,7 +142,7 @@ class TestWorkflowPathBackfillsSnapshotBackend(unittest.TestCase):
         mock_agent_runner.agent_config.model = "gpt-4"
         mock_agent_runner.agent_config.provider = ""
 
-        # Build a mock WorkflowOrchestrator whose run_for_issue() succeeds.
+        # Build a mock WorkflowOrchestrator whose run_for_task() succeeds.
         mock_workflow_orch = MagicMock()
         mock_workflow_result = MagicMock()
         mock_workflow_result.success = True
@@ -153,11 +153,12 @@ class TestWorkflowPathBackfillsSnapshotBackend(unittest.TestCase):
         mock_workflow_result.total_duration_seconds = 1.0
         mock_workflow_result.error = None
         mock_workflow_result.stage_results = {}
-        mock_workflow_orch.run_for_issue = MagicMock(return_value=mock_workflow_result)
+        mock_workflow_orch.set_progress_sink = MagicMock()
+        mock_workflow_orch._stage_runner = MagicMock()
 
         # Create a session with empty _snapshot_backend.
         session = RunSession(
-            subject=SimpleNamespace(id="1", identifier="I-1", title="t"),
+            subject=RunSubject(id="1", identifier="I-1", title="t"),
             workspace=SimpleNamespace(path=Path("/tmp")),
         )
 
@@ -166,14 +167,15 @@ class TestWorkflowPathBackfillsSnapshotBackend(unittest.TestCase):
         mock_self = MagicMock(spec=Orchestrator)
         mock_self.agent_runner = mock_agent_runner
         mock_self._workflow_orchestrator = mock_workflow_orch
+        mock_self.git_sync = MagicMock()
 
-        # Call the method directly.
-        # _run_issue_with_workflow is async, but the workflow_orch.run_for_issue
-        # is also async. We need to make the mock return a coroutine.
-        async def _mock_run_for_issue(*args, **kwargs):
+        # Call the method directly. P6 removed run_for_issue: the
+        # business side maps Issue → AgentTask and awaits the generic
+        # run_for_task entry, so mock that.
+        async def _mock_run_for_task(*args, **kwargs):
             return mock_workflow_result
 
-        mock_workflow_orch.run_for_issue = _mock_run_for_issue
+        mock_workflow_orch.run_for_task = _mock_run_for_task
 
         async def _run():
             await Orchestrator._run_issue_with_workflow(
