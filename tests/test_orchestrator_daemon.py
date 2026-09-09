@@ -1096,5 +1096,105 @@ class TestRebaseConflictResolved(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(new_head)
 
 
+# ---------------------------------------------------------------------------
+# PENDING_REVIEW / COMPLETED startup recovery (daemon restart)
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverPersistentStates(unittest.IsolatedAsyncioTestCase):
+    """Regression for issue #8: PENDING_REVIEW records are lost on restart.
+
+    The candidate-issue poll loop only consults the in-memory ``_state``
+    sets (``completed`` / ``pending_review``), which are empty after a
+    daemon restart.  Records persisted with ``PENDING_REVIEW`` status must
+    be re-hydrated into ``_state.pending_review`` at startup so the issue
+    is NOT re-launched on the existing PR branch.
+    """
+
+    def _make_state(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            running={},
+            completed=set(),
+            claimed=set(),
+            pending_review=set(),
+            failed=set(),
+            retry_queue=[],
+            max_concurrent_agents=10,
+            poll_interval_ms=30_000,
+            poll_check_in_progress=False,
+        )
+
+    async def test_recover_restores_pending_review_and_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg_path = tmp_path / "r.json"
+
+            # Pre-populate a registry that survived a daemon restart.
+            seed = IssueRegistry(reg_path)
+            seed.register(issue_id="9", issue_identifier="ISSUE-9")
+            seed.mark_pending_review("9")
+            seed.register(issue_id="10", issue_identifier="ISSUE-10")
+            seed.mark_completed("10")
+            # A plain PENDING record should NOT be recovered into either set.
+            seed.register(issue_id="11", issue_identifier="ISSUE-11")
+
+            orch = _make_orchestrator(
+                tracker=MagicMock(), registry=IssueRegistry(reg_path)
+            )
+            orch._state = self._make_state()
+
+            await orch._recover_persistent_states()
+
+            self.assertIn("9", orch._state.pending_review)
+            self.assertIn("10", orch._state.completed)
+            self.assertNotIn("11", orch._state.pending_review)
+            self.assertNotIn("11", orch._state.completed)
+
+    async def test_pending_review_issue_not_relaunched_on_first_poll(self) -> None:
+        """Registry has PENDING_REVIEW record; tracker still lists it open.
+
+        After startup recovery the first poll must NOT re-launch the issue
+        (regression: it used to be re-run on the existing PR branch).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg_path = tmp_path / "r.json"
+            seed = IssueRegistry(reg_path)
+            seed.register(issue_id="7", issue_identifier="ISSUE-7")
+            seed.mark_pending_review("7")
+
+            issue = _make_issue()
+            tracker = MagicMock()
+            tracker.fetch_candidate_issues = AsyncMock(return_value=[issue])
+
+            orch = _make_orchestrator(tracker=tracker, registry=IssueRegistry(reg_path))
+            orch._state = self._make_state()
+            orch._clarification_gate = None
+            orch._launch_issue = AsyncMock()
+            orch._resolve_intent = AsyncMock(return_value=(Intent.NONE, None, None))
+            orch._emit_im_event = MagicMock()
+            orch._broadcast_clarification_status = MagicMock()
+            orch._workflow_mtime_ns = MagicMock(return_value=None)
+            orch._dynamic_tracker_config_mtime_ns = None
+            orch._refresh_dynamic_title_prefix_filter = MagicMock()
+            orch._process_control_commands = AsyncMock()
+            orch._clarification_resolver = MagicMock()
+            orch._clarification_resolver.poll_clarification_answers = AsyncMock()
+            orch._process_retry_queue = AsyncMock()
+            orch._process_escalated_issues = AsyncMock()
+            orch._process_review_feedback = AsyncMock()
+            orch._process_pending_rebase_conflicts = AsyncMock()
+            orch._process_pr_conflict_scan = AsyncMock()
+
+            # Simulate daemon startup recovery.
+            await orch._recover_persistent_states()
+            self.assertIn("7", orch._state.pending_review)
+
+            await orch._poll_and_dispatch()
+
+            orch._launch_issue.assert_not_awaited()
+            self.assertIn("7", orch._state.pending_review)
+
+
 if __name__ == "__main__":
     unittest.main()

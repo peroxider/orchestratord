@@ -88,6 +88,10 @@ class StateMachineMixin:
             if record.next_retry_at is not None
         ]
 
+    def records_by_status(self, status: IssueStatus) -> list[IssueRecord]:
+        """Return all records currently in the given status."""
+        return [record for record in self._records.values() if record.status == status]
+
     def has_processed_feedback(self, issue_id: str, feedback_id: str) -> bool:
         """Whether a feedback id has already been processed for the issue."""
         record = self._records.get(issue_id)
