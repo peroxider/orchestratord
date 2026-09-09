@@ -887,15 +887,7 @@ class AgentConfig:
 @dataclass
 class SandboxConfig:
     command: str = ""
-    approval_policy: str | dict[str, Any] = field(
-        default_factory=lambda: {
-            "reject": {
-                "sandbox_approval": True,
-                "rules": True,
-                "mcp_elicitations": True,
-            }
-        }
-    )
+    approval_policy: str | dict[str, Any] = "never"
     thread_sandbox: str = "workspace-write"
     turn_sandbox_policy: dict[str, Any] | None = None
     turn_timeout_ms: int = 3_600_000

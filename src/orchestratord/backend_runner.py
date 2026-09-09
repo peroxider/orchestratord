@@ -1963,8 +1963,12 @@ class BackendRunner:
         self._approval_policy.evaluate(policy_event, session_context)
 
         if policy_event.is_approved is False:
+            # TOOL_CALL arrives after the tool already executed server-side
+            # (backends without ``approval_hooks``); a plain "denied" line
+            # would falsely imply the tool did not run.  Keep it as a
+            # post-hoc audit note instead.
             logger.warning(
-                "Tool call denied: %s reason=%s",
+                "Tool call post-hoc audit: %s reason=%s",
                 policy_event.tool_name,
                 policy_event._deny_reason,
             )

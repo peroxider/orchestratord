@@ -26,27 +26,34 @@ from orchestratord.premise_check import check_issue_premise
 
 
 class TestResolveApprovalPolicy(unittest.TestCase):
-    """P0-a: explicit approval_policy wins; otherwise permission_mode bridges."""
+    """Approval-policy resolution.
 
-    def test_default_dict_with_bypass_permissions_auto_approves(self) -> None:
-        sandbox = SandboxConfig()  # approval_policy left at structured default
+    Default ``sandbox.approval_policy`` is ``"never"`` (autonomous daemon);
+    explicit ask/never/dict configs are honored as before.
+    """
+
+    def test_default_never_with_bypass_permissions_auto_approves(self) -> None:
+        sandbox = SandboxConfig()  # approval_policy defaults to "never"
         agent = SimpleNamespace(permission_mode="bypassPermissions")
         policy = resolve_approval_policy(sandbox, agent)
         self.assertIsInstance(policy, NeverApprovalPolicy)
 
-    def test_default_dict_with_auto_mode_auto_approves(self) -> None:
+    def test_default_never_with_auto_mode_auto_approves(self) -> None:
         sandbox = SandboxConfig()
         agent = SimpleNamespace(permission_mode="auto")
         self.assertIsInstance(resolve_approval_policy(sandbox, agent), NeverApprovalPolicy)
 
-    def test_default_dict_with_dont_ask_still_fails_closed(self) -> None:
-        sandbox = SandboxConfig()
+    def test_default_never_auto_approves_with_dont_ask(self) -> None:
+        sandbox = SandboxConfig()  # approval_policy defaults to "never"
         agent = SimpleNamespace(permission_mode="dontAsk")
-        self.assertIsInstance(resolve_approval_policy(sandbox, agent), AskApprovalPolicy)
+        # With default "never" the policy auto-approves regardless of
+        # permission_mode; explicit ask/never still work as before.
+        self.assertIsInstance(resolve_approval_policy(sandbox, agent), NeverApprovalPolicy)
 
-    def test_default_dict_without_agent_config_fails_closed(self) -> None:
+    def test_default_never_auto_approves_without_agent(self) -> None:
         sandbox = SandboxConfig()
-        self.assertIsInstance(resolve_approval_policy(sandbox, None), AskApprovalPolicy)
+        # No agent config → default "never" still auto-approves.
+        self.assertIsInstance(resolve_approval_policy(sandbox, None), NeverApprovalPolicy)
 
     def test_explicit_string_beats_permission_mode(self) -> None:
         sandbox = SimpleNamespace(approval_policy="ask")
