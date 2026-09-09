@@ -1,0 +1,289 @@
+{
+  "agent": {
+    "allow_anyone_to_retry": true,
+    "allowed_changed_files": [
+      "src/**"
+    ],
+    "api_key": "llm-key",
+    "auto_approve": false,
+    "base_url": "https://llm.example",
+    "build_command": "make build",
+    "clarification_enabled": false,
+    "clarification_escalation": "escalate",
+    "clarification_operator_priority": false,
+    "clarification_simultaneous_grace_ms": 1500.0,
+    "clarification_timeout_author": 3600.0,
+    "clarification_timeout_local": 60.0,
+    "coordinator_mode": false,
+    "cordis": null,
+    "delay_between_requests_ms": 250,
+    "env": {
+      "APP_MODE": "test"
+    },
+    "fallback_to_phase_step": true,
+    "lint_command": "ruff check",
+    "loop_detection_threshold": 2,
+    "loop_detection_window": 6,
+    "max_concurrent_agents": 3,
+    "max_concurrent_agents_by_state": {
+      "REVIEW": 2
+    },
+    "max_no_op_turns": 4,
+    "max_questions_per_issue": 5,
+    "max_retries_per_issue": 7,
+    "max_retry_attempts": 2,
+    "max_retry_backoff_ms": 1000,
+    "max_tools_per_turn": 10,
+    "max_turns": 42,
+    "max_turns_retry_delay_ms": 500,
+    "model": "m-main",
+    "phases": [
+      "plan",
+      "code"
+    ],
+    "provider": "dsh",
+    "python_executable": "python3.12",
+    "rate_limit_base_delay_ms": 100,
+    "rate_limit_exponential_factor": 3.0,
+    "rate_limit_max_backoff_ms": 200,
+    "rate_limit_max_retries": 9,
+    "repro_first": {
+      "command_timeout_ms": 2000,
+      "enabled": true,
+      "labels": [
+        "bug"
+      ],
+      "timeout_ms": 1000
+    },
+    "review_required": true,
+    "run_timeout_ms": 111000,
+    "runtime_bin": null,
+    "stages": {
+      "implementer": {
+        "model": "m-impl"
+      },
+      "tester": {
+        "model": "m-test",
+        "provider": "p2"
+      }
+    },
+    "stall_timeout_ms": 222000,
+    "stall_warn_ms": 33000,
+    "test_command": "pytest -q",
+    "verification": {
+      "fallback_test_command": "pytest -x",
+      "regression_guard": false,
+      "timeout_ms": 5000
+    }
+  },
+  "clarifier": {
+    "author_first": false,
+    "block_on_unclear": false,
+    "cache_enabled": false,
+    "enabled": true,
+    "fail_open": false,
+    "max_analyses_per_poll": 2,
+    "max_input_tokens": 7000,
+    "max_output_tokens": 900,
+    "max_questions": 2,
+    "max_rounds": 3,
+    "min_confidence": 0.9
+  },
+  "hooks": {
+    "after_run": "echo after",
+    "before_run": "echo before",
+    "timeout_ms": 1234
+  },
+  "modes": {
+    "debate": {
+      "isolation": "worktree",
+      "judge_mode": "synthesize",
+      "judge_model": "m-judge",
+      "parallel": true,
+      "proposer_models": {
+        "x": "m-x"
+      },
+      "proposers": [
+        "x",
+        "y"
+      ]
+    },
+    "default": "pipeline",
+    "enabled": [
+      "single",
+      "pipeline"
+    ],
+    "pipeline": {
+      "handoff": "mailbox",
+      "max_retries_per_stage": 2,
+      "stage_max_turns": {
+        "tester": 7
+      },
+      "stage_models": {
+        "analyzer": "m-a"
+      },
+      "stage_specs": {
+        "tester": {
+          "config": {
+            "proposers": [
+              "a",
+              "b"
+            ]
+          },
+          "kind": "debate"
+        }
+      },
+      "stages": [
+        "analyzer",
+        "tester"
+      ]
+    },
+    "router": {
+      "kind": "heuristic",
+      "min_confidence": 0.6,
+      "timeout_seconds": 9.0
+    },
+    "swarm": {
+      "max_parallel": 2,
+      "max_subtasks": 4,
+      "max_waves": 3
+    }
+  },
+  "observability": {
+    "dashboard_enabled": false,
+    "refresh_ms": 500,
+    "render_interval_ms": 32
+  },
+  "polling": {
+    "interval_ms": 12345
+  },
+  "pr_conflict_scan": {
+    "bot_login": "scan-bot",
+    "enabled": true,
+    "max_prs_per_scan": 10,
+    "max_rebase_attempts_per_issue": 2,
+    "poll_interval_ms": 1000,
+    "scan_states": [
+      "open",
+      "draft"
+    ],
+    "use_force_push": true
+  },
+  "pr_template": {
+    "body": "Auto body",
+    "title": "PR: {{title}}"
+  },
+  "review_feedback": {
+    "bot_login": "review-bot",
+    "enabled": true,
+    "ignore_authors": [
+      "bot-x"
+    ],
+    "ignored_body_patterns": [
+      "nit"
+    ],
+    "ignored_comment_commands": [
+      "/noop"
+    ],
+    "ignored_feedback_sources": [
+      "ci"
+    ],
+    "include_ci_failures": false,
+    "max_feedback_items_per_run": 9,
+    "max_followup_attempts_per_pr": 2,
+    "max_log_chars_per_check": 500,
+    "mode": "AUTO",
+    "pending_feedback_timeout_seconds": 60,
+    "poll_interval_ms": 7000,
+    "reply_to_comments": false
+  },
+  "rules": {
+    "enabled": true,
+    "max_rules": 5,
+    "min_confidence": "HIGH",
+    "path": "rules.md"
+  },
+  "sandbox": {
+    "approval_policy": "never",
+    "command": "codex-cli",
+    "read_timeout_ms": 11,
+    "stall_timeout_ms": 222,
+    "thread_sandbox": "workspace-write",
+    "turn_sandbox_policy": {
+      "type": "workspaceWrite"
+    },
+    "turn_timeout_ms": 999
+  },
+  "server": {
+    "host": "0.0.0.0",
+    "port": 9443
+  },
+  "telemetry": {
+    "api_key": "tel-key",
+    "env_label": "prod",
+    "issue_title": "Tel",
+    "report_owner": "tel-owner",
+    "report_repo": "tel-repo",
+    "reporting_enabled": true
+  },
+  "tracker": {
+    "active_states": [
+      "open",
+      "in progress"
+    ],
+    "api_key": "gh-token",
+    "assignee": "agent-bot",
+    "branch_prefix": "agent/",
+    "clone_url": "https://github.example/example-owner/example-repo.git",
+    "endpoint": "https://github.example/api",
+    "issues_path": "",
+    "kind": "github",
+    "owner": "example-owner",
+    "repo": "example-repo",
+    "require_any_labels": [
+      "agent-ok"
+    ],
+    "skip_labels": [
+      "wip"
+    ],
+    "terminal_states": [
+      "closed"
+    ],
+    "title_prefix_match": "prefix",
+    "title_prefixes": [
+      "[agent]"
+    ]
+  },
+  "worker": {
+    "max_concurrent_agents_per_host": 2,
+    "ssh_hosts": [
+      "host-a"
+    ]
+  },
+  "workspace": {
+    "base_branch": "develop",
+    "checkout_issue_branch": false,
+    "clone_depth": 2,
+    "git_email": "bot@example.dev",
+    "git_token": "tok",
+    "git_username": "bot",
+    "gitignore_patterns": [
+      ".secret"
+    ],
+    "hooks": {
+      "after_create": "echo hi"
+    },
+    "integration_branch": "staging",
+    "preserve_on_abandoned": false,
+    "preserve_on_failure": false,
+    "preserve_on_terminal": false,
+    "preserve_on_timeout": false,
+    "repo_clone_url": "https://github.example/example-owner/example-repo.git",
+    "require_clean_between_issues": false,
+    "require_clean_start": false,
+    "root": "/tmp/p5-fixture-ws",
+    "sequential_lock": false,
+    "strategy": "isolated",
+    "upstream_clone_url": null
+  }
+}
