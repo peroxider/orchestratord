@@ -13,6 +13,7 @@ from orchestratord.spi.backend import SessionSpec
 from orchestratord.spi.capabilities import BackendCapabilities
 from orchestratord.spi.session import AgentSession
 from orchestratord_dsh.cordis_gen import (
+    DEFAULT_MODEL,
     CordisConfigError,
     probe_llm_pi_ai_available,
     resolve_route,
@@ -94,7 +95,7 @@ class DshBackend:
                 providers,
                 getattr(spec, "provider", None),
                 getattr(spec, "model", None),
-                default_model="deepseek-v4-flash",
+                default_model=DEFAULT_MODEL,
             )
         except CordisConfigError as exc:
             raise RuntimeError(str(exc)) from exc

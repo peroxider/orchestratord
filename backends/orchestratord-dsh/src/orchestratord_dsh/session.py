@@ -257,15 +257,19 @@ class DshSession:
 
     def _resolve_provider_model(self) -> tuple[str, str]:
         """The (provider, model) pair for the runtime's initialize call."""
-        default_model = "deepseek-v4-flash"
+        from orchestratord_dsh.cordis_gen import (
+            DEFAULT_MODEL,
+            CordisConfigError,
+            resolve_route,
+        )
+
+        default_model = DEFAULT_MODEL
         providers = dict(self._spec.extra.get("providers") or {})
         if not providers:
             return (
                 self._spec.provider or "deepseek-official",
                 self._spec.model or default_model,
             )
-        from orchestratord_dsh.cordis_gen import CordisConfigError, resolve_route
-
         try:
             return resolve_route(
                 providers,
