@@ -39,10 +39,13 @@ def derive_session_id(workspace_root: str | Path | None) -> str:
 
 
 def report_telemetry(workflow: WorkflowConfig) -> None:
-    """Best-effort: push today's telemetry summary to the remote issue.
+    """Best-effort: push telemetry summaries to the remote issue(s).
 
     Only when ``workflow.telemetry.reporting_enabled`` is set; the
-    api_key falls back to the tracker's GitCode token. Never raises.
+    api_key falls back to the tracker's GitCode token. Coverage comes
+    from ``telemetry.backfill_days`` (1 = today only; N = last N days;
+    "all" = every local day) — days never reported, or last reported
+    before they ended, are backfilled. Never raises.
     """
     try:
         tele = getattr(workflow, "telemetry", None)
@@ -52,14 +55,14 @@ def report_telemetry(workflow: WorkflowConfig) -> None:
         api_key = tele.api_key or (getattr(tracker, "api_key", "") or "")
         if not api_key:
             return
-        from orchestratord.telemetry.reporters import report_day
+        from orchestratord.telemetry.reporters import report_backfill
 
-        report_day(
+        report_backfill(
             owner=tele.report_owner or getattr(tracker, "owner", "") or "",
             repo=tele.report_repo or getattr(tracker, "repo", "") or "",
             api_key=api_key,
             title=tele.issue_title,
-            force=True,
+            days=tele.backfill_days,
         )
     except Exception:
         logger.debug("telemetry report skipped", exc_info=True)

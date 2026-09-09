@@ -228,6 +228,7 @@
   "source_path": "",
   "telemetry": {
     "api_key": "tel-key",
+    "backfill_days": 1,
     "env_label": "prod",
     "issue_title": "Tel",
     "report_owner": "tel-owner",
