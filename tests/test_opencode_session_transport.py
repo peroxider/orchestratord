@@ -1159,6 +1159,65 @@ def test_deny_grace_cleared_by_model_activity(
     assert events[-1].payload["reason"] == "success"
 
 
+def test_deny_abandonment_synthesized_when_bus_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for the stream-close variant of the abandonment.
+
+    opencode 1.18.29 may hard-close the SSE bus after a rejection
+    instead of leaving it open-but-silent — either way the turn must
+    terminate with the honest ``opencode_approval_denied`` ERROR (not a
+    generic ``opencode_turn_unterminated``), and never burn the core's
+    inactivity budget.
+    """
+    monkeypatch.setattr(session_mod, "_DENY_GRACE_SECONDS", 0.2)
+    lines = [
+        _frame("session.next.prompt.admitted", sessionID=OC_SID),
+        _frame(
+            "session.next.tool.called",
+            sessionID=OC_SID,
+            callID="call_1",
+            tool="bash",
+            input={"command": "rm -rf /"},
+        ),
+        _frame(
+            "permission.v2.asked",
+            sessionID=OC_SID,
+            id="per_d3",
+            action="bash",
+            resources=["rm -rf /"],
+            source={"type": "tool", "messageID": "msg_1", "callID": "call_1"},
+        ),
+        _frame(
+            "permission.v2.replied",
+            sessionID=OC_SID,
+            requestID="per_d3",
+            reply="reject",
+        ),
+        _frame(
+            "session.next.tool.failed",
+            sessionID=OC_SID,
+            callID="call_1",
+            error={"type": "unknown", "message": "Tool execution interrupted"},
+        ),
+        # The bus then CLOSES (no step.ended, no trailing keepalive) —
+        # the ordinary _FakeClient stream ends after its last line.
+    ]
+    client = _FakeClient(lines)
+    session = _session(client)
+    events = _send_and_drain(session)
+
+    errors = [e for e in events if e.kind is EventKind.ERROR]
+    assert len(errors) == 1
+    assert errors[0].payload["code"] == "opencode_approval_denied"
+    assert "'bash'" in errors[0].payload["message"]
+    turns = [e for e in events if e.kind is EventKind.TURN_COMPLETE]
+    assert turns[-1].payload["finish"] == "denied"
+    assert events[-1].kind is EventKind.SESSION_COMPLETE
+    assert events[-1].payload["reason"] == "error"
+    assert "approval denied" in events[-1].payload["message"]
+
+
 # ---------------------------------------------------------------------------
 # Tool result content fallbacks (read/glob/grep carry their payload in
 # structured.content with an EMPTY content list; tool.failed carries its
