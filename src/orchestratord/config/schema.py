@@ -669,6 +669,13 @@ class ProviderConfig:
     original variable name, and the literal secret never enters the
     generated cordis config (it travels to the runtime subprocess via
     the environment only).
+
+    ``headers`` are STATIC values only: the runtime's llm-pi-ai adapter
+    has no CredentialRef support for headers, so ``$VAR`` references are
+    rejected at validation and must not be used. Static header values
+    are written verbatim into the generated cordis file on disk — never
+    place secrets in headers; route credentials belong in ``api_key``
+    (the apiKeyEnv pipeline).
     """
 
     api: str | None = None          # openai-completions | openai-responses | anthropic-messages

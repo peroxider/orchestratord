@@ -165,6 +165,34 @@ def test_validate_providers_does_not_resolve_credentials(monkeypatch: pytest.Mon
     cordis_gen.validate_providers({"gw": _route(api_key="$GW_UNSET")})
 
 
+def test_validate_providers_accepts_static_header_values() -> None:
+    """Static (non-sensitive) header values are allowed: they are
+    written verbatim to the generated cordis file and sent as-is by
+    the runtime (the llm-pi-ai adapter sends ``headers`` values as
+    literal strings)."""
+    cordis_gen.validate_providers(
+        {"gw": _route(headers={"X-Tenant": "acme", "X-Custom": "static-value"})}
+    )
+
+
+def test_validate_providers_rejects_env_referenced_header_values() -> None:
+    """Regression (second-round review finding): $VAR-referenced headers
+    must be rejected — the runtime's llm-pi-ai profile schema only has
+    ``headers: z.dict(z.string())`` (no CredentialRef/headersEnv
+    support), so a $VAR header would be sent as a literal string or
+    silently dropped. The error must guide the operator: headers only
+    support static values; do not put secrets in headers (static values
+    land on disk in plaintext); credentials belong in api_key/apiKeyEnv."""
+    with pytest.raises(cordis_gen.CordisConfigError) as raised:
+        cordis_gen.validate_providers(
+            {"gw": _route(headers={"Authorization": "Bearer $MY_KEY"})}
+        )
+    message = str(raised.value)
+    assert "gw" in message and "Authorization" in message
+    assert "$" in message
+    assert "apiKeyEnv" in message or "api_key" in message
+
+
 # ---------------------------------------------------------------------------
 # cordis_gen: text generation
 # ---------------------------------------------------------------------------
@@ -221,6 +249,36 @@ def test_generate_cordis_file_writes_reports_dir_with_run_stem(
         {"gw": _route()}, tmp_path / ".reports", run_id="stage-01-ab12cd34"
     )
     assert again == path
+
+
+def test_generate_cordis_static_headers_written_verbatim(tmp_path) -> None:
+    """Static header values pass validation and are written verbatim
+    to the generated cordis file — the runtime sends them as literal
+    strings (the adapter has no $VAR expansion in headers)."""
+    path = cordis_gen.generate_cordis_file(
+        {"gw": _route(headers={"X-Tenant": "acme"})},
+        tmp_path / ".reports",
+        run_id="stage-01",
+    )
+    text = path.read_text(encoding="utf-8")
+    assert "X-Tenant" in text
+    assert "acme" in text
+    assert "headersEnv" not in text
+
+
+def test_generate_cordis_rejects_env_referenced_headers(tmp_path) -> None:
+    """A $VAR-referenced header value is rejected at validation —
+    no headersEnv is generated; the runtime has no CredentialRef
+    support for headers."""
+    with pytest.raises(cordis_gen.CordisConfigError) as raised:
+        cordis_gen.generate_cordis_file(
+            {"gw": _route(headers={"Authorization": "Bearer $MY_KEY"})},
+            tmp_path / ".reports",
+            run_id="stage-01",
+        )
+    message = str(raised.value)
+    assert "$" in message
+    assert "apiKeyEnv" in message or "api_key" in message
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +447,32 @@ def test_preflight_rejects_unresolvable_route_credential(
     assert "$GW_UNSET" in str(raised.value)
 
 
+def test_preflight_rejects_env_referenced_header(
+    monkeypatch: pytest.MonkeyPatch, patched_probe,
+) -> None:
+    """A $VAR-referenced header is rejected at preflight (via
+    validate_providers) with guidance text — never silently dropped
+    by the runtime."""
+    monkeypatch.setenv("MY_HEADER_KEY", "sk-header")
+    spec = _spec_with_routes(
+        {"gw": _route(headers={"Authorization": "Bearer $MY_HEADER_KEY"})},
+        provider="gw",
+    )
+    with pytest.raises(RuntimeError) as raised:
+        DshBackend().preflight(spec)
+    message = str(raised.value)
+    assert "$" in message
+    assert "apiKeyEnv" in message or "api_key" in message
+
+
+def test_preflight_accepts_static_header(patched_probe) -> None:
+    spec = _spec_with_routes(
+        {"gw": _route(headers={"X-Tenant": "acme"})},
+        provider="gw",
+    )
+    DshBackend().preflight(spec)  # must not raise
+
+
 def test_preflight_cordis_and_providers_are_mutually_exclusive(gw_key, patched_probe) -> None:
     spec = _spec_with_routes(
         {"gw": _route()}, provider="gw", cordis="/tmp/custom-cordis.yml"
@@ -496,6 +580,52 @@ def test_session_factory_generates_cordis_and_injects_credential(
     assert env["DSH_ROUTE_MY_GATEWAY_KEY"] == "sk-test"
     assert config.provider == "my-gateway"
     assert config.model == "m1"
+
+
+def test_session_factory_static_headers_land_in_cordis_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path,
+) -> None:
+    """Static route headers are written verbatim into the generated
+    cordis config (the adapter sends ``headers`` values as literal
+    strings); no header env vars are injected into the child
+    environment."""
+    captured: dict[str, object] = {}
+
+    class _FakeHarness:
+        def __init__(self, config: object) -> None:
+            captured["config"] = config
+
+        def start(self) -> None:
+            captured["started"] = True
+
+    monkeypatch.setattr(
+        "deepseek_harness.api.DeepSeekHarness", _FakeHarness
+    )
+
+    from orchestratord_dsh.session import DshSession
+
+    spec = SessionSpec(
+        cwd=str(tmp_path),
+        provider="gw",
+        extra={"providers": {"gw": _route(
+            headers={"X-Tenant": "acme"}
+        )}},
+        run_id="stage-01-feedface",
+    )
+    session = DshSession(spec)
+    session._default_harness_factory()
+
+    assert captured["started"] is True
+    config = captured["config"]
+    env = getattr(config, "env", {})
+    # No header env vars are injected (no headersEnv mechanism exists).
+    assert not any(k.startswith("DSH_ROUTE_GW_HEADER_") for k in env)
+    generated_files = list((tmp_path / ".reports").glob("*.yml"))
+    assert len(generated_files) == 1
+    text = generated_files[0].read_text()
+    assert "X-Tenant" in text
+    assert "acme" in text
+    assert "headersEnv" not in text
 
 
 @pytest.mark.parametrize("reference", ["$DSH_TEST_KEY", "${DSH_TEST_KEY}"])

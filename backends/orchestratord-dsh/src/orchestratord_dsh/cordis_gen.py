@@ -2,8 +2,12 @@
 
 The SDK profile already owns model routing, approval and persistence plugins.
 Generated patches update their stable IDs without copying the profile tree or
-interpreting its JavaScript tags. Route credentials travel only in the child
-environment; patches contain environment variable names, never secret values.
+interpreting its JavaScript tags. Route credentials (api_key) travel only in
+the child environment; patches contain environment variable names, never
+secret values.  Static route headers are the documented exception: they are
+written verbatim into the generated cordis file, so they must never carry
+secrets (the runtime has no CredentialRef support for headers — see
+:func:`validate_providers`).
 """
 
 from __future__ import annotations
@@ -49,6 +53,13 @@ SUPPORTED_APIS = (
     "anthropic-messages",
 )
 
+# Detects ``$VAR`` / ``${VAR}`` environment references in header values.
+# Header values must be static: the runtime's llm-pi-ai adapter has no
+# CredentialRef support for headers, so a ``$VAR`` reference would be sent
+# as a literal string or silently dropped — it is rejected at validation
+# instead (see :func:`validate_providers`).
+_ENV_REFERENCE_RE = re.compile(r"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?")
+
 _GENERATED_MARKER = (
     "# --- orchestratord generated: agent.providers routes (llm-pi-ai) ---"
 )
@@ -77,7 +88,9 @@ def route_env_var_name(route: str) -> str:
     return f"DSH_ROUTE_{sanitized}_KEY"
 
 
-def resolve_route_credential(api_key: str | None, environ: dict[str, str] | None = None) -> str | None:
+def resolve_route_credential(
+    api_key: str | None, environ: dict[str, str] | None = None
+) -> str | None:
     """Resolve one route's ``api_key`` to a literal secret.
 
     ``None`` → no credential configured (legitimate: keyless gateways or
@@ -151,6 +164,17 @@ def _model_id_of(entry: Any) -> str:
     return ""
 
 
+def _has_env_reference(value: str) -> bool:
+    """True when *value* contains a ``$VAR`` or ``${VAR}`` reference.
+
+    Used by :func:`validate_providers` to reject header values that
+    reference environment variables — the runtime has no CredentialRef
+    support for headers, so such values must be rejected at validation
+    rather than silently dropped or sent verbatim upstream.
+    """
+    return _ENV_REFERENCE_RE.search(value) is not None
+
+
 def validate_providers(providers: dict[str, dict[str, Any]]) -> None:
     """Validate a serialized provider route table (as carried in
     ``SessionSpec.extra['providers']``).
@@ -160,6 +184,14 @@ def validate_providers(providers: dict[str, dict[str, Any]]) -> None:
     here: only the route selected for the current run is resolved (by
     :func:`resolve_route_credential`), so an unresolvable ``$VAR`` on a
     route this run does not use never blocks it.
+
+    Header values are validated against the "never write secrets to disk"
+    commitment: only static (non ``$VAR``) values are allowed, because the
+    runtime's llm-pi-ai adapter has no CredentialRef support for headers —
+    an environment reference would be sent as a literal string or silently
+    dropped. Static values are written verbatim to the generated cordis
+    file, so operators must not place secrets in headers; credential-carrying
+    headers should use the route's api_key / apiKeyEnv pipeline instead.
     """
     if not providers:
         raise CordisConfigError("provider route table is empty")
@@ -202,10 +234,22 @@ def validate_providers(providers: dict[str, dict[str, Any]]) -> None:
                     "more than once"
                 )
             model_ids.append(model_id)
-        for entry in (cfg.get("model_overrides") or {}):
+        for entry in cfg.get("model_overrides") or {}:
             if not str(entry).strip():
                 raise CordisConfigError(
                     f"provider route '{route}': model_overrides has an empty key"
+                )
+        for name, value in (cfg.get("headers") or {}).items():
+            if _has_env_reference(str(value)):
+                raise CordisConfigError(
+                    f"provider route '{route}': header '{name}' does not support "
+                    "$VAR references — the runtime's llm-pi-ai adapter has no "
+                    "CredentialRef support for headers, so a '$VAR' value would "
+                    "be sent as a literal string or silently dropped. Use a "
+                    "static value only, and do NOT place sensitive values in "
+                    "headers: static header values are written in plaintext to "
+                    "the generated cordis file on disk. Route credentials "
+                    "belong in the api_key / apiKeyEnv pipeline."
                 )
         env_name = route_env_var_name(str(route))
         if env_name in seen_env_names:
@@ -283,14 +327,18 @@ def build_approval_block(policy: str) -> str:
     # Preserve the runtime's sandbox while making the composed approval
     # defaults representable by its permission-preset service. A never/ask
     # change alone otherwise prevents the SDK profile from booting.
-    block.append({
-        "id": "permission",
-        "name": "@deepseek-ai/dsh-permission-presets",
-        "config": {"presets": {
-            f"orchestratord-{mode}": {"sandbox": mode, "approval": policy}
-            for mode in ("read-only", "workspace-write", "danger-full-access")
-        }},
-    })
+    block.append(
+        {
+            "id": "permission",
+            "name": "@deepseek-ai/dsh-permission-presets",
+            "config": {
+                "presets": {
+                    f"orchestratord-{mode}": {"sandbox": mode, "approval": policy}
+                    for mode in ("read-only", "workspace-write", "danger-full-access")
+                }
+            },
+        }
+    )
     return yaml.safe_dump(
         block, sort_keys=False, allow_unicode=True, default_flow_style=False
     )
@@ -335,8 +383,7 @@ def build_cordis_text(
     )
     if not blocks:
         raise CordisConfigError(
-            "nothing to generate: no provider routes and no approval "
-            "policy requested"
+            "nothing to generate: no provider routes and no approval policy requested"
         )
     return marker_note + "\n".join(blocks)
 
@@ -361,7 +408,9 @@ def generate_cordis_file(
         validate_providers(providers)
     directory = Path(out_dir)
     directory.mkdir(parents=True, exist_ok=True)
-    stem = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id or f"t{time.time_ns()}-{uuid.uuid4().hex[:8]}")
+    stem = re.sub(
+        r"[^A-Za-z0-9_.-]", "_", run_id or f"t{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+    )
     path = directory / f"dsh-cordis-{stem}.yml"
     path.write_text(
         build_cordis_text(providers, environ=environ, approval_policy=approval_policy),
@@ -404,7 +453,9 @@ def resolve_route(
         if len(providers) == 1:
             raw = next(iter(providers))
         elif not providers:
-            return raw or "deepseek-official", (spec_model or "").strip() or default_model
+            return raw or "deepseek-official", (
+                spec_model or ""
+            ).strip() or default_model
         else:
             raise CordisConfigError(
                 f"agent.provider is required when multiple provider routes "
@@ -420,7 +471,8 @@ def resolve_route(
     cfg = providers[raw] or {}
     model = (spec_model or "").strip()
     declared = [
-        mid for mid in (_model_id_of(entry) for entry in (cfg.get("models") or []))
+        mid
+        for mid in (_model_id_of(entry) for entry in (cfg.get("models") or []))
         if mid
     ]
     if not model:
@@ -459,8 +511,6 @@ def resolve_route(
 _probe_cache: bool | None = False  # False = not yet probed; True/bool result cached
 
 
-
-
 def probe_llm_pi_ai_available() -> bool:
     """Best-effort check that the runtime build ships the llm-pi-ai plugin.
 
@@ -493,7 +543,7 @@ def probe_llm_pi_ai_available() -> bool:
                 if needle in tail + chunk:
                     found = True
                     break
-                tail = chunk[-len(needle):]
+                tail = chunk[-len(needle) :]
     except OSError:
         return False
     _probe_cache = found
