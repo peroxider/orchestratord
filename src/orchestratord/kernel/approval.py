@@ -103,7 +103,7 @@ class AskApprovalPolicy(ApprovalPolicy):
         event: ToolCallEvent,
         session_context: dict[str, Any],
     ) -> bool:
-        event.deny(reason="policy=ask (not supported in autonomous mode)")
+        event.deny(reason="policy=ask (autonomous mode: post-hoc audit, tool was executed)")
         return False
 
 

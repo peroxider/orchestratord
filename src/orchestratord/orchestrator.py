@@ -2712,6 +2712,20 @@ class Orchestrator:
                 f"{result.completed_stages}/{result.total_stages}: {result.error}"
             )
 
+        # 工作流引擎在 per-stage session 上设置 _snapshot_backend，
+        # 外层 session 不会被设置，run report 的 Backend 字段会显示 n/a。
+        # 从 agent_runner 回填，确保 report 能正确展示后端名称。
+        _backend = getattr(self.agent_runner, "backend", None)
+        if _backend is not None:
+            session._snapshot_backend = getattr(_backend, "name", None) or ""
+            session._snapshot_model = (
+                getattr(self.agent_runner.agent_config, "model", None) or ""
+            )
+            session._snapshot_provider = (
+                getattr(self.agent_runner.agent_config, "provider", None)
+                or getattr(_backend, "name", "")
+            )
+
         self._update_run_diagnostics(session)
 
     def _repro_gate_applies(self, session: AgentSession) -> bool:
