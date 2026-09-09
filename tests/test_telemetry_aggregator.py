@@ -205,16 +205,75 @@ def test_daemon_session_end_excluded_from_agent_stats(telemetry_home) -> None:
     assert "| session 结束数 | 1 |" in rendered
 
 
+def test_unattended_closed_loop_and_quartiles(telemetry_home) -> None:
+    from orchestratord.telemetry import record_session_end
+    from orchestratord.telemetry.aggregator import aggregate_day, render_summary_markdown
+
+    def _agent_end(issue: str, *, ok: bool, reason: str, e2e: float) -> None:
+        record_session_end(
+            session_id=f"sess-{issue}-{e2e}",
+            issue_id=issue,
+            backend="opencode",
+            turn_count=3,
+            queue_wait_s=0.5,
+            duration_s=e2e - 0.5,
+            exit_status=0 if ok else 1,
+            end_reason=reason,
+        )
+
+    # Issue 10: five unattended successes (e2e 1,1,1,1,2).
+    for e2e in (1.0, 1.0, 1.0, 1.0, 2.0):
+        _agent_end("10", ok=True, reason="success", e2e=e2e)
+    # Issue 11: human takeover (failed) then an unattended retry success —
+    # closed, but human-touched.
+    _agent_end("11", ok=False, reason="operator_takeover", e2e=3.0)
+    _agent_end("11", ok=True, reason="success", e2e=4.0)
+    # Issue 12: backend error only — seen, never closed.
+    _agent_end("12", ok=False, reason="backend_error", e2e=5.0)
+
+    summary = aggregate_day()
+    unattended = summary["unattended"]
+    assert unattended["sessions_total"] == 8
+    assert unattended["sessions_human"] == 1
+    assert unattended["issues_seen"] == 3
+    assert unattended["issues_closed"] == 2
+    assert unattended["issues_unattended"] == 1
+    assert unattended["closed_loop_rate"] == pytest.approx(2 / 3)
+    assert unattended["rate"] == pytest.approx(1 / 3)
+
+    # E2E ordered [1,1,1,1,2,3,4,5]: avg 2.25; quartile indexes via
+    # round(q*(n-1)) → p25=1, p50=2, p75=3.
+    e2e = summary["session_e2e"]
+    assert e2e["count"] == 8
+    assert e2e["avg_s"] == pytest.approx(2.25)
+    assert e2e["p25_s"] == pytest.approx(1.0)
+    assert e2e["p50_s"] == pytest.approx(2.0)
+    assert e2e["p75_s"] == pytest.approx(3.0)
+    assert summary["session_duration"]["p25_s"] == pytest.approx(0.5)
+    assert summary["session_duration"]["p75_s"] == pytest.approx(2.5)
+
+    rendered = render_summary_markdown(summary)
+    assert "## 无人干预闭环" in rendered
+    assert "| 无人干预闭环率 | 33.3% |" in rendered
+    assert "| 闭环率 | 66.7% |" in rendered
+    assert "| 人工干预会话数 | 1 |" in rendered
+    assert "端到端 avg / Q1 / 中位 / Q3" in rendered
+    assert "会话耗时 avg / Q1 / 中位 / Q3" in rendered
+
+
 def test_empty_day_renders_base_tables_only(telemetry_home) -> None:
     from orchestratord.telemetry.aggregator import aggregate_day, render_summary_markdown
 
     summary = aggregate_day()
     assert summary["events"] == 0
     assert summary["session_duration"]["count"] == 0
+    assert summary["unattended"]["issues_seen"] == 0
+    assert summary["unattended"]["rate"] is None
 
     rendered = render_summary_markdown(summary)
     assert "## 汇总" in rendered
     assert "## 耗时 (agent 会话)" not in rendered
+    assert "## 无人干预闭环" not in rendered
 
 
 @pytest.mark.asyncio

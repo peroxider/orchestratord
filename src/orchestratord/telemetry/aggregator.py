@@ -29,6 +29,15 @@ def _day_key() -> str:
     return time.strftime("%Y-%m-%d")
 
 
+# session_end reasons that mean a human stepped into the loop: manual
+# stop / takeover from the CLI, or a cancellation (人工取消或系统取消).
+# Everything else — backend errors, watchdog timeouts, verification
+# blocks followed by automatic retry — closes the loop unattended.
+_HUMAN_END_REASONS = frozenset(
+    {"operator_stop", "operator_stopped", "operator_takeover", "cancelled"}
+)
+
+
 def _percentile(values: list[float], q: float) -> float:
     if not values:
         return 0.0
@@ -43,7 +52,9 @@ def _duration_stats(values: list[float]) -> dict[str, Any]:
             "count": 0,
             "total_s": 0.0,
             "avg_s": 0.0,
+            "p25_s": 0.0,
             "p50_s": 0.0,
+            "p75_s": 0.0,
             "p95_s": 0.0,
             "max_s": 0.0,
         }
@@ -52,7 +63,9 @@ def _duration_stats(values: list[float]) -> dict[str, Any]:
         "count": len(values),
         "total_s": total,
         "avg_s": total / len(values),
+        "p25_s": _percentile(values, 0.25),
         "p50_s": _percentile(values, 0.50),
+        "p75_s": _percentile(values, 0.75),
         "p95_s": _percentile(values, 0.95),
         "max_s": max(values),
     }
@@ -119,6 +132,15 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             "interception_rate": 0.0,
         },
         "crashes": {"total": 0, "by_kind": Counter()},
+        "unattended": {
+            "sessions_total": 0,
+            "sessions_human": 0,
+            "issues_seen": 0,
+            "issues_closed": 0,
+            "issues_unattended": 0,
+            "rate": None,
+            "closed_loop_rate": None,
+        },
     }
 
     durations: list[float] = []
@@ -127,6 +149,10 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     first_events: list[float] = []
     first_turns: list[float] = []
     turn_durations: list[float] = []
+    # Per-issue closed-loop bookkeeping over agent session_end events.
+    issue_seen: set[str] = set()
+    issue_closed: set[str] = set()
+    issue_human: set[str] = set()
 
     def backend_bucket(backend: Any) -> dict[str, Any]:
         return summary["by_backend"].setdefault(
@@ -179,10 +205,21 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             # (orchestrator polling loop) never does. Duration stats over
             # agent runs only — a daemon session spans the whole day.
             if "turn_count" in payload:
+                end_reason = str(payload.get("end_reason") or "")
+                unattended = summary["unattended"]
+                unattended["sessions_total"] += 1
+                if issue:
+                    issue_seen.add(issue)
+                    if end_reason in _HUMAN_END_REASONS:
+                        issue_human.add(issue)
+                if end_reason in _HUMAN_END_REASONS:
+                    unattended["sessions_human"] += 1
                 bucket = backend_bucket(ev.get("backend") or payload.get("backend"))
                 bucket["sessions"] += 1
                 if ok:
                     bucket["succeeded"] += 1
+                    if issue:
+                        issue_closed.add(issue)
                 else:
                     bucket["failed"] += 1
                 duration = _num(payload.get("duration_s"))
@@ -292,6 +329,15 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     crashes["backend_rate_per_session"] = (
         crashes["backend_worker"] / agent_sessions if agent_sessions else None
     )
+    unattended = summary["unattended"]
+    unattended["issues_seen"] = len(issue_seen)
+    unattended["issues_closed"] = len(issue_closed)
+    unattended["issues_unattended"] = len(issue_closed - issue_human)
+    if issue_seen:
+        unattended["closed_loop_rate"] = len(issue_closed) / len(issue_seen)
+        unattended["rate"] = (
+            len(issue_closed - issue_human) / len(issue_seen)
+        )
     return summary
 
 
@@ -329,6 +375,24 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         "",
     ]
 
+    unattended = summary.get("unattended") or {}
+    if unattended.get("issues_seen"):
+        closed_rate = unattended.get("closed_loop_rate") or 0.0
+        rate = unattended.get("rate") or 0.0
+        lines += [
+            "## 无人干预闭环",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
+            f"| 涉及 issue 数 | {unattended.get('issues_seen', 0)} |",
+            f"| 闭环 issue 数（当日有成功会话） | {unattended.get('issues_closed', 0)} |",
+            f"| 无人干预闭环 issue 数 | {unattended.get('issues_unattended', 0)} |",
+            f"| 闭环率 | {closed_rate * 100:.1f}% |",
+            f"| 无人干预闭环率 | {rate * 100:.1f}% |",
+            f"| 人工干预会话数 | {unattended.get('sessions_human', 0)} |",
+            "",
+        ]
+
     duration = summary.get("session_duration") or {}
     if duration.get("count"):
         e2e = summary.get("session_e2e") or {}
@@ -339,8 +403,10 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
             "",
             "| 指标 | 值 |",
             "|------|-----|",
-            f"| 会话耗时 avg/p50/p95/max | {_fmt(duration, 'avg_s')} / {_fmt(duration, 'p50_s')} / {_fmt(duration, 'p95_s')} / {_fmt(duration, 'max_s')} |",
-            f"| 端到端 avg/p50/p95/max | {_fmt(e2e, 'avg_s')} / {_fmt(e2e, 'p50_s')} / {_fmt(e2e, 'p95_s')} / {_fmt(e2e, 'max_s')} |",
+            f"| 会话耗时 avg / Q1 / 中位 / Q3 | {_fmt(duration, 'avg_s')} / {_fmt(duration, 'p25_s')} / {_fmt(duration, 'p50_s')} / {_fmt(duration, 'p75_s')} |",
+            f"| 会话耗时 p95 / max | {_fmt(duration, 'p95_s')} / {_fmt(duration, 'max_s')} |",
+            f"| 端到端 avg / Q1 / 中位 / Q3 | {_fmt(e2e, 'avg_s')} / {_fmt(e2e, 'p25_s')} / {_fmt(e2e, 'p50_s')} / {_fmt(e2e, 'p75_s')} |",
+            f"| 端到端 p95 / max | {_fmt(e2e, 'p95_s')} / {_fmt(e2e, 'max_s')} |",
             f"| 排队等待 avg | {_fmt(latency, 'queue_wait_avg_s')} |",
             f"| 首事件延迟 avg | {_fmt(latency, 'first_event_avg_s')} |",
             f"| 首 turn 延迟 avg | {_fmt(latency, 'first_turn_avg_s')} |",
