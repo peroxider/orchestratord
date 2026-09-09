@@ -1,27 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '../api/client'
 import type { Session, SessionEventsPage } from '../api/types'
+import { adaptSession } from '../api/adapters'
 
 export function useSessions(client: ApiClient, workspaceId: string) {
   return useQuery({
     queryKey: ['sessions', 'workspace', workspaceId],
-    queryFn: () =>
-      client.request<Session[]>(`/api/workspaces/${workspaceId}/sessions`),
-  })
-}
-
-export function useSessionsByIssue(client: ApiClient, issueId: string) {
-  return useQuery({
-    queryKey: ['sessions', 'issue', issueId],
-    queryFn: () =>
-      client.request<Session[]>(`/api/issues/${issueId}/sessions`),
+    queryFn: async () => (await client.request<Parameters<typeof adaptSession>[0][]>(`/api/workspaces/${workspaceId}/sessions`)).map(adaptSession),
   })
 }
 
 export function useSession(client: ApiClient, sessionId: string) {
   return useQuery({
     queryKey: ['sessions', sessionId],
-    queryFn: () => client.request<Session>(`/api/sessions/${sessionId}`),
+    queryFn: async () => adaptSession(await client.request<Parameters<typeof adaptSession>[0]>(`/api/sessions/${sessionId}`)),
   })
 }
 

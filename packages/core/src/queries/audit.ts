@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import type { ApiClient } from '../api/client'
 import type { AuditActorType, AuditLogEntry } from '../api/types'
+import { adaptAuditEntry } from '../api/adapters'
 
 export interface AuditFilters {
   actor_type?: AuditActorType
@@ -28,9 +29,9 @@ export function useAudit(
 ) {
   return useQuery({
     queryKey: ['audit', workspaceId, filters],
-    queryFn: () =>
-      client.request<AuditLogEntry[]>(
+    queryFn: async () =>
+      (await client.request<Parameters<typeof adaptAuditEntry>[0][]>(
         `/api/workspaces/${workspaceId}/audit${toAuditQueryString(filters ?? {})}`,
-      ),
+      )).map(adaptAuditEntry),
   })
 }

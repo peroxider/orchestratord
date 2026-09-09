@@ -5,12 +5,14 @@ import { useQueryClient } from '@tanstack/react-query'
 import { RealtimeClient } from './client'
 import type { RealtimeStatus } from './client'
 import { invalidationFor } from './messages'
+import type { RealtimeContribution } from '@orchestratord/app-contracts'
 
 export interface UseRealtimeBridgeOptions {
   url: string
   workspaceId: string
   token?: string
   onStatus?: (status: RealtimeStatus) => void
+  applicationContributions?: readonly RealtimeContribution[]
 }
 
 // The dashboard shell opens ONE authenticated socket for the whole app;
@@ -46,6 +48,7 @@ export function useRealtimeBridge({
   workspaceId,
   token,
   onStatus,
+  applicationContributions = [],
 }: UseRealtimeBridgeOptions): void {
   const queryClient = useQueryClient()
 
@@ -61,6 +64,11 @@ export function useRealtimeBridge({
             void queryClient.invalidateQueries({ queryKey: key })
           }
         }
+        const topic = typeof message.topic === 'string' ? message.topic : ''
+        for (const contribution of applicationContributions) {
+          if (!contribution.match(topic)) continue
+          for (const key of contribution.invalidations(topic, workspaceId)) void queryClient.invalidateQueries({ queryKey: key })
+        }
       },
       onStatus,
     })
@@ -72,5 +80,5 @@ export function useRealtimeBridge({
         setActiveRealtimeClient(null)
       }
     }
-  }, [url, workspaceId, token, onStatus, queryClient])
+  }, [url, workspaceId, token, onStatus, queryClient, applicationContributions])
 }

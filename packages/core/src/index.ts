@@ -1,10 +1,9 @@
 export { ApiClient, ApiError } from './api/client'
 export type { ApiClientOptions } from './api/client'
 export type {
-  Issue,
+  ApplicationBootstrap,
   InstanceBootstrap,
-  IssueComment,
-  IssueStatus,
+  ConversationOrigin,
   Session,
   SessionEvent,
   SessionEventKind,
@@ -32,24 +31,13 @@ export type {
   AutopilotRun,
   AuditLogEntry,
   AuditActorType,
-  PullRequest,
-  PullRequestState,
-  PullRequestsResponse,
   ChatRole,
   ChatMessage,
   ChatSessionMessages,
   ChatSessionStart,
 } from './api/types'
-export { useIssues, useIssue, useCreateIssue, useUpdateIssue, useAddComment, useMoveIssue } from './queries/issues'
-export type {
-  IssueFilters,
-  CreateIssueInput,
-  UpdateIssueInput,
-  AddCommentInput,
-} from './queries/issues'
 export {
   useSessions,
-  useSessionsByIssue,
   useSession,
   useSessionEvents,
   useSessionDecision,
@@ -114,6 +102,6 @@ export {
 export type { CreateAutopilotInput } from './queries/autopilots'
 export { useAudit } from './queries/audit'
 export type { AuditFilters } from './queries/audit'
-export { usePullRequests } from './queries/vcs'
+export { adaptSession, adaptInboxItem, adaptAuditEntry } from './api/adapters'
 export { CoreProvider } from './provider'
 export * from './realtime'

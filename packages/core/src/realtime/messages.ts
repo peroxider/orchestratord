@@ -16,9 +16,6 @@ export function invalidationFor(
   switch (message.type) {
     case 'event': {
       const topic = typeof message.topic === 'string' ? message.topic : ''
-      if (topic.startsWith('issue.')) {
-        return [['issues', workspaceId]]
-      }
       if (topic.startsWith('chat.')) {
         // Per-session chat timeline: streaming frames keep the streaming
         // bubble fresh; turn/session completion also triggers this refetch

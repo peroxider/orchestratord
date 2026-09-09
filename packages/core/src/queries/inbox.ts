@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '../api/client'
 import type { InboxItem, InboxItemStatus, SessionEvent, SessionEventsPage } from '../api/types'
+import { adaptInboxItem } from '../api/adapters'
 
 export function inboxApprovalRequestId(events: SessionEvent[], eventSeq: number | null): string | null {
   const event = eventSeq == null
@@ -17,10 +18,10 @@ export function useInbox(
 ) {
   return useQuery({
     queryKey: ['inbox', workspaceId, status],
-    queryFn: () =>
-      client.request<InboxItem[]>(
+    queryFn: async () =>
+      (await client.request<Parameters<typeof adaptInboxItem>[0][]>(
         `/api/workspaces/${workspaceId}/inbox${status ? `?status=${status}` : ''}`,
-      ),
+      )).map(adaptInboxItem),
   })
 }
 

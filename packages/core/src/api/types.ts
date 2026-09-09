@@ -1,12 +1,10 @@
-export type IssueStatus =
-  | 'queued'
-  | 'pending'
-  | 'running'
-  | 'pending_review'
-  | 'completed'
-  | 'failed'
-  | 'abandoned'
-  | 'verification_failed'
+import type { ResourceRef } from '@orchestratord/app-contracts'
+
+export interface ApplicationBootstrap {
+  id: string
+  enabled: boolean
+  capabilities: string[]
+}
 
 export interface InstanceBootstrap {
   instance_name: string
@@ -15,36 +13,16 @@ export interface InstanceBootstrap {
   server_version: string
   realtime_url: string
   features: Record<string, unknown>
+  applications?: ApplicationBootstrap[]
 }
 
-export interface Issue {
-  id: string
-  workspace_id: string
-  title: string
-  description: string
-  status: IssueStatus
-  assignee_type: string | null
-  assignee_id: string | null
-  labels: string[]
-  created_at: string
-  /** Present only on the detail payload (`GET .../issues/{id}`). */
-  comments?: IssueComment[]
-}
-
-export interface IssueComment {
-  id: string
-  issue_id: string
-  author_type: string
-  author_id: string
-  body: string
-  mentions: string[]
-  created_at: string
-}
+export type ConversationOrigin = { kind: 'direct' } | { kind: 'resource'; source: ResourceRef }
 
 export interface Session {
   id: string
   workspace_id: string
-  issue_id: string | null
+  source_ref: ResourceRef | null
+  origin: ConversationOrigin
   agent_id: string | null
   run_id: string | null
   mode: string
@@ -143,7 +121,9 @@ export interface InboxItem {
   workspace_id: string
   kind: InboxKind
   title: string
-  issue_id: string | null
+  application_id: string | null
+  resource_ref: ResourceRef | null
+  session_ref: ResourceRef | null
   session_id: string | null
   event_seq: number | null
   status: InboxItemStatus
@@ -251,27 +231,9 @@ export interface AuditLogEntry {
   action: string
   target_type: string
   target_id: string
+  target_ref: ResourceRef
   payload_jsonb: Record<string, unknown> | null
   created_at: string
-}
-
-export type PullRequestState = 'open' | 'closed' | 'merged'
-
-export interface PullRequest {
-  id: string
-  issue_id: string | null
-  repo: string
-  number: number
-  title: string
-  state: string
-  head_sha: string
-  status: string
-  created_at: string
-  updated_at: string
-}
-
-export interface PullRequestsResponse {
-  pull_requests: PullRequest[]
 }
 
 export type ChatRole = 'user' | 'assistant' | 'system' | 'tool'

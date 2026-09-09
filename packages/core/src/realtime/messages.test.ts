@@ -2,11 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { invalidationFor } from './messages'
 
 describe('invalidationFor', () => {
-  it('maps issue events to the workspace issue query', () => {
-    expect(
-      invalidationFor({ type: 'event', topic: 'issue.123', payload: {} }, 'ws-1'),
-    ).toEqual([['issues', 'ws-1']])
-  })
+  it('safely ignores application-owned topics', () => expect(invalidationFor({ type: 'event', topic: 'issue.123', payload: {} }, 'ws-1')).toBeNull())
 
   it('maps session events to the sessions query', () => {
     expect(

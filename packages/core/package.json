@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@orchestratord/app-contracts": "workspace:*",
     "@tanstack/react-query": "^5.102.0",
     "zustand": "^5.0.0"
   },
