@@ -25,15 +25,6 @@ orchestratord app issue-pr review --id ISSUE_ID --approve
 `server` and `issue` remain compatibility command groups. New integrations
 should use `daemon`, `run`, and `app issue-pr`.
 
-### Local Web console security
-
-`orchestratord serve` binds to `127.0.0.1` by default. The Web console is a
-single-operator control surface with no browser login and can approve tools or
-stop running agent processes. Do not expose it directly to a LAN or the public
-internet. If remote access is required, keep the daemon behind a trusted VPN or
-an authenticating reverse proxy with TLS; daemon/runtime credentials remain
-separate from the browser session.
-
 Declarative stages may use the built-in `agent`, `gate`, and `decision` kinds,
 or a namespaced action registered through the `orchestratord.actions` Python
 entry-point group:
@@ -320,95 +311,6 @@ If a pinned reference drifts after editing sources, refresh the hashes with:
 python scripts/regen_source_map.py
 ```
 
-## Peer federation (Phase 1)
-
-Two or more `orchestratord` daemons can federate: every daemon publishes
-an Agent Card at `/.well-known/agent.json`, a remote daemon applies to
-join a workspace, the operator accepts, and the accepted peer may then
-append messages, create sessions, and stream `peer.*` events.
-Normative sources: [`DESIGN_PEER_FEDERATION.md`](./DESIGN_PEER_FEDERATION.md)
-and [`ADR-001-peer-federation.md`](./ADR-001-peer-federation.md).
-
-### Quickstart: A1 (local) ⇄ B1 (remote)
-
-```bash
-# --- B1 (the remote daemon) --------------------------------------------
-# Sharing one Redis across daemons gives cross-daemon event fan-out
-# (AC7); without it each daemon stays single-process (AC13 unchanged).
-ORCHESTRATORD_REDIS_URL=redis://localhost:6379/0 orchestratord serve --port 9000
-
-# --- A1 (the local daemon) ---------------------------------------------
-ORCHESTRATORD_REDIS_URL=redis://localhost:6379/0 orchestratord serve --port 9100
-```
-
-Find A1's workspace id (single-user mode needs no login):
-
-```bash
-curl -s http://127.0.0.1:9100/api/workspaces/by-slug/default | jq -r .workspace_id
-```
-
-B1 applies to join that workspace (run on B1):
-
-```bash
-orchestratord peer invite \
-  --url http://127.0.0.1:9100 \
-  --workspace-id <A1-workspace-uuid>
-```
-
-A1's operator accepts (run on A1) — the per-peer token is printed **once**
-(D15):
-
-```bash
-orchestratord peer list --workspace-id <A1-workspace-uuid> --status pending
-orchestratord peer accept --peer-id <peer-row-uuid>   # → token (shown once)
-```
-
-Short-cut for trusted LANs: put B1's `orch_id` in A1's
-`ORCHESTRATORD_PEER_TRUST` (comma-separated allowlist, R10) **before** the
-invite — the handshake then completes immediately and returns the token in
-the invite response (HTTP 200 instead of 202).
-
-The accepted peer calls A1's API with its token and identity header:
-
-```bash
-curl -X POST http://127.0.0.1:9100/api/peer/peers/<B1-orch_id>/invoke \
-  -H "Authorization: Bearer <token>" \
-  -H "X-Peer-Orchestrator-Id: <B1-orch_id>" \
-  -d '{"method": "GET /api/workspaces/{workspace_id}/sessions",
-       "body": {"workspace_id": "<A1-workspace-uuid>"}}'
-```
-
-Redis is only needed for the event fan-out. A minimal compose service:
-
-```yaml
-services:
-  redis:
-    image: redis:7-alpine
-    ports: ["6379:6379"]
-```
-
-### Token rotation SOP (manual, D11 / AC17)
-
-Peer tokens never expire and are shown exactly once at accept time; there
-is deliberately no automatic rotation. To rotate (compromise suspected,
-operator churn, periodic hygiene):
-
-1. Remove the peer — its access dies with the registry row (AC8):
-   `orchestratord peer remove --orch-id <B1-orch_id> --workspace-id <A1-workspace-uuid>`.
-   The old bearer token stops working immediately even though its
-   `auth_tokens` row lingers (authentication also requires an `accepted`
-   peer row).
-2. B1 re-applies (`orchestratord peer invite ...`), A1 accepts again and
-   receives a fresh one-time token.
-3. Store the new token wherever B1 keeps its credentials (secret manager
-   or B1's environment), and optionally delete the stale `auth_tokens`
-   row named `peer:<B1-orch_id>` from A1's database.
-
-Phase-1 boundary: `serve` does not yet bind the peer/1 frame listener;
-cross-daemon traffic uses the HTTP endpoints above, and
-`orchestratord peer group …` manages decentralized groups (D26) whose
-membership is local state.
-
 ## IM Message Gateway
 
 An optional, standalone daemon for **Feishu App WebSocket** and **WeChat iLink** private messages. Feishu/Slack/Discord webhooks support outbound reports only. Runtime requires **POSIX/WSL**. IM access is **command-only**: authorized users can query or control issues and receive replies and event reports; ordinary chat messages do not start agent tasks.
@@ -424,8 +326,9 @@ flowchart LR
 
 ```bash
 # Install channel dependencies; use gateway-feishu or gateway-wechat for one channel
-uv pip install --python ~/.venvs/orchestratord/bin/python -e '.[gateway-all]'
-source ~/.venvs/orchestratord/bin/activate
+pip install 'orchestratord[gateway-feishu]'
+pip install 'orchestratord[gateway-wechat]'
+pip install 'orchestratord[gateway-all]'
 
 # Configure channels and authorized senders; setup restarts the daemon automatically
 orchestratord gateway setup

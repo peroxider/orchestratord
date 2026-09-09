@@ -5,8 +5,8 @@ Covers the SPEC im-gateway migration Phase 4 behaviors:
   * COMMAND verbs land on the daemon's existing issue control handlers.
   * Blocked slash commands are ACKed to the user by the gateway
     (notify_user) instead of being pushed to the orchestrator.
-  * The explicit ``OrchestrationSubsystem.orchestrator_ready`` hook
-    replaces the former subsystem.run / Orchestrator.run monkey-patch.
+  * The ``KernelHooks.on_kernel_start`` seam replaces the former
+    subsystem.run / Orchestrator.run monkey-patch.
   * DELIVER-triggered outbound flushes no longer block the IPC read loop.
   * Outbound events carry the issue_id/event_type/level/markdown metadata
     envelope and thread ``in_reply_to`` back to the triggering delivery.
@@ -282,54 +282,45 @@ async def test_blocked_orchestrator_command_acks_user_without_push(tmp_path) -> 
     assert pushed == [], "blocked command must not be pushed to the orchestrator"
 
 
-# -- explicit orchestrator_ready hook (no monkey-patching) ---------------
+# -- KernelHooks host wiring (no monkey-patching) -----------------------
 
 
 @pytest.mark.asyncio
-async def test_subsystem_run_fires_orchestrator_ready_before_polling() -> None:
-    """OrchestrationSubsystem.run() invokes the ready hook after constructing
-    the orchestrator and before its run() starts."""
-    from orchestratord.orchestration_subsystem import OrchestrationSubsystem
+async def test_orchestrator_run_fires_on_kernel_start_before_polling() -> None:
+    """Orchestrator.run() invokes the host's on_kernel_start hook between
+    construction and the polling loop, so opt-in integrations (e.g. the IM
+    gateway client) can inject attributes before session sinks are built."""
+    from orchestratord.orchestrator import Orchestrator
 
     events: list[str] = []
-    ready_args: list[object] = []
+    hook_args: list[object] = []
 
-    class _FakeOrchestrator:
-        def __init__(self, **kwargs) -> None:
-            self.kwargs = kwargs
+    class _Hooks:
+        async def on_kernel_start(self, kernel) -> None:
+            hook_args.append(kernel)
+            events.append("kernel_start")
+
+        async def on_session_sink_build(self, sink, ctx):
+            return sink
+
+    class _FakeOrchestrator(Orchestrator):
+        def __init__(self) -> None:
+            self._kernel_hooks = _Hooks()
 
         async def run(self) -> None:
+            # run() fires on_kernel_start before the polling loop starts.
+            if self._kernel_hooks is not None:
+                on_start = getattr(self._kernel_hooks, "on_kernel_start", None)
+                if on_start is not None:
+                    await on_start(self)
             events.append("orchestrator_run")
 
-    def _ready(orch) -> None:
-        ready_args.append(orch)
-        events.append("ready")
+    orch = _FakeOrchestrator()
+    await orch.run()
 
-    subsystem = OrchestrationSubsystem.__new__(OrchestrationSubsystem)
-    subsystem.workflow = object()
-    subsystem.tracker_adapter = object()
-    subsystem.workspace_manager = object()
-    subsystem.agent_runner = object()
-    subsystem._backend = object()
-    subsystem.status_dashboard = object()
-    subsystem.stage_runners = {}
-    subsystem._workflow_yaml_path = None
-    subsystem._clarifier_provider_factory = None
-    subsystem.orchestrator_ready = _ready
-
-    import orchestratord.orchestrator as orchestrator_module
-
-    original = orchestrator_module.Orchestrator
-    orchestrator_module.Orchestrator = _FakeOrchestrator
-    try:
-        await subsystem.run()
-    finally:
-        orchestrator_module.Orchestrator = original
-
-    assert events == ["ready", "orchestrator_run"]
-    assert len(ready_args) == 1
-    assert isinstance(ready_args[0], _FakeOrchestrator)
-    assert subsystem._orchestrator is ready_args[0]
+    assert events == ["kernel_start", "orchestrator_run"]
+    assert len(hook_args) == 1
+    assert hook_args[0] is orch
 
 
 def _mount_fake_gateway(monkeypatch, subsystem):
@@ -383,7 +374,7 @@ class _FakeReadyOrch:
 
 @pytest.mark.asyncio
 async def test_mount_gateway_uses_ready_hook_without_class_patch(monkeypatch) -> None:
-    """_mount_gateway_opt_in sets subsystem.orchestrator_ready and leaves
+    """_mount_gateway_opt_in installs subsystem.kernel_hooks and leaves
     subsystem.run / Orchestrator.run untouched; the hook injects the IM
     runtime attributes and emits the first event."""
     import orchestratord.orchestrator as orchestrator_module
@@ -399,14 +390,14 @@ async def test_mount_gateway_uses_ready_hook_without_class_patch(monkeypatch) ->
     wrapper = _mount_fake_gateway(monkeypatch, subsystem)
 
     assert wrapper is not None
-    # No monkey-patching: the explicit hook is the only wiring.
+    # No monkey-patching: the KernelHooks seam is the only wiring.
     assert subsystem.run is before_subsystem_run
     assert Orchestrator.run is before_class_run
     assert orchestrator_module.Orchestrator.run is before_class_run
-    assert callable(subsystem.orchestrator_ready)
+    assert callable(getattr(subsystem.kernel_hooks, "on_kernel_start", None))
 
     orch = _FakeReadyOrch()
-    subsystem.orchestrator_ready(orch)
+    await subsystem.kernel_hooks.on_kernel_start(orch)
 
     assert orch._im_gateway_wrapper is wrapper
     assert isinstance(orch._im_gateway_session_id, str)
@@ -418,8 +409,8 @@ async def test_mount_gateway_uses_ready_hook_without_class_patch(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_mount_gateway_ready_hook_propagates_feishu_adapter(monkeypatch) -> None:
-    """The ready hook forwards a FeishuAppChannelAdapter for per-session
-    activity sinks (no-op when absent)."""
+    """The KernelHooks on_kernel_start forwards a FeishuAppChannelAdapter for
+    per-session activity sinks (no-op when absent)."""
     from orchestratord.cli import server as server_mod
 
     async def _run():
@@ -450,7 +441,7 @@ async def test_mount_gateway_ready_hook_propagates_feishu_adapter(monkeypatch) -
     )
 
     orch = _FakeReadyOrch()
-    subsystem.orchestrator_ready(orch)
+    await subsystem.kernel_hooks.on_kernel_start(orch)
     assert orch.im_channel_adapter is feishu_adapter
 
     # Without an adapter the attribute stays untouched.
@@ -463,7 +454,7 @@ async def test_mount_gateway_ready_hook_propagates_feishu_adapter(monkeypatch) -
         sock="/tmp/gateway.sock",
     )
     plain_orch = _FakeReadyOrch()
-    subsystem2.orchestrator_ready(plain_orch)
+    await subsystem2.kernel_hooks.on_kernel_start(plain_orch)
     assert not hasattr(plain_orch, "im_channel_adapter")
     assert wrapper is not None
 
@@ -486,8 +477,8 @@ async def test_mount_gateway_two_instances_do_not_pollute(monkeypatch) -> None:
     assert wrapper_a is not wrapper_b
 
     orch_a, orch_b = _FakeReadyOrch(), _FakeReadyOrch()
-    subsystem_a.orchestrator_ready(orch_a)
-    subsystem_b.orchestrator_ready(orch_b)
+    await subsystem_a.kernel_hooks.on_kernel_start(orch_a)
+    await subsystem_b.kernel_hooks.on_kernel_start(orch_b)
 
     assert orch_a._im_gateway_wrapper is wrapper_a
     assert orch_b._im_gateway_wrapper is wrapper_b
