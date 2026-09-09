@@ -696,11 +696,15 @@ class DshSession:
     def close_sync(self) -> None:
         self._closed = True
         with self._lifecycle_lock:
+            # Always send the shutdown flush first so the runtime has a
+            # chance to persist any durable state before the process tree
+            # is killed.  Reordering this way ensures the flush completes
+            # before tool cleanup regardless of _turn_active timing.
+            if self._harness is not None:
+                self._harness.close()
+                self._harness = None
             if self._process_tree is not None and (
                 self._turn_active.is_set() or self._process_tree.frozen
             ):
                 self._process_tree.kill()
-            if self._harness is not None:
-                self._harness.close()
-                self._harness = None
             self._signal_process_ready()
