@@ -7,6 +7,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -85,6 +86,45 @@ class GitSyncPostCommitError(GitSyncError):
         self.result = result
         self.output = getattr(cause, "output", "")
         self.hook_name = getattr(cause, "hook_name", None)
+
+
+def _record_gate_telemetry(
+    session: Any,
+    *,
+    outcome: str,
+    blocked_by: str = "",
+    duration_s: float = 0.0,
+) -> None:
+    """Best-effort verification-gate telemetry — one event per attempt.
+
+    ``outcome`` is ``blocked`` (VerificationFailed), ``error`` (any other
+    gate failure), or the resolved ``verification_status`` on success
+    (passed / passed_preexisting_failures / skipped...).
+    """
+    try:
+        from ..telemetry import record_verification
+
+        record_verification(
+            session_id=(
+                getattr(session, "session_id", None)
+                or getattr(session, "backend_session_id", None)
+                or getattr(session, "run_id", None)
+                or ""
+            ),
+            run_id=getattr(session, "run_id", None) or "",
+            issue_id=(
+                session.issue.id
+                if getattr(session, "issue", None) is not None
+                else ""
+            ),
+            backend=getattr(session, "backend_name", None) or "",
+            model=getattr(session, "_snapshot_model", None) or "",
+            outcome=outcome,
+            blocked_by=blocked_by,
+            duration_s=duration_s,
+        )
+    except Exception:
+        pass
 
 
 class GitSyncService:
@@ -561,6 +601,38 @@ class GitSyncService:
         session.pre_commit_output = output
 
     async def _run_pre_push_verification(self, repo_root: str, session: Any) -> None:
+        """Run the verification gate with one telemetry event per attempt.
+
+        Pure passthrough to :meth:`_run_pre_push_verification_checks` —
+        the gate semantics live there; this wrapper only records the
+        outcome (best-effort; telemetry failures never affect the gate).
+        """
+        started = time.monotonic()
+        try:
+            await self._run_pre_push_verification_checks(repo_root, session)
+        except VerificationFailed as exc:
+            message = str(exc) or "verification failed"
+            _record_gate_telemetry(
+                session,
+                outcome="blocked",
+                blocked_by=message.splitlines()[0][:80],
+                duration_s=time.monotonic() - started,
+            )
+            raise
+        except Exception:
+            _record_gate_telemetry(
+                session,
+                outcome="error",
+                duration_s=time.monotonic() - started,
+            )
+            raise
+        _record_gate_telemetry(
+            session,
+            outcome=getattr(session, "verification_status", None) or "passed",
+            duration_s=time.monotonic() - started,
+        )
+
+    async def _run_pre_push_verification_checks(self, repo_root: str, session: Any) -> None:
         outputs: list[str] = []
         verification_status = "passed"
         for label, command in (

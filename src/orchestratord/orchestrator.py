@@ -335,6 +335,20 @@ class Orchestrator:
         registry_path = workspace_root / ".orchestratord_issue_registry.json"
         self._registry = IssueRegistry(registry_path)
 
+        # Crash telemetry: read the PREVIOUS daemon's metadata before this
+        # process overwrites it. Leftover metadata with a stale pid means
+        # the previous daemon exited without graceful cleanup
+        # (SIGKILL/OOM/panic) — reported as a crash event at run() start.
+        self._previous_unclean_exit: dict | None = None
+        try:
+            from .workspace_locator import read_orchestrator_metadata
+
+            prev = read_orchestrator_metadata(workspace_root)
+            if prev and prev.get("pid") not in (None, os.getpid()):
+                self._previous_unclean_exit = prev
+        except Exception:
+            self._previous_unclean_exit = None
+
         # Write orchestrator metadata for CLI discovery
         self._metadata_started_at = time.time()
         from .workspace_locator import write_orchestrator_metadata
@@ -758,6 +772,22 @@ class Orchestrator:
             )
         except Exception:
             pass
+
+        # Crash telemetry: the previous daemon for this workspace died
+        # without reaching shutdown_cleanup (see __init__ detection).
+        if self._previous_unclean_exit:
+            try:
+                from orchestratord.telemetry import record_crash
+
+                prev = self._previous_unclean_exit
+                record_crash(
+                    session_id=orch_session_id,
+                    kind="daemon_unclean_shutdown",
+                    previous_pid=prev.get("pid"),
+                    previous_started_at=prev.get("started_at"),
+                )
+            except Exception:
+                pass
 
         # Clean up terminal workspaces on startup
         await self.workspace.run_terminal_workspace_cleanup()

@@ -296,6 +296,23 @@ def write_orchestrator_metadata(
     return metadata_file
 
 
+def read_orchestrator_metadata(workspace_root: str | Path) -> dict | None:
+    """Read the current orchestrator metadata for a workspace, if any.
+
+    Returns the parsed metadata dict or ``None`` when absent/unreadable.
+    Used by daemon startup for crash detection: leftover metadata with a
+    stale pid means the previous daemon never reached graceful cleanup.
+    """
+    slug = _slug_from_workspace(str(workspace_root))
+    metadata_file = ORCHESTRATORD_ORCHESTRATOR_DIR / slug / "metadata.json"
+    if not metadata_file.exists():
+        return None
+    try:
+        return json.loads(metadata_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def clear_orchestrator_metadata(workspace_root: str | Path) -> None:
     """Remove orchestrator metadata file."""
     slug = _slug_from_workspace(str(workspace_root))

@@ -1448,7 +1448,12 @@ class BackendRunner:
                     from orchestratord.telemetry import record_turn
 
                     record_turn(
-                        session_id=getattr(session, "session_id", None) or "",
+                        session_id=(
+                            getattr(session, "session_id", None)
+                            or getattr(session, "backend_session_id", None)
+                            or getattr(session, "run_id", None)
+                            or ""
+                        ),
                         run_id=getattr(session, "run_id", None) or "",
                         issue_id=(
                             session.issue.id
@@ -1607,7 +1612,12 @@ class BackendRunner:
                     from orchestratord.telemetry import record_usage
 
                     record_usage(
-                        session_id=getattr(session, "session_id", None) or "",
+                        session_id=(
+                            getattr(session, "session_id", None)
+                            or getattr(session, "backend_session_id", None)
+                            or getattr(session, "run_id", None)
+                            or ""
+                        ),
                         run_id=getattr(session, "run_id", None) or "",
                         issue_id=(
                             session.issue.id
@@ -1647,7 +1657,12 @@ class BackendRunner:
                         from orchestratord.telemetry import record_error
 
                         record_error(
-                            session_id=getattr(session, "session_id", None) or "",
+                            session_id=(
+                            getattr(session, "session_id", None)
+                            or getattr(session, "backend_session_id", None)
+                            or getattr(session, "run_id", None)
+                            or ""
+                        ),
                             run_id=getattr(session, "run_id", None) or "",
                             issue_id=(
                                 session.issue.id
@@ -1774,7 +1789,12 @@ class BackendRunner:
             from orchestratord.telemetry import record_session_end
 
             record_session_end(
-                session_id=getattr(session, "session_id", None) or "",
+                session_id=(
+                    getattr(session, "session_id", None)
+                    or getattr(session, "backend_session_id", None)
+                    or getattr(session, "run_id", None)
+                    or ""
+                ),
                 run_id=getattr(session, "run_id", None) or "",
                 issue_id=(
                     session.issue.id

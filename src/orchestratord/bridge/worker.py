@@ -45,6 +45,16 @@ class WorkerProcessError(RuntimeError):
     """The worker process died or never started."""
 
 
+def _record_worker_crash(detail: str) -> None:
+    """Best-effort crash telemetry for backend worker process death."""
+    try:
+        from ..telemetry import record_crash
+
+        record_crash(kind="backend_worker", detail=detail[:200])
+    except Exception:
+        pass
+
+
 class WorkerManager:
     """Owns one agent worker subprocess speaking newline-delimited JSON-RPC.
 
@@ -89,6 +99,7 @@ class WorkerManager:
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError as exc:
+            _record_worker_crash(f"failed to spawn worker {self._worker_cmd!r}: {exc}")
             raise WorkerProcessError(
                 f"failed to spawn worker {self._worker_cmd!r}: {exc}"
             ) from exc
@@ -205,6 +216,13 @@ class WorkerManager:
         except Exception:  # noqa: BLE001
             logger.exception("worker reader loop crashed")
         finally:
+            # A worker exiting while the manager is still running is a
+            # crash; the same finally also fires after a graceful stop()
+            # (reader cancelled) — guarded by _stopped.
+            if not self._stopped:
+                _record_worker_crash(
+                    f"worker exited (returncode={proc.returncode})"
+                )
             self._fail_pending(
                 WorkerProcessError(
                     f"worker exited (returncode={proc.returncode})"
