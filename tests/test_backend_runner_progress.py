@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from orchestratord.approval_policy import ToolCallEvent, get_approval_policy
+from orchestratord.kernel.approval import ToolCallEvent, get_approval_policy
 from orchestratord.backend_runner import BackendRunner
 from orchestratord.events.agent_events import SessionComplete, TurnComplete
 from orchestratord.spi.approval import ApprovalDecision

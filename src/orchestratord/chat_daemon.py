@@ -27,7 +27,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from orchestratord.chat_dispatcher import ChatDispatcher, RunnerInvoke
 from orchestratord.db.engine import build_session_factory
@@ -137,7 +138,19 @@ def start_chat_daemon(
     dispatcher._loop_task = asyncio.create_task(
         dispatcher.run_forever(), name="chat-dispatcher"
     )
+    global _live_dispatcher
+    _live_dispatcher = dispatcher
     return dispatcher
+
+
+# Process-global handle so the peer federation's auto-scheduler (§6.1d)
+# can wake the claim loop when a remote message lands.
+_live_dispatcher: ChatDispatcher | None = None
+
+
+def live_chat_dispatcher() -> ChatDispatcher | None:
+    """The running chat dispatcher for this process, if any."""
+    return _live_dispatcher
 
 
 async def stop_chat_daemon(dispatcher: ChatDispatcher) -> None:
@@ -151,7 +164,7 @@ async def stop_chat_daemon(dispatcher: ChatDispatcher) -> None:
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             task.cancel()
         except Exception:
             logger.debug("chat dispatcher loop ended with error", exc_info=True)

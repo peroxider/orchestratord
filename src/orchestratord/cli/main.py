@@ -55,6 +55,7 @@ def app() -> None:
     from orchestratord.cli.dashboard import add_dashboard_parser
     from orchestratord.cli.db import add_db_parser
     from orchestratord.cli.issue import add_issue_parser
+    from orchestratord.cli.peer import add_peer_parser
     from orchestratord.cli.rules import add_rules_parser
     from orchestratord.cli.run import add_run_parser
     from orchestratord.cli.serve import add_serve_parser
@@ -77,6 +78,7 @@ def app() -> None:
     add_db_parser(subparsers)
     add_rules_parser(subparsers)
     add_workspace_parser(subparsers)
+    add_peer_parser(subparsers)
     add_skills_parser(subparsers)
 
     args = parser.parse_args()
@@ -107,6 +109,8 @@ def app() -> None:
         from orchestratord.cli.rules import run
     elif subcommand == "workspace":
         from orchestratord.cli.workspace import run
+    elif subcommand == "peer":
+        from orchestratord.cli.peer import run
     elif subcommand == "skills":
         from orchestratord.cli.skills import run
     else:

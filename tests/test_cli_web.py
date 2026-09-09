@@ -163,12 +163,23 @@ class TestServeWithWeb:
 
         monkeypatch.setattr("orchestratord.cli.web.launch_web_process", fake_launch)
 
-        def fake_uvicorn_run(app, **kwargs):
-            # The web child must already be up when the API starts.
-            assert spawned, "launch_web_process must run before uvicorn"
+        # serve.run() builds a uvicorn.Config and drives a Server subclass
+        # (the D24 GOODBYE-drain override); the fake needs both.
+        class FakeServer:
+            def __init__(self, config) -> None:
+                self.config = config
+
+            def run(self) -> None:
+                # The web child must already be up when the API starts.
+                assert spawned, "launch_web_process must run before uvicorn"
 
         monkeypatch.setitem(
-            sys.modules, "uvicorn", types.SimpleNamespace(run=fake_uvicorn_run)
+            sys.modules,
+            "uvicorn",
+            types.SimpleNamespace(
+                Config=lambda app, **kw: types.SimpleNamespace(app=app, **kw),
+                Server=FakeServer,
+            ),
         )
 
         args = _serve_args(["--no-seed", "--with-web", "--web-port", "3210", "--web-dev"])
@@ -182,9 +193,20 @@ class TestServeWithWeb:
             raise AssertionError("launch_web_process must not be called")
 
         monkeypatch.setattr("orchestratord.cli.web.launch_web_process", boom)
+
+        class FakeServer:
+            def __init__(self, config) -> None:
+                self.config = config
+
+            def run(self) -> None:
+                pass
+
         monkeypatch.setitem(
             sys.modules,
             "uvicorn",
-            types.SimpleNamespace(run=lambda app, **kw: None),
+            types.SimpleNamespace(
+                Config=lambda app, **kw: None,
+                Server=FakeServer,
+            ),
         )
         assert serve_run(_serve_args(["--no-seed"])) == 0

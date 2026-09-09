@@ -3,7 +3,7 @@
 对同一 AgentTask/Issue 输入，渲染结果必须与拆分前捕获的金样
 （tests/goldens/prompt_snapshot.json，由 scripts/capture_prompt_goldens.py
 在重构前生成）byte-identical。业务模板迁移（prompt_builder →
-business_prompts/kernel.prompt_core）不得改变任何渲染输出。
+applications.issue_pr.prompts / kernel.prompt_core）不得改变任何渲染输出。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import orchestratord.business_prompts  # noqa: F401  (registers business profiles/hooks)
+import orchestratord.applications.issue_pr.prompts  # noqa: F401  (registers business profiles/hooks)
 from scripts.capture_prompt_goldens import GOLDEN_PATH, build_cases
 
 
@@ -40,9 +40,9 @@ def test_business_profiles_registered_into_kernel_router() -> None:
     from orchestratord.kernel.prompt_core import get_prompt_router
 
     router = get_prompt_router()
-    # issue profile registered by business_prompts import.
+    # issue profile registered by applications.issue_pr.prompts import.
     assert router.profile_template("issue") is not None
     # premise warning hook mounted exactly once (idempotent registration).
-    from orchestratord.business_prompts import _premise_warning_hook
+    from orchestratord.applications.issue_pr.prompts import _premise_warning_hook
 
     assert router.post_render_hooks.count(_premise_warning_hook) == 1

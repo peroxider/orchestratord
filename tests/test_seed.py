@@ -81,7 +81,7 @@ class TestSeedDefaultWorkspace:
             engine = build_engine(TEST_DSN)
             async with engine.connect():
                 pass
-        except Exception as exc:  # pragma: no cover - environment guard
+        except Exception as exc:  # noqa: BLE001 — env guard: skip, not crash
             pytest.skip(f"Postgres unavailable for seed tests: {exc}")
         await self._cleanup(engine)
         yield build_session_factory(engine)
@@ -147,10 +147,22 @@ class TestSeedDefaultWorkspace:
 class TestServeWiring:
     @staticmethod
     def _patch_uvicorn(monkeypatch) -> None:
+        # serve.run() builds a uvicorn.Config and drives a Server subclass
+        # (the D24 GOODBYE-drain override), so the fake needs both.
+        class FakeServer:
+            def __init__(self, config) -> None:
+                self.config = config
+
+            def run(self) -> None:
+                pass
+
         monkeypatch.setitem(
             sys.modules,
             "uvicorn",
-            types.SimpleNamespace(run=lambda app, **kw: None),
+            types.SimpleNamespace(
+                Config=lambda app, **kw: types.SimpleNamespace(app=app, **kw),
+                Server=FakeServer,
+            ),
         )
 
     def test_seeds_by_default(self, isolated_env, monkeypatch) -> None:

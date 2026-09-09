@@ -8,6 +8,7 @@ string plus the host/port/reload options without actually binding a socket.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import types
 
@@ -24,6 +25,8 @@ def _make_args(argv: list[str]) -> argparse.Namespace:
 class TestParser:
     def test_defaults(self) -> None:
         args = _make_args([])
+        # Loopback by default: exposing the operator console further
+        # requires a deliberate --host override (serve.py help text).
         assert args.host == "127.0.0.1"
         assert args.port == 9000
         assert args.reload is False
@@ -39,11 +42,27 @@ class TestRun:
     def test_run_launches_uvicorn(self, monkeypatch) -> None:
         calls: dict[str, object] = {}
 
-        def fake_run(app: str, **kwargs: object) -> None:
-            calls["app"] = app
-            calls.update(kwargs)
+        class FakeConfig:
+            def __init__(self, app: str, **kwargs: object) -> None:
+                calls["app"] = app
+                calls.update(kwargs)
 
-        monkeypatch.setitem(sys.modules, "uvicorn", types.SimpleNamespace(run=fake_run))
+        class FakeServer:
+            def __init__(self, config: FakeConfig) -> None:
+                calls["server_config"] = config
+
+            def run(self) -> None:
+                calls["ran"] = True
+
+        # run() builds a uvicorn.Config and drives a Server subclass
+        # (the D24 GOODBYE-drain override), so the fake must expose both.
+        monkeypatch.setitem(
+            sys.modules,
+            "uvicorn",
+            types.SimpleNamespace(Config=FakeConfig, Server=FakeServer),
+        )
+        # run() mutates os.environ via setdefault; isolate the real env.
+        monkeypatch.setattr("os.environ", os.environ.copy())
 
         args = _make_args(["--host", "127.0.0.1", "--port", "9123", "--no-seed"])
         assert run(args) == 0
@@ -51,3 +70,4 @@ class TestRun:
         assert calls["host"] == "127.0.0.1"
         assert calls["port"] == 9123
         assert calls["reload"] is False
+        assert calls["ran"] is True

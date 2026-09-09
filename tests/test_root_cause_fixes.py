@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from orchestratord.approval_policy import (
+from orchestratord.kernel.approval import (
     AskApprovalPolicy,
     NeverApprovalPolicy,
     get_approval_policy,

@@ -15,9 +15,9 @@ plugin. Action registration is the job of an installed plugin.
 | `example.workflow.yaml` | Declarative DAG composing generic stages with namespaced business actions |
 | `issue-card.template.md` | Local-tracker issue card (used when `tracker.kind = local`) |
 
-The companion `applications/issue_pr.py` (the importable
-`IssueToPrApplication` class) is the historical Python shim — it remains
-for compatibility; new code should use the declarative form here.
+The companion `applications/issue_pr/` package (the importable
+`IssueToPrApplication` class in `app.py`) is the historical Python shim — it
+remains for compatibility; new code should use the declarative form here.
 
 ## What this example does
 
@@ -107,7 +107,7 @@ orchestratord daemon start \
 - It does **not** register any actions. The core stays decoupled.
 - It does **not** define a `tracker:` / `workspace:` / `agent:` block.
   Those are daemon-level concerns living in legacy `workflow.md`.
-- It does **not** shadow or replace `applications/issue_pr.py`.
+- It does **not** shadow or replace `applications/issue_pr/`.
   That module's `IssueToPrApplication` class is preserved for import
   compatibility; new compositions use this declarative form.
 

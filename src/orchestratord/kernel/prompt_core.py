@@ -2,7 +2,7 @@
 
 机制层只内置 generic 模板（title/description/priority + CLI 使用指南 +
 渲染兜底）与 PromptRouter 扩展点；业务模板（issue/澄清/检视跟进/rebase/
-premise 注入）由业务模块（P4 前为 ``business_prompts.py``）通过
+premise 注入）由业务模块（``applications/issue_pr/prompts.py``）通过
 :meth:`PromptRouter.register_profile` / :meth:`PromptRouter.register_hook`
 注册进来，机制层不 import 任何业务模块。
 

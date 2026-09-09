@@ -229,8 +229,8 @@ def build_cases() -> dict[str, Callable[[], str]]:
 
     cases["render_parts_no_marker"] = _parts
 
-    # -- business renderers (moved to business_prompts in P2) ----------------
-    import orchestratord.business_prompts as bp
+    # -- business renderers (applications.issue_pr.prompts since P4) ---------
+    import orchestratord.applications.issue_pr.prompts as bp
 
     cases["review_feedback"] = lambda: bp.render_review_feedback(
         issue=issue,

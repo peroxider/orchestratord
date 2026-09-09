@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import fields
 
 import pytest
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 
 import orchestratord.db  # noqa: F401  (registers all tables on Base.metadata)
@@ -67,6 +68,8 @@ EXPECTED_TABLES = {
     "audit_log",
     "auth_tokens",
     "channels",
+    # Peer Federation registry (migration 0046, ADR-001 D16/D21).
+    "peers",
 }
 
 # Strict 1:1 parity between a table and its domain entity: every dataclass
@@ -115,6 +118,19 @@ def test_no_foreign_keys() -> None:
                 f"{table.name}.{column.name} declares a ForeignKey "
                 "(§6.1 forbids FK / cascading deletes)"
             )
+
+
+def test_peers_unique_registry_key() -> None:
+    """The registry key is DB-enforced (uq_peers_workspace_orch): without
+    it, two concurrent invite POSTs both read-absent and insert, and
+    every later get_peer for that key raises MultipleResultsFound."""
+    peers = Base.metadata.tables["peers"]
+    uqs = {
+        c.name: tuple(c.columns.keys())
+        for c in peers.constraints
+        if isinstance(c, UniqueConstraint)
+    }
+    assert uqs == {"uq_peers_workspace_orch": ("workspace_id", "orch_id")}
 
 
 @pytest.mark.parametrize(("table_name", "entity"), sorted(PARITY.items()))

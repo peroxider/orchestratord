@@ -131,7 +131,7 @@ async def _publish_session_event(
     topic = f"session.{session_id}"
     try:
         await get_broker().publish(topic, {"event": event_type, **payload})
-    except Exception:  # noqa: BLE001 — broker is a notification channel
+    except Exception:
         logger.debug("broker publish failed for %s %s", topic, event_type,
                      exc_info=True)
 
@@ -152,6 +152,33 @@ async def _lookup_live(
     return await registry.get(str(session_id))
 
 
+async def _forward_to_peer(session_id: UUID, method: str, body: dict) -> None:
+    """§6.2 Phase-B bridge hook: forward a decision to a reachable peer.
+
+    Silent no-op unless an outbound peer/1 connection is open AND that
+    peer advertised the matching capability in its WELCOME — Phase 1
+    daemons never do, so this stays inert until Phase B turns it into
+    the cross-process approval/interrupt relay. Failures never bubble
+    up: the DB decision record above is the source of truth.
+    """
+    from orchestratord.peer.connections import live_clients
+
+    for client in live_clients():
+        if method not in client.remote_capabilities:
+            continue
+        try:
+            await client.invoke(
+                method,
+                {**body, "session_id": str(session_id)},
+                request_id=f"fwd-{session_id}-{method}",
+            )
+        except Exception:
+            logger.warning(
+                "peer forward of %s for session %s failed",
+                method, session_id, exc_info=True,
+            )
+
+
 async def _forward_approval(
     session_id: UUID,
     backend_runner: Any,
@@ -164,10 +191,16 @@ async def _forward_approval(
     does not advertise the ``approval_hooks`` capability — in that case
     the decision is recorded in the DB but cannot be delivered, so the
     caller must be told. A missing live session is silently ignored (the
-    daemon may be in a sibling process; Phase B will bridge it).
+    daemon may be in a sibling process; Phase B will bridge it — the
+    peer-forward hook below fires when a peer is actually reachable).
     """
     live = await _lookup_live(session_id, backend_runner)
     if live is None:
+        await _forward_to_peer(
+            session_id,
+            "peer.approval.forward",
+            {"request_id": request_id, "decision": decision.value},
+        )
         return
     if not live.capabilities.approval_hooks:
         raise HTTPException(
@@ -192,6 +225,7 @@ async def _forward_interrupt(
     """
     live = await _lookup_live(session_id, backend_runner)
     if live is None:
+        await _forward_to_peer(session_id, "peer.interrupt.forward", {})
         return
     if not live.capabilities.interrupt and live.process_tree is None:
         raise HTTPException(

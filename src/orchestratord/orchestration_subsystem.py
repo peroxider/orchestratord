@@ -13,12 +13,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
+    from .applications.issue_pr.lifecycle import IssueToPrLifecycle
+    from .applications.issue_pr.provider import IssuePrWorkProvider
     from .backend_runner import BackendRunner
+    from .kernel.events import KernelHooks
     from .orchestrator import Orchestrator
     from .spi.backend import AgentBackend
 
 # 组合根装配：业务 prompt 模板注册进 kernel PromptRouter（DESIGN §4.5/P2）。
-import orchestratord.business_prompts  # noqa: F401
+import orchestratord.applications.issue_pr.prompts  # noqa: F401
 
 from .config.schema import WorkflowConfig
 from .status_dashboard import StatusDashboard
@@ -47,6 +50,12 @@ class OrchestrationSubsystem:
     _workflow_yaml_path: str | None = None
     _bundle_dir: Path | None = None
     _backend: "AgentBackend | None" = None
+    kernel_hooks: KernelHooks | None = None
+    # P4 C2c（DESIGN §4.2/G2）：业务注入点——Application / WorkProvider
+    # 协议对象。``None``（默认）时 run() 惰性装配 issue→PR 默认业务；
+    # 注入实例以无宿主形态构造，由 Orchestrator.__init__ 回绑 ``_host``。
+    application: IssueToPrLifecycle | None = None
+    work_provider: IssuePrWorkProvider | None = None
 
     def __init__(
         self,
@@ -55,6 +64,9 @@ class OrchestrationSubsystem:
         workflow_yaml_path: str | None = None,
         backend: "AgentBackend | None" = None,
         clarifier_provider_factory: "Callable[[], Any] | None" = None,
+        kernel_hooks: KernelHooks | None = None,
+        application: IssueToPrLifecycle | None = None,
+        work_provider: IssuePrWorkProvider | None = None,
     ) -> None:
         from .backend_runner import BackendRunner
 
@@ -131,11 +143,36 @@ class OrchestrationSubsystem:
         self.status_dashboard = StatusDashboard()
         self._orchestrator = None
         self._clarifier_provider_factory = clarifier_provider_factory
+        # KernelHooks（DESIGN §4.7）：宿主注入的装配钩子，run() 透传 Kernel。
+        self.kernel_hooks = kernel_hooks
+        # P4 C2c（DESIGN §4.2/G2）：业务注入点，``None`` → run() 惰性装配
+        # issue→PR 默认业务（PEP 562 时序，见 run() 内说明）。
+        self.application = application
+        self.work_provider = work_provider
 
 
     async def run(self) -> None:
         """Start polling and issue execution. Runs until cancelled."""
         from .orchestrator import Orchestrator
+
+        # C2c 装配（DESIGN §4.2/G2）：Application / WorkProvider 由组合根
+        # 在此惰性供给——注入优先（G2「组合根可替换」），默认业务
+        # （issue→PR）此刻才 import。本模块顶层不得触达 applications 的
+        # app/lifecycle（import 时序契约，见
+        # applications/issue_pr/__init__.py）；实例以无宿主形态构造，
+        # 由 Orchestrator.__init__ 回绑 ``_host``（两段式装配）。
+        if self.application is not None:
+            application = self.application
+        else:
+            from .applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+            application = IssueToPrLifecycle()
+        if self.work_provider is not None:
+            work_provider = self.work_provider
+        else:
+            from .applications.issue_pr.provider import IssuePrWorkProvider
+
+            work_provider = IssuePrWorkProvider()
 
         self._orchestrator = Orchestrator(
             workflow=self.workflow,
@@ -147,6 +184,9 @@ class OrchestrationSubsystem:
             stage_runners=self.stage_runners,
             workflow_yaml_path=self._workflow_yaml_path,
             clarifier_provider_factory=self._clarifier_provider_factory,
+            kernel_hooks=self.kernel_hooks,
+            application=application,
+            work_provider=work_provider,
         )
         await self._orchestrator.run()
 

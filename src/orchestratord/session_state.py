@@ -28,8 +28,10 @@ class RunSubject:
 
     ``AgentSession.issue`` historically carried the tracker domain object all
     the way into the capability runner.  New generic callers use this small
-    value object instead.  The deprecated ``issue`` attribute name remains on
-    :class:`RunSession` so the issue-to-PR pipeline can migrate independently.
+    value object instead.  Since P6 the :class:`RunSession` field itself is
+    named ``subject``; the deprecated ``issue`` name remains on
+    :class:`RunSession` as a compat property so the issue-to-PR pipeline can
+    migrate independently.
     """
 
     id: str
@@ -49,14 +51,13 @@ class RunSubject:
 class RunSession:
     """One active backend-neutral run.
 
-    ``issue`` is a compatibility slot.  Generic execution stores a
-    :class:`RunSubject`; the issue-to-PR application may still store its
-    tracker ``Issue`` until that business pipeline is migrated.
+    The work slot is named ``subject``: a :class:`RunSubject` on the
+    kernel/generic path, the tracker ``Issue`` on the issue-to-PR path.
+    ``issue`` remains available as a deprecated compat property (P6,
+    DESIGN §4.3/:523) so the ~170 read sites can migrate independently.
     """
 
-    issue: Any  # DEPRECATED compatibility alias; use task/subject data instead.
-    # P4 装配重写时 property 化并迁 business["issue"]——构造签名 issue= 是
-    # 必填首字段，property 化需与构造点重写同步进行（DESIGN §4.3 迁移表）。
+    subject: Any  # Renamed from deprecated `issue` in P6 — see class docstring.
     workspace: Workspace
     task: "AgentTask | None" = None  # NEW: generic task abstraction
     # Orchestrator logical conversation metadata.  None remains valid for
@@ -234,6 +235,21 @@ class RunSession:
     @followup_attempt.setter
     def followup_attempt(self, value: int) -> None:
         self.business["followup_attempt"] = value
+
+    # ------------------------------------------------------------------
+    # Deprecated work-slot alias (P6, DESIGN §4.3/:523): the dataclass
+    # field is ``subject``; the historical ``issue`` name remains as a
+    # read/write property so its read sites migrate independently.
+    # ------------------------------------------------------------------
+
+    @property
+    def issue(self) -> Any:
+        """Deprecated alias of :attr:`subject` (P6 field rename)."""
+        return self.subject
+
+    @issue.setter
+    def issue(self, value: Any) -> None:
+        self.subject = value
 
     def business_state(self) -> dict[str, Any]:
         """业务载荷完整快照（含未设置键的机制默认值）。

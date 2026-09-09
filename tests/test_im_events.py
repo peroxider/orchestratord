@@ -452,9 +452,13 @@ def test_run_orchestrator_starts_im_heartbeat_inside_runtime_loop(monkeypatch, t
         "orchestratord.workflow_store.get_workflow_store",
         lambda: _FakeWorkflowStore(),
     )
+    # P5（DESIGN §6 :431）：_run_orchestrator 经 applications 注册表解析
+    # 组合根类——桩子类须打在注册表 seam 上（旧的
+    # orchestration_subsystem.OrchestrationSubsystem 基类 patch 依赖
+    # app.py 尚未 import 的类体冻结时序，注册表寻址后不再成立）。
     monkeypatch.setattr(
-        "orchestratord.orchestration_subsystem.OrchestrationSubsystem",
-        _FakeSubsystem,
+        "orchestratord.applications.get_application_class",
+        lambda _name: _FakeSubsystem,
     )
     monkeypatch.setattr(
         server_mod,
@@ -695,6 +699,10 @@ async def test_orchestrator_control_poll_connects_and_disconnects_gateway(
     orchestrator._im_emitters = {}
     orchestrator.im_event_deliver = None
     orchestrator.im_event_channel = ""
+    # 局部构造绕过 __init__，补绑 C2b 应用侧协作对象。
+    from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+    orchestrator._issue_app = IssueToPrLifecycle(orchestrator)
 
     control_dir = tmp_path / ".orchestrator_control"
     control_dir.mkdir()
@@ -1827,6 +1835,10 @@ async def test_review_reject_retries_pending_review_issue_with_feedback(tmp_path
     orchestrator.tracker = _Tracker()
     orchestrator._im_emitters = {}
     orchestrator.im_event_deliver = None
+    # 局部构造绕过 __init__，补绑 C2b 应用侧协作对象。
+    from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+    orchestrator._issue_app = IssueToPrLifecycle(orchestrator)
 
     await orchestrator._process_control_commands()
 
@@ -1912,6 +1924,10 @@ async def test_review_approve_syncs_daemon_state_and_remote_tracker(tmp_path) ->
     orchestrator.tracker = _Tracker()
     orchestrator._im_emitters = {}
     orchestrator.im_event_deliver = lambda event, _text: delivered.append(event)
+    # 局部构造绕过 __init__，补绑 C2b 应用侧协作对象。
+    from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+    orchestrator._issue_app = IssueToPrLifecycle(orchestrator)
 
     await orchestrator._process_control_commands()
 

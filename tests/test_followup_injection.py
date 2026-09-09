@@ -56,7 +56,7 @@ class TestFollowupInjection(IsolatedAsyncioTestCase):
 
         issue = Issue(id="test-1", identifier="test-1", title="test")
         ws = Workspace(path=Path("/tmp"), issue_identifier="test-1")
-        session = AgentSession(issue=issue, workspace=ws)
+        session = AgentSession(subject=issue, workspace=ws)
         self.assertEqual(session._pending_followups, [])
 
         session._pending_followups.append("test message")
@@ -78,7 +78,7 @@ class TestFollowupInjection(IsolatedAsyncioTestCase):
     async def test_followup_pending_queue_cleared(self):
         """_pending_followups can be cleared after use."""
         session = AgentSession(
-            issue=type("I", (), {"id": "x", "identifier": "x", "title": "x"})(),
+            subject=type("I", (), {"id": "x", "identifier": "x", "title": "x"})(),
             workspace=type("W", (), {"path": Path("/tmp")})(),
         )
         session._pending_followups.append("msg 1")

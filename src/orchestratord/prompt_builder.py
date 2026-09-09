@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 _jinja_env = Environment(undefined=StrictUndefined)
 
 # 业务模板（issue/澄清/检视跟进/rebase/premise 注入）已迁至
-# business_prompts.py 并经 kernel PromptRouter 注册（DESIGN §4.5/P2）。
+# applications/issue_pr/prompts.py 并经 kernel PromptRouter 注册
+# （DESIGN §4.5/P2）。
 # 本模块保留为组装器：store 模板 → 业务 profile → generic 兜底，
 # 对业务模块零 import。
 

@@ -18,6 +18,11 @@ dependencies = [
     "psutil>=5.9",
     "pydantic>=2.0.0",
     "pyyaml>=6.0",
+    # Phase 1 hard dependency for Peer Federation (DESIGN §7 R9):
+    # RedisBackend fan-out, the peer event relay, and the SETNX nonce
+    # guard. Modules import it lazily so non-peer paths keep working
+    # without a running server.
+    "redis>=5.0",
     "rich",
     "sqlalchemy>=2.0.0",
     "typer[all]>=0.12.0",

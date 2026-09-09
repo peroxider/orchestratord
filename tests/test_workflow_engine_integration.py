@@ -315,3 +315,87 @@ class TestOrchestrationSubsystemPlumbing(unittest.TestCase):
 
         subsystem = OrchestrationSubsystem(wf_config, backend=MagicMock())
         self.assertIsNone(subsystem._workflow_yaml_path)
+
+    def test_subsystem_assembly_defaults(self) -> None:
+        """C2c（DESIGN §4.2/G2）：默认（None 注入）时 run() 惰性装配
+        issue→PR 业务，实例由 Orchestrator.__init__ 回绑 ``_host``。"""
+        import asyncio
+        import tempfile
+
+        from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+        from orchestratord.applications.issue_pr.provider import IssuePrWorkProvider
+        from orchestratord.config.schema import WorkflowConfig
+        from orchestratord.orchestration_subsystem import OrchestrationSubsystem
+        from orchestratord.orchestrator import Orchestrator
+
+        issues_dir = tempfile.mkdtemp()
+        wf_config = WorkflowConfig.from_dict(
+            {
+                "workspace": {"root": tempfile.mkdtemp()},
+                "agent": {},
+                "tracker": {"kind": "local", "issues_path": issues_dir},
+            }
+        )
+        subsystem = OrchestrationSubsystem(wf_config, backend=MagicMock())
+        self.assertIsNone(subsystem.application)
+        self.assertIsNone(subsystem.work_provider)
+
+        async def noop_run(self: Orchestrator) -> None:
+            return None
+
+        with patch.object(
+            Orchestrator, "run", noop_run
+        ), patch.object(Orchestrator, "_metadata_extras", lambda self: {}):
+            asyncio.run(subsystem.run())
+
+        orch = subsystem._orchestrator
+        self.assertIsInstance(orch._issue_app, IssueToPrLifecycle)
+        self.assertIs(orch._issue_app._host, orch)
+        self.assertIsInstance(orch._work_provider, IssuePrWorkProvider)
+        self.assertIs(orch._work_provider._host, orch)
+
+    def test_subsystem_assembly_injection(self) -> None:
+        """C2c（DESIGN §4.2/G2）：注入的 Application / WorkProvider 以
+        无宿主形态构造、原样透传，宿主由 Orchestrator.__init__ 回绑。"""
+        import asyncio
+        import tempfile
+
+        from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+        from orchestratord.applications.issue_pr.provider import IssuePrWorkProvider
+        from orchestratord.config.schema import WorkflowConfig
+        from orchestratord.orchestration_subsystem import OrchestrationSubsystem
+        from orchestratord.orchestrator import Orchestrator
+
+        issues_dir = tempfile.mkdtemp()
+        wf_config = WorkflowConfig.from_dict(
+            {
+                "workspace": {"root": tempfile.mkdtemp()},
+                "agent": {},
+                "tracker": {"kind": "local", "issues_path": issues_dir},
+            }
+        )
+        application = IssueToPrLifecycle()
+        work_provider = IssuePrWorkProvider()
+        self.assertIsNone(application._host)
+        self.assertIsNone(work_provider._host)
+
+        subsystem = OrchestrationSubsystem(
+            wf_config,
+            backend=MagicMock(),
+            application=application,
+            work_provider=work_provider,
+        )
+
+        async def noop_run(self: Orchestrator) -> None:
+            return None
+
+        with patch.object(
+            Orchestrator, "run", noop_run
+        ), patch.object(Orchestrator, "_metadata_extras", lambda self: {}):
+            asyncio.run(subsystem.run())
+
+        orch = subsystem._orchestrator
+        self.assertIs(orch._issue_app, application)
+        self.assertIs(orch._work_provider, work_provider)
+        self.assertIs(application._host, orch)
+        self.assertIs(work_provider._host, orch)

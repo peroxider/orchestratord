@@ -23,6 +23,10 @@ class AuditLogEntry(Base):
     target_type: Mapped[str]
     target_id: Mapped[str]
     payload_jsonb: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # D17: cross-daemon session-creation provenance (PR5) — set only on
+    # peer-initiated mutations, so the creator is traceable (§7 R7).
+    invited_by_orch_id: Mapped[str | None]
+    invited_by_peer_call_id: Mapped[str | None]
     created_at: Mapped[datetime]
 
 

@@ -21,7 +21,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-_KINDS = frozenset({"approval_request", "clarification", "failed"})
+_KINDS = frozenset(
+    {"approval_request", "clarification", "failed", "peer_invite_request"}
+)
 _ASSIGNEE_TYPES = frozenset({"member", "agent"})
 _STATUSES = frozenset({"open", "assigned", "resolved", "dismissed"})
 _TERMINAL_STATUSES = frozenset({"resolved", "dismissed"})

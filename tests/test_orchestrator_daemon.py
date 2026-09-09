@@ -129,6 +129,10 @@ class TestReadOnlyChatFollowup(unittest.IsolatedAsyncioTestCase):
                 retry_queue=[],
             )
             orch._sync_tracker_issue_state = AsyncMock()
+            # 局部构造绕过 __init__，补绑 C2b 应用侧协作对象。
+            from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+            orch._issue_app = IssueToPrLifecycle(orch)
 
             await orch._process_control_commands()
 

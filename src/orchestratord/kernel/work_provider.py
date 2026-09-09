@@ -16,14 +16,16 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class WorkItem:
-    """机制层视角的工作项：一个 AgentTask + 业务私有上下文。
+    """机制层视角的工作项：一个待执行任务 + 业务私有上下文。
 
     ``dedup_key`` 是幂等键（issue→PR 用 issue_id）——Kernel 据此去重
     inflight；``business`` 为业务自由载荷，Kernel 不读取不解释。
+    ``task`` 允许为 None：poll() 时业务原始工作对象（如 Issue）尚未
+    物化成 AgentTask（物化在 launch/prepare_run 路径内完成）。
     """
 
-    task: AgentTask
-    dedup_key: str
+    task: AgentTask | None = None
+    dedup_key: str = ""
     priority: int = 0
     business: dict[str, Any] = field(default_factory=dict)
 

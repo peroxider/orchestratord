@@ -20,14 +20,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import UTC, datetime
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from orchestratord.chat_bridge import ChatMessageBridge
-from orchestratord.db.models import Message, Session as SessionRow
+from orchestratord.db.models import Message
+from orchestratord.db.models import Session as SessionRow
 from orchestratord.db.repository import Repositories
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,9 @@ class ChatDispatcher:
         self._runner_invoke = runner_invoke
         self._interval = interval
         self._running = False
+        # Set by wake() so an externally-created pending session (e.g. a
+        # peer auto-scheduled turn, §6.1d) skips the poll interval.
+        self._wake = asyncio.Event()
 
     # ------------------------------------------------------------------
     # Claiming
@@ -113,9 +116,7 @@ class ChatDispatcher:
             await self._runner_invoke(session, prompt, bridge)
         except Exception:
             terminal = "failed"
-            logger.error(
-                "chat dispatch failed for session %s", session.id, exc_info=True
-            )
+            logger.exception("chat dispatch failed for session %s", session.id)
         finally:
             await bridge.flush()
         await self._set_terminal(session.id, terminal)
@@ -154,7 +155,13 @@ class ChatDispatcher:
                 logger.exception("chat dispatcher claim failed")
                 claimed = None
             if claimed is None:
-                await asyncio.sleep(self._interval)
+                self._wake.clear()
+                try:
+                    await asyncio.wait_for(
+                        self._wake.wait(), timeout=self._interval
+                    )
+                except TimeoutError:
+                    pass
                 continue
             try:
                 await self.dispatch_one(claimed)
@@ -166,3 +173,8 @@ class ChatDispatcher:
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()
+
+    def wake(self) -> None:
+        """Interrupt the idle wait so a fresh pending session is claimed now."""
+        self._wake.set()

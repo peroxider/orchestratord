@@ -38,7 +38,7 @@ async def main() -> None:
         "LIVEVIEW_TRUTH_REPLY."
     )
     session = RunSession(
-        issue=RunSubject(
+        subject=RunSubject(
             id="view-truth", identifier="VIEW-TRUTH", title="Real input recording check"
         ),
         workspace=Workspace(path=workspace, issue_identifier="VIEW-TRUTH"),

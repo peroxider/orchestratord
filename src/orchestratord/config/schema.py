@@ -1147,6 +1147,124 @@ class PrTemplateConfig:
     body: str = ""
 
 
+# ---------------------------------------------------------------------------
+# P5 配置分段（DESIGN §4.6 B5/:334-336、§6 :432、P5 :471）
+# ---------------------------------------------------------------------------
+
+
+_KERNEL_SECTION_KEYS = frozenset(
+    {"polling", "worker", "sandbox", "modes", "observability", "server"}
+)
+_APPLICATION_SECTION_KEYS = frozenset(
+    {
+        "tracker",
+        "workspace",
+        "agent",
+        "hooks",
+        "review_feedback",
+        "rules",
+        "telemetry",
+        "pr_template",
+        "pr_conflict_scan",
+        "clarifier",
+    }
+)
+
+
+def _lift_dual_format_sections(raw: dict[str, Any]) -> dict[str, Any]:
+    """把 ``kernel:`` / ``applications:`` 双格式平移回既有扁平段布局。
+
+    无 ``applications:`` 段 → 旧扁平格式：打 deprecation 日志后原样返回
+    （DESIGN :336）。有则按新格式处理：``kernel:`` 与
+    ``applications.issue_pr:`` 下的机制/业务段平移回顶层键，交由既有
+    扁平解析路径处理（单一解析实现，两种布局零解析差）。同名段同时
+    出现在新旧位置时新格式优先（warn）。未知应用段/未知子段按 loader
+    宽容哲学忽略（同 ModesConfig）。
+    """
+    applications_raw = raw.get("applications")
+    if applications_raw is None:
+        logger.warning(
+            "workflow config: no `applications:` section — loaded via the "
+            "legacy flat layout (deprecated); see DESIGN §4.6 for the "
+            "kernel:/applications: dual format"
+        )
+        return raw
+    if not isinstance(applications_raw, dict):
+        raise TypeError("applications: must be a mapping of application name → settings")
+    kernel_raw = raw.get("kernel") or {}
+    if not isinstance(kernel_raw, dict):
+        raise TypeError("kernel: must be a mapping")
+    issue_pr_raw = applications_raw.get("issue_pr") or {}
+    if not isinstance(issue_pr_raw, dict):
+        raise TypeError("applications.issue_pr: must be a mapping")
+
+    lifted: dict[str, tuple[Any, str]] = {}
+    for section, value in kernel_raw.items():
+        if section in _KERNEL_SECTION_KEYS:
+            lifted[section] = (value, "kernel")
+    for section, value in issue_pr_raw.items():
+        if section in _APPLICATION_SECTION_KEYS:
+            lifted[section] = (value, "applications.issue_pr")
+
+    flat = {
+        key: value for key, value in raw.items() if key not in ("kernel", "applications")
+    }
+    for section, (value, source_key) in lifted.items():
+        if section in flat:
+            logger.warning(
+                "workflow config: section `%s` present both flat and under "
+                "`%s:` — the dual-format location wins",
+                section,
+                source_key,
+            )
+        flat[section] = value
+    return flat
+
+
+@dataclass
+class KernelSettings:
+    """机制域设置视图（B5：kernel 只读本段，业务段由 Application 解析）。
+
+    组合壳：字段是对 :class:`WorkflowConfig` 既有嵌套段的**引用**——
+    不复制、不散射字段，保证零行为差且随宿主同步。``agent`` 为机制
+    读面（并发/超时/provider/stage_overrides 等）；业务读面
+    （repro_first/max_retries_per_issue/clarification_* 等）经
+    :class:`IssuePrSettings`。两视图的 ``agent`` 是同一实例。
+
+    偏差注记：DESIGN :335 的 AgentConfig 字段级上/下移与 :321 的
+    kernel 级 ``max_concurrent`` 标量未在本步实施——会打散 128 处
+    ``workflow.agent.*`` 直读面；随 Kernel dispatch-loop 抽取收敛。
+    """
+
+    polling: PollingConfig
+    worker: WorkerConfig
+    sandbox: SandboxConfig
+    modes: ModesConfig
+    observability: ObservabilityConfig
+    server: ServerConfig
+    agent: AgentConfig
+
+
+@dataclass
+class IssuePrSettings:
+    """issue→PR 业务设置视图（Application 自己解析业务段，B5）。
+
+    组合壳同 :class:`KernelSettings`：字段为嵌套段引用；
+    ``agent`` 为业务读面（与 KernelSettings.agent 同一实例）。
+    """
+
+    tracker: TrackerConfig
+    workspace: WorkspaceConfig
+    agent: AgentConfig
+    hooks: HooksConfig
+    review_feedback: ReviewFeedbackConfig
+    rules: RulesConfig
+    telemetry: TelemetryConfig
+    pr_template: PrTemplateConfig
+    pr_conflict_scan: PrConflictScanConfig
+    clarifier: ClarifierConfig
+
+
 @dataclass
 class WorkflowConfig:
     tracker: TrackerConfig = field(default_factory=TrackerConfig)
@@ -1171,6 +1289,9 @@ class WorkflowConfig:
     def from_dict(cls, raw: dict[str, Any]) -> WorkflowConfig:
         """Build from a raw dict (already parsed YAML front matter)."""
         raw = _normalize_keys(_drop_nil_values(raw))
+        # P5 双格式（DESIGN §4.6/:336）：kernel:/applications: 平移回扁平
+        # 布局；旧扁平格式打 deprecation 日志后原样通过。
+        raw = _lift_dual_format_sections(raw)
 
         tracker_raw = raw.get("tracker", {})
         polling_raw = raw.get("polling", {})
@@ -1568,6 +1689,40 @@ class WorkflowConfig:
             "excludeSlashTmp": False,
         }
 
+    @property
+    def kernel(self) -> KernelSettings:
+        """机制域设置视图（DESIGN §4.6 B5/:334；P5）。
+
+        每次访问重建壳——嵌套段可能被宿主事后替换（如
+        ``backend_runner.run_task`` 对 ``workflow.agent`` 的拷贝改写），
+        重建保证视图不滞留旧段；壳字段是对既有段的引用，零复制。
+        """
+        return KernelSettings(
+            polling=self.polling,
+            worker=self.worker,
+            sandbox=self.sandbox,
+            modes=self.modes,
+            observability=self.observability,
+            server=self.server,
+            agent=self.agent,
+        )
+
+    @property
+    def issue_pr(self) -> IssuePrSettings:
+        """issue→PR 业务设置视图（DESIGN §4.6 :334；P5 :471）。"""
+        return IssuePrSettings(
+            tracker=self.tracker,
+            workspace=self.workspace,
+            agent=self.agent,
+            hooks=self.hooks,
+            review_feedback=self.review_feedback,
+            rules=self.rules,
+            telemetry=self.telemetry,
+            pr_template=self.pr_template,
+            pr_conflict_scan=self.pr_conflict_scan,
+            clarifier=self.clarifier,
+        )
+
 
 def _resolve_first_env(names: tuple[str, ...]) -> str | None:
     for name in names:
@@ -1575,3 +1730,103 @@ def _resolve_first_env(names: tuple[str, ...]) -> str | None:
         if value:
             return value
     return None
+
+
+# ---------------------------------------------------------------------------
+# Peer Federation (DESIGN_PEER_FEDERATION.md §6.2; PR5)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PeerTimeoutsConfig:
+    """D23 handshake timeouts (connect 10s + HELLO 30s, retried 3×)."""
+
+    connect: float = 10.0
+    hello: float = 30.0
+
+
+@dataclass
+class PeerRateLimitConfig:
+    """D25 per-peer token bucket (100 INVOKE/s, burst 200)."""
+
+    rps: float = 100.0
+    burst: int = 200
+
+
+@dataclass
+class PeerConfig:
+    """Peer Federation daemon settings, env-driven (§6.2).
+
+    ``cli/serve.py`` seeds ``ORCHESTRATORD_PEER_*`` from its flags; the
+    peer router/dispatcher read the rest directly from the environment
+    so tests and two-daemon runs can flip behavior per process.
+    """
+
+    listen: str = "127.0.0.1:9001"
+    redis_url: str = "redis://localhost:6379/0"
+    # R10: only explicitly accepted peers count; the whitelist below
+    # (ORCHESTRATORD_PEER_TRUST) skips the human-accept step for
+    # pre-trusted orch_ids.
+    trust_list: list[str] = field(default_factory=list)
+    # NG4/G10: remote messages are persisted but never auto-scheduled
+    # into agent turns unless the operator opts in.
+    auto_schedule: bool = False
+    # R12: ceiling on concurrently scheduled peer turns.
+    max_concurrent_peer_turns: int = 4
+    timeouts: PeerTimeoutsConfig = field(default_factory=PeerTimeoutsConfig)
+    rate_limit: PeerRateLimitConfig = field(default_factory=PeerRateLimitConfig)
+    # D18: at-least-once dedup window keyed by (msg_id, orch_id).
+    dedup_window_seconds: float = 30.0
+
+    @classmethod
+    def from_env(cls) -> PeerConfig:
+        def _f(names: tuple[str, ...], default: float) -> float:
+            raw = _resolve_first_env(names)
+            try:
+                return float(raw) if raw is not None else default
+            except ValueError:
+                return default
+
+        trust_raw = os.environ.get("ORCHESTRATORD_PEER_TRUST", "")
+        return cls(
+            listen=os.environ.get("ORCHESTRATORD_PEER_LISTEN", cls.listen),
+            redis_url=os.environ.get(
+                "ORCHESTRATORD_REDIS_URL", "redis://localhost:6379/0"
+            ),
+            trust_list=[
+                item.strip() for item in trust_raw.split(",") if item.strip()
+            ],
+            auto_schedule=os.environ.get("ORCHESTRATORD_PEER_AUTO_SCHEDULE") == "1",
+            max_concurrent_peer_turns=int(
+                _f(
+                    ("ORCHESTRATORD_MAX_CONCURRENT_PEER_TURNS",),
+                    cls.max_concurrent_peer_turns,
+                )
+            ),
+            timeouts=PeerTimeoutsConfig(
+                connect=_f(
+                    ("ORCHESTRATORD_PEER_CONNECT_TIMEOUT",),
+                    PeerTimeoutsConfig.connect,
+                ),
+                hello=_f(
+                    ("ORCHESTRATORD_PEER_HELLO_TIMEOUT",),
+                    PeerTimeoutsConfig.hello,
+                ),
+            ),
+            rate_limit=PeerRateLimitConfig(
+                rps=_f(
+                    ("ORCHESTRATORD_PEER_RATE_RPS",), PeerRateLimitConfig.rps
+                ),
+                burst=int(
+                    _f(
+                        ("ORCHESTRATORD_PEER_RATE_BURST",),
+                        PeerRateLimitConfig.burst,
+                    )
+                ),
+            ),
+            dedup_window_seconds=_f(
+                ("ORCHESTRATORD_PEER_DEDUP_WINDOW",),
+                cls.dedup_window_seconds,
+            ),
+        )
+

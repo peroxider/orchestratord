@@ -26,6 +26,10 @@ class AuditLogEntry:
     target_type: str
     target_id: UUID | str
     payload_jsonb: dict[str, Any] | None = None
+    # D17: peer-initiated mutations carry the calling daemon's identity
+    # and the cross-daemon call id (§7 R7 audit stitching).
+    invited_by_orch_id: str | None = None
+    invited_by_peer_call_id: str | None = None
     created_at: datetime | None = None
 
     def __post_init__(self) -> None:

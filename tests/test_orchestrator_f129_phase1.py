@@ -72,7 +72,7 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
         from orchestratord.workspace import Workspace
 
         session = AgentSession(
-            issue=Issue(id="I", identifier="I", title="t"),
+            subject=Issue(id="I", identifier="I", title="t"),
             workspace=Workspace(path="/tmp", issue_identifier="I", issue_id="I"),
         )
         # control_socket is None by default
@@ -97,7 +97,7 @@ class TestBroadcastToSocket(unittest.IsolatedAsyncioTestCase):
             await cs.start()
             try:
                 session = AgentSession(
-                    issue=Issue(id="I", identifier="I", title="t"),
+                    subject=Issue(id="I", identifier="I", title="t"),
                     workspace=Workspace(path=str(ws_path), issue_identifier="I", issue_id="I"),
                     run_id="run-1",
                 )

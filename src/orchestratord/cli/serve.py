@@ -77,10 +77,29 @@ def add_serve_parser(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Skip the §10.2 first-boot default-workspace seed",
     )
+    serve_parser.add_argument(
+        "--peer-listen",
+        type=str,
+        default="127.0.0.1:9001",
+        help=(
+            "Peer federation listener as HOST:PORT (DESIGN §6.2; "
+            "default: 127.0.0.1:9001)"
+        ),
+    )
+    serve_parser.add_argument(
+        "--redis-url",
+        type=str,
+        default="redis://localhost:6379/0",
+        help=(
+            "Redis URL for peer event fan-out (DESIGN §7 R9; "
+            "default: redis://localhost:6379/0)"
+        ),
+    )
 
 
 def run(args: argparse.Namespace) -> int:
     import os
+
     import uvicorn
 
     if args.no_chat_daemon:
@@ -91,6 +110,11 @@ def run(args: argparse.Namespace) -> int:
         os.environ.pop("ORCHESTRATORD_AUTOPILOT_DAEMON", None)
     else:
         os.environ.setdefault("ORCHESTRATORD_AUTOPILOT_DAEMON", "1")
+    # Peer Federation (DESIGN §10 PR4): the peer listener binding and
+    # Redis URL default via flags but stay env-overridable for PR6's
+    # two-daemon integration runs.
+    os.environ.setdefault("ORCHESTRATORD_PEER_LISTEN", args.peer_listen)
+    os.environ.setdefault("ORCHESTRATORD_REDIS_URL", args.redis_url)
 
     # §10.2 first-boot seed — default workspace + fixed owner member +
     # one daemon runtime token. Plaintext is printed exactly once here.
@@ -114,12 +138,36 @@ def run(args: argparse.Namespace) -> int:
 
         web_proc = web_cli.launch_web_process(port=args.web_port, dev=args.web_dev)
     try:
-        uvicorn.run(
+        config = uvicorn.Config(
             "orchestratord.api.app:app",
             host=args.host,
             port=args.port,
             reload=args.reload,
         )
+
+        class _PeerDrainingServer(uvicorn.Server):
+            """D24: GOODBYE every connected peer + 5s drain on shutdown.
+
+            uvicorn's graceful shutdown (SIGTERM and SIGINT both land in
+            ``Server.shutdown``) first gives outbound peer sessions their
+            §6.2 drain window, so in-flight INVOKEs finish and the remote
+            side receives an explicit GOODBYE instead of a dead socket.
+            """
+
+            async def shutdown(self, sockets=None):
+                from orchestratord.peer.connections import (
+                    shutdown_peer_connections,
+                )
+
+                drained = await shutdown_peer_connections(drain_seconds=5.0)
+                if drained:
+                    print(
+                        f"orchestratord serve: sent GOODBYE to {drained} "
+                        "peer connection(s) after drain"
+                    )
+                await super().shutdown(sockets)
+
+        _PeerDrainingServer(config).run()
     finally:
         if web_proc is not None:
             web_proc.terminate()

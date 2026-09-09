@@ -25,7 +25,7 @@ from orchestratord.workflow_engine.workflow_state import WorkflowState
 
 def test_run_session_accepts_conversation_identity() -> None:
     session = RunSession(
-        issue=SimpleNamespace(id="issue-1"),
+        subject=SimpleNamespace(id="issue-1"),
         workspace=SimpleNamespace(path=Path(".")),
         conversation_id="conv-1",
         parent_run_id="run-previous",
@@ -88,7 +88,7 @@ def test_workflow_state_has_conversation_identity() -> None:
 
 def test_run_session_retains_backend_native_session_mapping() -> None:
     session = RunSession(
-        issue=SimpleNamespace(id="issue-1"),
+        subject=SimpleNamespace(id="issue-1"),
         workspace=SimpleNamespace(path=Path(".")),
         conversation_id="conv-1",
         run_id="run-1",

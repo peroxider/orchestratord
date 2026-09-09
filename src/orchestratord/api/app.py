@@ -22,10 +22,11 @@ from orchestratord.api.routers import (
     channels,
     dashboard,
     inbox,
-    integrations,
     instance,
+    integrations,
     issues,
     members,
+    peer,
     projects,
     realtime,
     runtimes,
@@ -146,6 +147,10 @@ def create_app(
     application.include_router(audit.router, dependencies=_auth)
     application.include_router(vcs.router, dependencies=_auth)
     application.include_router(workspaces.router, dependencies=_auth)
+    # Discovery precedes any shared token in the §5 handshake and the
+    # Agent Card carries no workspace data, so it mounts public — same
+    # reasoning as ``realtime`` above.
+    application.include_router(peer.router)
     return application
 
 

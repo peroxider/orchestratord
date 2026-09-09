@@ -43,8 +43,13 @@ def add_server_parser(
     command_name: str = "server",
     dest: str = "server_subcommand",
     start_command: str = "start",
+    application: str = "issue_pr",
 ) -> None:
-    """Register daemon commands under the canonical or compatibility name."""
+    """Register daemon commands under the canonical or compatibility name.
+
+    ``application`` 是 daemon 组合根在 applications 注册表中的名字
+    （DESIGN §6 :431、P5）；``run``/``_run_start`` 经它寻址组合根类。
+    """
     server_parser = subparsers.add_parser(
         command_name,
         help="Manage the orchestrator daemon process",
@@ -132,6 +137,7 @@ def add_server_parser(
         "  orchestratord server start --workflow ./workflow.md --workflow-yaml ./workflow.yaml --dashboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    start_parser.set_defaults(application=application)
     start_parser.add_argument(
         "--workflow",
         type=str,
@@ -345,6 +351,19 @@ def run(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 # Implementation
 # ---------------------------------------------------------------------------
+
+
+def _resolve_application_class(name: str) -> type:
+    """P5（DESIGN §6 :431）：daemon 组合根类经 applications 注册表寻址。
+
+    注册名由 ``add_server_parser`` 经 ``set_defaults(application=...)``
+    按入口线程（canonical server/daemon → issue_pr；``app <cli-name>
+    serve`` → 对应注册名）；缺省即 ``issue_pr``（现 daemon 即 issue→PR
+    应用）。
+    """
+    from orchestratord.applications import get_application_class
+
+    return get_application_class(name)
 
 
 def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
@@ -952,6 +971,7 @@ def _run_start(args: argparse.Namespace) -> int:
         backend=getattr(args, "backend", None),
         serve_api=getattr(args, "serve_api", False),
         api_port=getattr(args, "api_port", None),
+        application=getattr(args, "application", "issue_pr"),
     )
 
 
@@ -1136,8 +1156,8 @@ def _mount_gateway_opt_in(
 
     # Outbound: orchestrator events → WeChat via OUTBOUND frames.
     # _build_session_sink reads im_event_deliver at sink-build time inside
-    # Orchestrator.run(); set it on the orchestrator instance right after
-    # subsystem.run() constructs it, before it starts polling.
+    # Orchestrator.run(); inject it through the KernelHooks seam right after
+    # subsystem.run() constructs the orchestrator, before it starts polling.
     def _sync_deliver(event, text):
         try:
             loop = asyncio.get_event_loop()
@@ -1145,47 +1165,36 @@ def _mount_gateway_opt_in(
         except RuntimeError:
             logger.warning("orchestrator IM: no loop; dropping event")
 
-    _orig_run = subsystem.run
+    class _ImGatewayKernelHooks:
+        """DESIGN §4.7：宿主经 KernelHooks 注入 IM 网关装配（取代 monkey-patch）。"""
 
-    async def _run_with_im():
-        # subsystem.run constructs self._orchestrator then calls its run().
-        # Patch run() so we set im_event_deliver on the orchestrator before
-        # it starts polling / building session sinks.
-        from orchestratord.orchestrator import Orchestrator as _Orch
-
-        _orig_orch_run = _Orch.run
-
-        async def _orch_run_patched(self, *a, **kw):
-            self._im_gateway_wrapper = wrapper
-            self._im_gateway_session_id = session_id
-            self._im_gateway_heartbeat_task = getattr(wrapper, "_heartbeat_task", None)
-            self.im_event_deliver = _sync_deliver
-            self.im_event_channel = "wechat"
+        async def on_kernel_start(self, kernel) -> None:
+            kernel._im_gateway_wrapper = wrapper
+            kernel._im_gateway_session_id = session_id
+            kernel._im_gateway_heartbeat_task = getattr(wrapper, "_heartbeat_task", None)
+            kernel.im_event_deliver = _sync_deliver
+            kernel.im_event_channel = "wechat"
             # F-??? Feishu activity-sink wiring: when the caller passes
             # a FeishuAppChannelAdapter, propagate it through to the
             # orchestrator so :meth:`Orchestrator._build_session_sink`
             # can attach a :class:`FeishuActivitySink` per session. Stays
             # a no-op when ``feishu_adapter`` is None.
             if feishu_adapter is not None:
-                self.im_channel_adapter = feishu_adapter
-            if hasattr(self, "_emit_im_event"):
+                kernel.im_channel_adapter = feishu_adapter
+            if hasattr(kernel, "_emit_im_event"):
                 from orchestratord.events import EventLevel
 
-                self._emit_im_event(
+                kernel._emit_im_event(
                     "",
                     "orchestrator.started",
                     EventLevel.INFO,
                     "IM notifications enabled",
                 )
-            return await _orig_orch_run(self, *a, **kw)
 
-        _Orch.run = _orch_run_patched
-        try:
-            await _orig_run()
-        finally:
-            _Orch.run = _orig_orch_run
+        async def on_session_sink_build(self, sink, ctx):
+            return sink
 
-    subsystem.run = _run_with_im
+    subsystem.kernel_hooks = _ImGatewayKernelHooks()
 
     return wrapper
 
@@ -1222,6 +1231,7 @@ def _run_orchestrator(
     backend: str | None = None,
     serve_api: bool = False,
     api_port: int | None = None,
+    application: str = "issue_pr",
 ) -> int:
     """Launch the orchestrator with a workflow file.
 
@@ -1336,7 +1346,7 @@ def _run_orchestrator(
             f" \u00b7 permission_mode={getattr(_agent, 'permission_mode', '?')}"
         )
 
-    from orchestratord.applications import IssueToPrApplication
+    application_cls = _resolve_application_class(application)
 
     if spi_backend is not None:
         print(f"  backend={backend} ({spi_backend.display_name})")
@@ -1345,7 +1355,7 @@ def _run_orchestrator(
     if serve_api:
         print(f"  api=http://127.0.0.1:{_api_port} (shared BackendRunner)")
 
-    subsystem = IssueToPrApplication(
+    subsystem = application_cls(
         config, workflow_yaml_path=workflow_yaml_path, backend=spi_backend
     )
 

@@ -837,6 +837,10 @@ class Repositories:
     """Bundle every repository over a single session (the §6.1 unit of work)."""
 
     def __init__(self, session: AsyncSession) -> None:
+        # Exposed for satellite layers that deliberately live outside the
+        # aggregate (the peer registry, D5); CRUD routers stay on the
+        # per-entity repositories and never commit.
+        self.session = session
         self.workspaces = WorkspaceRepository(session)
         self.members = MemberRepository(session)
         self.member_agent_scopes = MemberAgentScopeRepository(session)

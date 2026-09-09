@@ -46,6 +46,7 @@ from .kernel.dispatch import (
     requeue_retry_item,
     split_ready_retries,
 )
+from .kernel.events import KernelHooks
 from .kernel.mode_dispatcher import build_mode_selector, register_collaboration_modes
 from .kernel.sink_router import attach_asciicast_sink, build_base_session_sink
 from .kernel.telemetry import (
@@ -55,9 +56,10 @@ from .kernel.telemetry import (
     report_telemetry,
     shutdown_cleanup,
 )
+from .kernel.work_provider import WorkProvider
 from .mode_selector import ModeSelector
 from . import modes as _modes
-from .modes.base import DEFAULT_MODE, ModeDecision
+from .modes.base import DEFAULT_MODE
 from .failure_messages import (
     FailureContext,
     empty_branch_message,
@@ -74,11 +76,12 @@ from .failure_messages import (
     verification_failed_message,
 )
 from .premise_check import format_cannot_proceed_comment, read_cannot_proceed
-from .business_prompts import (
+from .applications.issue_pr.prompts import (
     render_feedback_summary,
     render_rebase,
     render_review_feedback,
 )
+from .applications.issue_pr.provider import IssuePrWorkProvider
 from .repro_gate import (
     ReproGateResult,
     append_repro_hint,
@@ -93,7 +96,6 @@ from .tracker import (
     Command,
     CommandIntentCapability,
     Intent,
-    PullRequestCapability,
     PullRequestFeedback,
     PullRequestFeedbackCapability,
     PullRequestMaintenanceCapability,
@@ -108,6 +110,7 @@ from .workspace import WorkspaceManager
 from .paths import AUDIT_LOG, ORCHESTRATORD_BASE
 
 if TYPE_CHECKING:
+    from .applications.issue_pr.lifecycle import IssueToPrLifecycle
     from .tracker import CommandIntent
     from orchestratord.spi.backend import AgentBackend
 
@@ -206,6 +209,13 @@ class Orchestrator:
         # unchanged.
         clarifier_provider_factory: Any = None,
         asciicast_capture: Any = None,
+        kernel_hooks: KernelHooks | None = None,
+        # P4 C2c 组合根 seam（DESIGN §4.2/G2）：Application / WorkProvider
+        # 由组合根供给。注入的实例由组合根以无宿主形态构造，此处回绑
+        # ``_host``（两段式装配）；``None`` 保直接构造的自建路径（大量
+        # 测试直构 Orchestrator）。
+        application: IssueToPrLifecycle | None = None,
+        work_provider: IssuePrWorkProvider | None = None,
     ) -> None:
         self.workflow = workflow
         self.tracker = tracker
@@ -223,6 +233,9 @@ class Orchestrator:
         # ``None`` (the default) preserves the existing behaviour — no
         # recording happens, no extra import cost.
         self.asciicast_capture = asciicast_capture
+        # 宿主装配钩子（DESIGN §4.7）：server 经 KernelHooks 注入 IM 网关
+        # 装配，取代对 Orchestrator.run 的 monkey-patch。
+        self._kernel_hooks = kernel_hooks
         # Collaboration modes — Phase 2 wires the registry +
         # ``ModeSelector`` + ``Router`` based on the ``modes:`` YAML
         # section. ``ModesConfig`` defaults (no router, only "single"
@@ -426,6 +439,30 @@ class Orchestrator:
         self.im_event_deliver: "object | None" = None
         self.im_event_channel: str = ""
         self._im_emitters: dict = {}
+        # P4 WorkProvider seam (DESIGN §4.1): the per-poll business chain
+        # (fetch → intent gates → launch) lives in the issue→PR
+        # application's ``IssuePrWorkProvider`` (C2a onward). A supplied
+        # instance arrives hostless from the composition root (C2c
+        # two-phase assembly) and is bound here.
+        if work_provider is not None:
+            work_provider._host = self
+            self._work_provider: WorkProvider = work_provider
+        else:
+            self._work_provider: WorkProvider = IssuePrWorkProvider(self)
+        # P4 Application seam (DESIGN §4.2): the issue→PR business
+        # lifecycle (launch assembly, session decoration, result
+        # interpretation, control-command registry) lives in the
+        # application layer (C2b onward). Function-level import — this
+        # module must not import applications at top level (import
+        # timing contract); lifecycle.py does not touch the
+        # orchestration_subsystem seam, so eager construction is safe.
+        if application is not None:
+            application._host = self
+            self._issue_app = application
+        else:
+            from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+            self._issue_app = IssueToPrLifecycle(self)
         # Do NOT keep a single :class:`ProgressReporter` here.
         # Per-session progress is fanned out via
         # :meth:`_build_session_sink` (a fresh
@@ -692,6 +729,12 @@ class Orchestrator:
 
     async def run(self) -> None:
         """Main polling loop. Runs until cancelled."""
+        # 宿主钩子（DESIGN §4.7）：在进入轮询/sink 组装前调用 on_kernel_start，
+        # 宿主在此完成 IM 网关等会话级装配（取代旧 monkey-patch 的注入时点）。
+        if self._kernel_hooks is not None:
+            on_start = getattr(self._kernel_hooks, "on_kernel_start", None)
+            if on_start is not None:
+                await on_start(self)
         logger.info(
             "Orchestrator starting: interval=%sms max_concurrent=%s",
             self._state.poll_interval_ms,
@@ -949,7 +992,8 @@ class Orchestrator:
         )
 
     async def _poll_and_dispatch(self) -> None:
-        """Fetch candidates, respect concurrency limit, launch runs."""
+        """Run one poll cycle: mechanism wrappers, then the issue→PR
+        business chain via the WorkProvider seam (DESIGN §4.1)."""
         self.status_dashboard.on_poll_start()
         self._state.poll_check_in_progress = True
 
@@ -974,287 +1018,9 @@ class Orchestrator:
             # Optional PR mergeable-state scan (opt-in via workflow.md)
             await self._process_pr_conflict_scan()
 
-            # Fetch new candidate issues
-            try:
-                issues = await self.tracker.fetch_candidate_issues()
-            except Exception as exc:
-                logger.error("Failed to fetch candidate issues: %s", exc)
-                return
-
-            available_slots = self._state.max_concurrent_agents - len(self._state.running)
-            if self._clarification_gate is not None:
-                self._clarification_gate.begin_poll()
-
-            # Pre-register all unregistered candidates with QUEUED status
-            # so the dashboard / registry reflects the full backlog.
-            for issue in issues:
-                if not self._registry.get(issue.id or ""):
-                    base_branch = (
-                        getattr(issue, "base_branch", None)
-                        or self.workflow.workspace.base_branch
-                        or "main"
-                    )
-                    self._registry.register(
-                        issue_id=issue.id or "",
-                        issue_identifier=issue.identifier or "",
-                        branch_name=issue.branch_name,
-                        base_branch=base_branch,
-                        status=IssueStatus.QUEUED,
-                        author_login=issue.author_login,
-                    )
-                    # Notify the operator that a new issue was discovered.
-                    # The Issue object (with url, title, identifier) is
-                    # directly in scope here — all tracker adapters
-                    # populate issue.url from the platform API response.
-                    self._emit_im_event(
-                        issue.id or "",
-                        "issue.detected",
-                        EventLevel.INFO,
-                        "新增 ISSUE",
-                        self._issue_payload(issue, url=issue.url),
-                    )
-                elif issue.author_login:
-                    record = self._registry.get(issue.id or "")
-                    if record is not None and not record.author_login:
-                        record.author_login = issue.author_login
-                        self._registry._save()
-
-            if self.workflow.workspace.strategy == "sequential" and self._state.running:
-                return
-
-            launched_this_poll = 0
-            for issue in issues:
-                if launched_this_poll >= available_slots:
-                    break
-                if issue.id in self._state.running:
-                    continue
-                if issue.id in self._state.claimed:
-                    continue
-
-                # Intent resolution must
-                # happen BEFORE the completed/pending_review skip so
-                # operators can trigger RETRY / FOLLOWUP on completed
-                # issues via labels, comments, or CLI.
-                intent, command_intent_obj, intent_source = await self._resolve_intent(issue)
-
-                if issue.id in self._state.completed or issue.id in self._state.pending_review:
-                    if intent not in (Intent.RETRY, Intent.FOLLOWUP):
-                        continue
-                # `command_intent_obj` may carry the comment author
-                # for role checks; the bare `Command` value
-                # is in `command_intent_obj.command`.
-                command = command_intent_obj.command if command_intent_obj is not None else None
-                command_author = (
-                    command_intent_obj.author_login if command_intent_obj is not None else None
-                )
-
-                # Role check. If a comment command is
-                # what triggered the intent, only the issue author or
-                # a maintainer (or `allow_anyone_to_retry=True`) is
-                # allowed to fire it. The check happens BEFORE the
-                # acknowledgement comment is posted, so a rejected
-                # command never advances the cursor.
-                if (
-                    command_intent_obj is not None
-                    and intent in (Intent.RETRY, Intent.FOLLOWUP)
-                    and not self._is_command_author_eligible(issue, command_author)
-                ):
-                    await self._reject_unauthorized_command(issue, command_intent_obj)
-                    continue
-
-                # Rate limit on RETRY intent. If the issue
-                # has hit `max_retries_per_issue`, refuse the reset
-                # (even with `--force`; only the label-based retry
-                # honors force in the daemon path).
-                if intent is Intent.RETRY:
-                    if not self._check_retry_rate_limit(issue, force=False):
-                        continue
-
-                # When a comment command is honored, post
-                # a bot acknowledgement so the operator sees the
-                # intent was received, and record the command on the
-                # registry for audit.
-                if command is not None:
-                    await self._post_command_acknowledgement(issue, command)
-                    record = self._registry.get(issue.id or "")
-                    if record is not None:
-                        record.last_command = f"/agent {command.value}"
-                        record.touch()
-                        self._registry._save()
-                    logger.info(
-                        "Issue %s command received: /agent %s",
-                        issue.id,
-                        command.value,
-                    )
-
-                    # UNBLOCK is a meta-command: clear any BLOCKED
-                    # state so the next poll re-applies the (now
-                    # possibly cleared) label-based intent.
-                    if command is Command.UNBLOCK:
-                        record = self._registry.get(issue.id or "")
-                        if record is not None and record.status is IssueStatus.ABANDONED:
-                            logger.info(
-                                "Issue %s unblocked, status reset to pending",
-                                issue.id,
-                            )
-                            record.status = IssueStatus.PENDING
-                            record.intent = Intent.NONE
-                            record.intent_source = None
-                            self._registry._save()
-
-                if intent is Intent.BLOCKED:
-                    logger.info(
-                        "Issue %s blocked intent detected, marking abandoned",
-                        issue.id,
-                    )
-                    record = self._registry.get(issue.id or "")
-                    if record is None:
-                        self._registry.register(
-                            issue_id=issue.id or "",
-                            issue_identifier=issue.identifier or "",
-                            branch_name=getattr(issue, "branch_name", None) or "main",
-                        )
-                    self._registry.mark_intent(
-                        issue.id or "",
-                        intent,
-                        # Preserve the source from
-                        # _resolve_intent so CLI / comment / label
-                        # origin is recorded on the record. The
-                        # fallback only fires if intent_source is
-                        # somehow None (defensive — should not be
-                        # reachable when intent is RETRY/FOLLOWUP/
-                        # BLOCKED).
-                        source=(intent_source or ("command" if command is not None else "label")),
-                        command=(f"/agent {command.value}" if command is not None else None),
-                    )
-                    self._registry.mark_abandoned(issue.id or "")
-                    await self._sync_tracker_issue_state(issue.id or "", "abandoned")
-                    self._state.completed.add(issue.id or "")
-                    continue
-
-                if intent is Intent.RETRY:
-                    logger.info(
-                        "Issue %s retry intent detected, will reset on launch",
-                        issue.id,
-                    )
-                    self._registry.mark_intent(
-                        issue.id or "",
-                        intent,
-                        # Preserve the source from
-                        # _resolve_intent so CLI / comment / label
-                        # origin is recorded on the record. The
-                        # fallback only fires if intent_source is
-                        # somehow None (defensive — should not be
-                        # reachable when intent is RETRY/FOLLOWUP/
-                        # BLOCKED).
-                        source=(intent_source or ("command" if command is not None else "label")),
-                        command=(f"/agent {command.value}" if command is not None else None),
-                    )
-                    # The reset+close path performs the actual reset.
-                elif intent is Intent.FOLLOWUP:
-                    logger.info(
-                        "Issue %s follow-up intent detected, will reuse branch",
-                        issue.id,
-                    )
-                    self._registry.mark_intent(
-                        issue.id or "",
-                        intent,
-                        # Preserve the source from
-                        # _resolve_intent so CLI / comment / label
-                        # origin is recorded on the record. The
-                        # fallback only fires if intent_source is
-                        # somehow None (defensive — should not be
-                        # reachable when intent is RETRY/FOLLOWUP/
-                        # BLOCKED).
-                        source=(intent_source or ("command" if command is not None else "label")),
-                        command=(f"/agent {command.value}" if command is not None else None),
-                    )
-                    followup_record = self._registry.get(issue.id or "")
-                    if self._uses_review_feedback_followup(followup_record):
-                        # Command follow-up handles pending PR review feedback
-                        # instead of rerunning the entire issue. Dashboard chat
-                        # keeps its agent_followup path because the operator's
-                        # text is the work to perform.
-                        followup_handled = (
-                            await self._launch_followup_with_pending_reviews(issue)
-                        )
-                        if followup_handled:
-                            continue
-                        # Do not rerun the issue when no feedback is pending.
-                        logger.info(
-                            "Issue %s follow-up: no pending review feedback "
-                            "to process — skip",
-                            issue.id,
-                        )
-                        continue
-
-                if intent is Intent.REBASE:
-                    # REBASE intent — the orchestrator itself
-                    # performs the rebase (no agent for clean rebases).
-                    # On content conflict, has_conflict is set and the
-                    # next ``_process_pending_rebase_conflicts`` cycle
-                    # launches an agent_rebase run.
-                    logger.info(
-                        "Issue %s rebase intent detected, running built-in rebase",
-                        issue.id,
-                    )
-                    self._registry.mark_intent(
-                        issue.id or "",
-                        intent,
-                        source=(intent_source or ("command" if command is not None else "label")),
-                        command=(f"/agent {command.value}" if command is not None else None),
-                    )
-                    if not self._check_rebase_rate_limit(issue, force=False):
-                        continue
-                    await self._process_rebase_intent(issue)
-                    # CLI is one-shot; clear so the next poll doesn't
-                    # re-trigger. Audit + last_command are preserved.
-                    if intent_source == "cli":
-                        self._registry.clear_intent(issue.id or "")
-                    continue
-
-                # Skip terminal registry records even if the tracker still
-                # exposes the issue in an active state. Explicit retry/follow-up
-                # intents are the only daemon path that may reopen handled work.
-                if intent is Intent.NONE and (
-                    self._registry.is_terminal(issue.id or "")
-                    or self._registry.has_pr(issue.id or "")
-                ):
-                    logger.info("Issue %s already handled (registry), skipping", issue.id)
-                    continue
-                if not await self._dependencies_satisfied(issue):
-                    continue
-                if self._clarification_gate is not None:
-                    try:
-                        if not await self._clarification_gate.should_dispatch(issue):
-                            logger.info("Issue %s is waiting for issue-clarifier clarification", issue.id)
-                            continue
-                    except Exception:
-                        logger.exception("Issue-clarifier clarity gate failed for issue %s", issue.id)
-                        if not bool(getattr(self.workflow.clarifier, "fail_open", True)):
-                            continue
-                self._state.claimed.add(issue.id)
-                # Thread-local MDC for the orchestrator launch path —
-                # the agent_runner will refill with run_id once available.
-                from .logging_setup import set_log_context
-
-                set_log_context(
-                    issue_id=str(issue.id or ""),
-                    issue_identifier=str(getattr(issue, "identifier", "")),
-                )
-                await self._launch_issue(issue)
-                if issue.id in self._state.running:
-                    launched_this_poll += 1
-                    # CLI retry is a one-shot. The
-                    # operator's orchestrator issue command
-                    # retry --mode reset` already wrote `registry.intent`
-                    # with `intent_source="cli"`; now that the launch
-                    # has started, clear it so the next poll does NOT
-                    # re-trigger. The audit trail (the original
-                    # `last_command` text + the high-priority audit
-                    # log entry written by the CLI) is preserved.
-                    if intent_source == "cli":
-                        self._registry.clear_intent(issue.id or "")
+            # Issue→PR business chain (fetch → intent gates → launch):
+            # owned by the issue→PR WorkProvider (C2a onward).
+            await self._work_provider.poll()
 
         finally:
             self._state.poll_check_in_progress = False
@@ -2064,7 +1830,7 @@ class Orchestrator:
 
             workspace = _Ws(path=_Path("/tmp"), issue_identifier=issue.identifier or "")
         session = AgentSession(
-            issue=issue,
+            subject=issue,
             workspace=workspace,
             conversation_id=record.conversation_id if record is not None else None,
             parent_run_id=record.run_id if record is not None else None,
@@ -2638,7 +2404,7 @@ class Orchestrator:
         # the main agent runner (backward-compatible).
         runner = self.stage_runners.get("review_followup", self.agent_runner)
         session = AgentSession(
-            issue=issue,
+            subject=issue,
             workspace=workspace,
             conversation_id=followup.record.conversation_id,
             parent_run_id=followup.record.run_id,
@@ -2688,187 +2454,25 @@ class Orchestrator:
         task.add_done_callback(_unregister_issue_task)
 
     async def _launch_issue(self, issue: Issue) -> None:
-        """Create workspace and run agent for one issue."""
-        if not await self._dependencies_satisfied(issue):
-            self._state.claimed.discard(issue.id)
+        """Launch one issue: 业务装配在应用侧（3-seam 保序委托，C2b），
+        本壳只做机制段——AgentSession/pause 回调、viz journal、running
+        map、task 创建。"""
+        # 业务装配段已迁应用侧（C2b，DESIGN §4.2 prepare seam）：依赖
+        # 复检、intent reset、branch 推导、workspace 创建、registry
+        # 记账、tracker 刷新守卫。None = gated / skip（既有早退路径，
+        # 副作用 claimed.discard / completed.add 已随迁）。
+        app = self._issue_app
+        prepared = await app.prepare_launch(issue)
+        if prepared is None:
             return
-
-        # If the registry carries a RETRY intent for this
-        # issue, close the existing remote PR (best-effort) and reset
-        # the local record so the new run starts from a clean slate.
-        # This must happen BEFORE workspace creation so the new run
-        # does not try to push a follow-up commit to a closed PR.
-        await self._prepare_intent_reset(issue)
-
-        workspace_strategy = self.workflow.workspace.strategy
-        branch_name = getattr(issue, "branch_name", None)
-        if not branch_name:
-            branch_name = self.git_sync._default_branch_name(issue)
-            issue.branch_name = branch_name
-
-        try:
-            workspace = await self.workspace.create_for_issue(issue)
-        except Exception as exc:
-            logger.error(
-                "Workspace creation failed issue_id=%s: %s",
-                issue.id,
-                exc,
-            )
-            self._state.claimed.discard(issue.id)
-            return
-
-        # Register as pending so restart won't re-launch this issue
-        base_branch = (
-            getattr(issue, "base_branch", None) or self.workflow.workspace.base_branch or "main"
-        )
-        integration_branch = self.workflow.workspace.integration_branch
-        if workspace_strategy == "sequential" and integration_branch:
-            branch_name = integration_branch
-        start_commit_sha = await self.workspace.current_head(workspace.path)
-        base_commit_sha = start_commit_sha if workspace_strategy == "sequential" else None
-        previous_issue_id = None
-        sequence_index = None
-        if workspace_strategy == "sequential":
-            previous_record = self._registry.latest_sequential_record()
-            previous_issue_id = previous_record.issue_id if previous_record else None
-            sequence_index = (previous_record.sequence_index or 0) + 1 if previous_record else 1
-        # In sequential mode the registry's workspace_path must
-        # record the configured root (not whatever WorkspaceManager
-        # happened to return for the current issue), so that subsequent
-        # issues can resolve the previous commit chain against the same
-        # path. In isolated / shared modes the per-issue workspace.path
-        # is already the canonical location, so keep that.
-        recorded_workspace_path = (
-            str(self._workspace_root) if workspace_strategy == "sequential" else str(workspace.path)
-        )
-        existing_record = self._registry.get(issue.id or "")
-        parent_run_id = (
-            existing_record.run_id
-            if existing_record is not None and existing_record.run_id
-            else (existing_record.previous_run_ids[-1] if existing_record and existing_record.previous_run_ids else None)
-        )
-        record = self._registry.register(
-            issue_id=issue.id or "",
-            issue_identifier=issue.identifier or "",
-            branch_name=branch_name,
-            base_branch=base_branch,
-            workspace_strategy=workspace_strategy,
-            workspace_path=recorded_workspace_path,
-            base_commit_sha=base_commit_sha,
-            start_commit_sha=start_commit_sha,
-            previous_issue_id=previous_issue_id,
-            sequence_index=sequence_index,
-            author_login=issue.author_login,
-        )
-
-        # Pre-check: verify issue is still in an active state and has no
-        # existing PR (which would mean it was already handled) before running agent
-        try:
-            refreshed = await self.tracker.fetch_issue_states_by_ids([issue.id])
-            refreshed_issue = refreshed.get(issue.id)
-            if refreshed_issue is None:
-                logger.info("Issue %s no longer exists, skipping", issue.id)
-                self._state.claimed.discard(issue.id)
-                return
-            active_states = [
-                s.strip().lower() for s in (getattr(self.tracker, "active_states", None) or [])
-            ]
-            is_active = (
-                refreshed_issue.state is not None
-                and refreshed_issue.state.strip().lower() in active_states
-            )
-            if not is_active:
-                logger.info(
-                    "Issue %s is no longer active (state=%r), skipping",
-                    issue.id,
-                    refreshed_issue.state,
-                )
-                self._state.claimed.discard(issue.id)
-                return
-            # Check for existing PR (only for repository-backed trackers)
-            branch_name = refreshed_issue.branch_name
-            if branch_name and supports(self.tracker, PullRequestCapability):
-                base_branch = getattr(refreshed_issue, "base_branch", "main") or "main"
-                existing_pr = await self.tracker.find_pull_request(
-                    head_branch=branch_name,
-                    base_branch=base_branch,
-                )
-                if existing_pr is not None:
-                    # Explicit follow-up and retry intents both bypass the
-                    # ordinary existing-PR guard. Follow-up reuses the PR;
-                    # retry already attempted to close it and must still
-                    # proceed when that best-effort close was a no-op.
-                    record = self._registry.get(issue.id or "")
-                    if record and record.intent in (Intent.RETRY, Intent.FOLLOWUP):
-                        logger.info(
-                            "Issue %s %s intent on existing PR %s (%s), proceeding",
-                            issue.id,
-                            record.intent.value,
-                            existing_pr.number,
-                            existing_pr.url,
-                        )
-                    else:
-                        logger.info(
-                            "Issue %s already has PR %s (%s), skipping",
-                            issue.id,
-                            existing_pr.number,
-                            existing_pr.url,
-                        )
-                        self._state.claimed.discard(issue.id)
-                        # Also add to completed so we don't re-process after restart
-                        self._state.completed.add(issue.id)
-                        return
-
-            # Registry-based guard: skip if the local registry already records
-            # a PR or a terminal state for this issue.  The tracker-based check
-            # above only fires when the issue body contains ``branch_name:``
-            # — many issues lack that field, so this tag-team guard across all
-            # entry points (poll, retry queue, escalation) catches the gap.
-            #
-            # The ``register()`` call at line 1217 preserves ``pr_number`` from
-            # any previous run (see issue_registry.py:317), while explicit retry
-            # intents (``_prepare_intent_reset`` → ``reset_for_retry``) clear it
-            # beforehand so a deliberate re-run still passes through.
-            if self._registry.has_pr(issue.id or "") or self._registry.is_terminal(issue.id or ""):
-                # Explicit retry/follow-up intents deliberately bypass the
-                # handled guard. Retry clears stale PR state before reaching
-                # this point; follow-up reuses it.
-                record = self._registry.get(issue.id or "")
-                if record and record.intent in (Intent.RETRY, Intent.FOLLOWUP):
-                    logger.info(
-                        "Issue %s %s intent bypasses registry guard "
-                        "(has_pr=%s, is_terminal=%s), proceeding",
-                        issue.id,
-                        record.intent.value,
-                        self._registry.has_pr(issue.id or ""),
-                        self._registry.is_terminal(issue.id or ""),
-                    )
-                else:
-                    logger.info(
-                        "Issue %s already handled (registry: has_pr=%s, "
-                        "is_terminal=%s), skipping via _launch_issue guard",
-                        issue.id,
-                        self._registry.has_pr(issue.id or ""),
-                        self._registry.is_terminal(issue.id or ""),
-                    )
-                    self._state.claimed.discard(issue.id)
-                    self._state.completed.add(issue.id)
-                    return
-
-            # Update issue with latest state
-            issue.state = refreshed_issue.state
-        except Exception as exc:
-            logger.warning(
-                "Could not verify issue state for %s: %s — proceeding anyway",
-                issue.id,
-                exc,
-            )
+        business = prepared.business
+        workspace = business["workspace"]
 
         session = AgentSession(
-            issue=issue,
+            subject=issue,
             workspace=workspace,
-            conversation_id=record.conversation_id,
-            parent_run_id=parent_run_id,
+            conversation_id=business["conversation_id"],
+            parent_run_id=business["parent_run_id"],
             pause_resume_event=asyncio.Event(),
             event_queue=asyncio.Queue(),
         )
@@ -2883,58 +2487,10 @@ class Orchestrator:
                 self._registry.mark_resumed(issue_id)
 
         session._on_pause_state_change = _on_pause_change
-        clarification_record = self._registry.get(issue.id or "")
-        if clarification_record is not None and clarification_record.local_answer:
-            session.clarification_answer = clarification_record.local_answer
-            session.clarification_source = clarification_record.local_answer_source
-            if clarification_record.question_history:
-                session.clarification_question = "\n".join(
-                    f"- {question}" for question in clarification_record.question_history
-                )
-        retry_attempt = self._state.retry_attempts.get(issue.id or "", 0)
-        session.attempt = retry_attempt + 1
-        session.issue_attempt = session.attempt
-        session.workspace_strategy = workspace_strategy
-        session.workspace_path = str(workspace.path)
-        session.start_commit_sha = start_commit_sha
-        session.base_commit_sha = base_commit_sha
-        session.previous_issue_id = previous_issue_id
-        session.sequence_index = sequence_index
-        session.integration_branch = integration_branch
-        session.base_branch = base_branch
-        # Collaboration mode selection. Phase 1 ships only the
-        # ``single`` mode; ModeSelector returns "single" unless the issue
-        # carries a ``mode:<name>`` label that maps to a registered
-        # runner. The decision is recorded on the session for the
-        # dispatcher in ``_run_issue`` and on the registry record for
-        # audit (`issue list --mode`, dashboard column).
-        try:
-            mode_decision = self._mode_selector.choose(issue)
-        except Exception:
-            logger.exception(
-                "Issue %s ModeSelector.choose raised; defaulting to single",
-                issue.id,
-            )
-            mode_decision = ModeDecision(
-                mode=DEFAULT_MODE,
-                reason="ModeSelector.choose raised; see logs",
-                source="fallback",
-            )
-        session.collaboration_mode = mode_decision.mode
-        session.mode_decision = mode_decision
-        record = self._registry.get(issue.id or "")
-        if record is not None:
-            record.collaboration_mode = mode_decision.mode
-            record.mode_decision_reason = mode_decision.reason
-            record.touch()
-            self._registry._save()
-        logger.info(
-            "Issue %s collaboration_mode=%s (source=%s, reason=%s)",
-            issue.id,
-            mode_decision.mode,
-            mode_decision.source,
-            mode_decision.reason,
-        )
+        # 会话装饰迁应用侧（C2b）：clarification 注入、retry 上下文、
+        # 协作模式选择 + registry 记账；mode_decision 经返回值转交，
+        # 供下方 viz journal 的 phase 事件使用。
+        mode_decision = await app.decorate_session(session, prepared)
         if self._viz_journal is not None:
             self._viz_journal.write_event(
                 {
@@ -2950,37 +2506,12 @@ class Orchestrator:
                     "phase": f"mode:{mode_decision.mode}",
                 }
             )
-        # Command/review FOLLOWUP intents fetch pending PR feedback. Dashboard
-        # conversation turns remain agent_followup runs so operator text is not
-        # discarded merely because there is no pending PR review.
-        followup_record = self._registry.get(issue.id or "")
-        if self._uses_review_feedback_followup(followup_record):
-            followup_handled = await self._launch_followup_with_pending_reviews(issue)
-            if not followup_handled:
-                logger.info(
-                    "Issue %s follow-up: no pending review feedback to process — skip",
-                    issue.id or "",
-                )
+        # viz 后业务门迁应用侧（C2b，3-seam 第三缝）：review-feedback
+        # followup 早退、intent session 准备、previous_run_ids /
+        # previous_verification_error 注入。False = 已处理 / 跳过
+        # （session 弃置，不进入机制尾）。
+        if not await app.post_viz_gate(session):
             return
-        # If the registry intent is FOLLOWUP, wire the
-        # session so the agent + git_sync know to reuse the existing
-        # branch / PR rather than create a new run.
-        self._prepare_intent_session(session)
-        if session.run_kind == "review_followup":
-            session.stage_id = "review_followup"
-        # Retry context: propagate previous_run_ids from the registry
-        # to the session so the prompt builder can inject them.
-        prev_record = self._registry.get(issue.id or "")
-        if prev_record and prev_record.previous_run_ids:
-            session.previous_run_ids = list(prev_record.previous_run_ids)
-        # Also propagate the last run's verification failure output (e.g.
-        # pre-commit gate failure) so the retry prompt can carry it directly
-        # to the agent — not just as a readable transcript hint.
-        if prev_record is not None:
-            session.previous_verification_error = (
-                getattr(prev_record, "verification_output", None)
-                or getattr(prev_record, "last_hook_error", None)
-            )
         self._state.running[issue.id] = session
 
         # Update persistent registry so `issue list` reflects running state
@@ -3414,6 +2945,9 @@ class Orchestrator:
                                 clarification_resolver=self._clarification_resolver,
                                 progress_reporter=progress_sink,
                                 diagnostics_callback=self._update_run_diagnostics,
+                                # 应用侧提供 rebase 冲突文件装饰（DESIGN §4.2
+                                # prepare_run seam）：机制侧不再读取 session 业务字段。
+                                conflict_files=session.conflict_files,
                             ),
                             session=session,
                             timeout=run_timeout_seconds,
@@ -3534,25 +3068,8 @@ class Orchestrator:
                         # 并在 session_end_reason 中标记 empty_branch_no_commits。
                         # 这时不能走 mark_synced（会标 SYNCED + 无 PR），
                         # 必须走 mark_failed_with_reason，让 issue 进入 FAILED。
-                        if (
-                            sync_result is not None
-                            and sync_result.session_end_reason == "empty_branch_no_commits"
-                        ):
-                            logger.warning(
-                                "Issue %s ended with no reviewable commit "
-                                "(session_end_reason=%s) — marking FAILED "
-                                "without creating a PR",
-                                session.issue.id,
-                                sync_result.session_end_reason,
-                            )
-                            session.status = "failed"
-                            session.session_end_reason = "empty_branch_no_commits"
-                            session.session_end_summary = (
-                                "Agent did not produce any file modifications; no PR was created."
-                            )
-                            session.verification_status = "failed"
-                            session.verification_output = session.session_end_summary
-                            session.last_hook_error = session.session_end_summary
+                        # （C2b：分类逻辑迁应用侧 interpret_sync_result。）
+                        if await self._issue_app.interpret_sync_result(session, sync_result):
                             return
                         if sync_result is not None:
                             self._registry.update_report(
@@ -4012,253 +3529,12 @@ class Orchestrator:
                     except Exception:
                         logger.debug("viz journal final event failed", exc_info=True)
 
-                # Review gate: if the issue is already in pending_review
-                # (set by the early return above), skip the final status
-                # transition so the outer finally does NOT overwrite it with
-                # COMPLETED. The human must run `orchestrator issue review
-                # --id ... --approve` to move it to COMPLETED.
-                if session.issue.id in self._state.pending_review:
-                    # Issue is waiting for human review — do nothing further.
-                    # Workspace preservation is handled by the early return.
-                    logger.info(
-                        "Issue %s left in pending_review state — human review required",
-                        session.issue.id,
-                    )
-                elif session.status == "completed":
-                    self.status_dashboard.on_session_complete(session.issue.id or "")
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        "issue.completed",
-                        EventLevel.SUCCESS,
-                        "任务完成",
-                        self._session_payload(session),
-                    )
-                    self._state.completed.add(session.issue.id or "")
-                    self._registry.mark_completed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "completed")
-                elif session.status == "verification_failed":
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        str(session.status),
-                    )
-                    # Terminal IM event already emitted by the originating
-                    # except handler (VerificationFailed / HookFailedError /
-                    # GitSyncPostCommitError). ``verification_failed`` is
-                    # only ever set there, so re-emitting here would double
-                    # (e.g. ``post_commit_failed`` ERROR then
-                    # ``verification.failed`` WARN). See review 🟡2.
-                    self._registry.mark_verification_failed(
-                        session.issue.id or "",
-                        output=getattr(session, "verification_output", None),
-                        hook_error=getattr(session, "last_hook_error", None),
-                    )
-                    # Gate the tracker close on the retry outcome: a
-                    # pending retry keeps the issue open on the tracker
-                    # (GitCode cannot reopen a closed issue).
-                    retry_scheduled = await self._schedule_retry(session)
-                    if not retry_scheduled:
-                        await self._sync_tracker_issue_state(
-                            session.issue.id or "", "verification_failed"
-                        )
-                elif session.status == "agent_timeout":
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        str(session.status),
-                    )
-                    # Terminal IM event already emitted by the
-                    # ``asyncio.TimeoutError`` except handler; ``agent_timeout``
-                    # is only ever set there. See review 🟡2.
-                    self._registry.mark_failed_with_reason(
-                        session.issue.id or "",
-                        getattr(session, "last_hook_error", None)
-                        or getattr(session, "verification_output", None)
-                        or "Agent run timed out",
-                    )
-                    retry_scheduled = await self._schedule_retry(session)
-                    if not retry_scheduled:
-                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                elif session.status == "max_turns_exceeded":
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        str(session.status),
-                    )
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        "agent.max_turns_exceeded",
-                        EventLevel.WARN,
-                        "max turns exceeded",
-                    )
-                    self._registry.mark_failed(session.issue.id or "")
-                    retry_scheduled = await self._schedule_retry(
-                        session,
-                        delay_base_ms=self.workflow.agent.max_turns_retry_delay_ms,
-                    )
-                    if not retry_scheduled:
-                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                elif session.status == "rate_limit_circuit_open":
-                    # The AgentRunner's 429 backoff circuit breaker tripped
-                    # after ``rate_limit_max_retries`` consecutive rate
-                    # limit hits. Surface it on the dashboard and hand it
-                    # off to the inter-run retry queue with the longest
-                    # configured base delay so the provider's rate window
-                    # has a chance to reset before the next attempt.
-                    backoff_s = self.workflow.agent.rate_limit_max_backoff_ms
-                    logger.warning(
-                        "Rate limit circuit open issue_id=%s — scheduling "
-                        "inter-run retry with base delay %dms (session "
-                        "spent %.1fs in in-turn backoff across %d hits)",
-                        session.issue.id or "",
-                        backoff_s,
-                        getattr(session, "total_429_backoff_seconds", 0.0),
-                        getattr(session, "consecutive_429_count", 0),
-                    )
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        "rate_limit_circuit_open",
-                    )
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        "agent.rate_limit_circuit_open",
-                        EventLevel.ERROR,
-                        "rate limit circuit open",
-                    )
-                    self._registry.mark_failed(session.issue.id or "")
-                    retry_scheduled = await self._schedule_retry(
-                        session,
-                        delay_base_ms=backoff_s,
-                    )
-                    if not retry_scheduled:
-                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                elif session.status in (
-                    "stagnation",
-                    "loop_detected",
-                ):
-                    # Root-cause fix: the agent loop detected it
-                    # was no longer making progress (stagnation =
-                    # consecutive no-op turns; loop_detected = same
-                    # tool-call signature repeated within window).
-                    # Mark the issue failed with the explicit
-                    # session_end_reason so the dashboard / cron tick
-                    # can distinguish these from ordinary crashes.
-                    logger.warning(
-                        "Agent %s issue_id=%s — %s: %s",
-                        session.status,
-                        session.issue.id or "",
-                        getattr(session, "session_end_summary", ""),
-                    )
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        str(session.status),
-                    )
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        f"agent.{session.status}",
-                        EventLevel.WARN,
-                        getattr(session, "session_end_summary", "") or str(session.status),
-                    )
-                    self._registry.mark_failed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    # No retry — same agent will likely repeat the
-                    # same loop on retry without human intervention.
-                    # The cron tick will mark the issue abandoned on
-                    # the next pass and the operator can either
-                    # adjust the issue / workflow or skip it.
-                elif session.status == "cancelled":
-                    logger.info(
-                        "Issue %s cancelled by operator — skipping retry",
-                        session.issue.id,
-                    )
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        "cancelled",
-                    )
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        "issue.cancelled",
-                        EventLevel.WARN,
-                        "cancelled by operator",
-                    )
-                    self._registry.mark_failed(session.issue.id or "")
-                    await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-                    # Do NOT schedule retry — operator explicitly cancelled.
-                elif session.status == "released":
-                    # Claim released by daemon shutdown (handled in the
-                    # CancelledError branch above): the registry record is
-                    # back to PENDING and the tracker re-opened. Falling
-                    # through to the generic-failure branch would clobber
-                    # mark_pending with mark_failed, re-sync the tracker to
-                    # 'failed', emit a spurious issue.failed event and
-                    # schedule a retry — i.e. reintroduce the exact bug the
-                    # release path exists to fix.
-                    logger.info(
-                        "Issue %s released by shutdown — left PENDING for re-dispatch",
-                        session.issue.id,
-                    )
-                else:
-                    self.status_dashboard.on_session_failed(
-                        session.issue.id or "",
-                        str(session.status),
-                    )
-                    # Use the error detail (session_end_summary) as the
-                    # message if available — str(session.status) is just
-                    # "failed" with no context.  Truncate long error
-                    # bodies (e.g. API JSON responses) for WeChat display.
-                    detail = getattr(session, "session_end_summary", None) or str(session.status)
-                    if len(detail) > 200:
-                        detail = detail[:200] + "…"
-                    self._emit_im_event(
-                        session.issue.id or "",
-                        "issue.failed",
-                        EventLevel.WARN,
-                        detail,
-                        self._session_payload(
-                            session,
-                            turns=getattr(session, "turn_count", None),
-                        ),
-                    )
-                    failure_detail = getattr(session, "operator_failure_detail", None)
-                    if failure_detail:
-                        self._registry.mark_failed_with_reason(
-                            session.issue.id or "",
-                            str(failure_detail),
-                        )
-                        self._registry.update_report(
-                            session.issue.id or "",
-                            session_end_reason=getattr(session, "session_end_reason", None),
-                            session_end_summary=getattr(session, "session_end_summary", ""),
-                        )
-                    else:
-                        self._registry.mark_failed(session.issue.id or "")
-                    # Persist the end reason / summary for EVERY failure
-                    # path, not only the operator_failure_detail one: a
-                    # bare mark_failed leaves session_end_reason unset in
-                    # the registry, which made fast-fail runs (e.g. backend
-                    # spawn errors) impossible to diagnose after the fact.
-                    self._registry.update_report(
-                        session.issue.id or "",
-                        session_end_reason=getattr(
-                            session, "session_end_reason", None
-                        ),
-                        session_end_summary=getattr(
-                            session, "session_end_summary", ""
-                        ),
-                    )
-                    # Gate the tracker close on the retry outcome: with a
-                    # retry pending the issue stays open+assigned on the
-                    # tracker; when the retry limit is reached the
-                    # ``_schedule_retry`` abandoned path closes it.
-                    retry_scheduled = await self._schedule_retry(session)
-                    if not retry_scheduled:
-                        await self._sync_tracker_issue_state(session.issue.id or "", "failed")
-
-                # Update summary comment for non-completed paths (a
-                # shutdown-released run posts no failure summary — the
-                # issue is requeued, not failed).
-                if (
-                    session.issue.id not in self._state.pending_review
-                    and session.status != "released"
-                ):
-                    await self._update_issue_summary(session)
+                # 业务终态映射链已迁应用侧（C2b，DESIGN §4.2 interpret
+                # seam）：registry 状态机、tracker 同步、IM 通知、run
+                # summary comment 由应用解释并返回 Outcome；Kernel 端
+                # Outcome 消费随 dispatch-loop 切片接入。workspace 清理
+                # （保全策略）与 claimed 释放为机制段，仍留本 finally。
+                await self._issue_app.interpret(session)
 
                 # Cleanup workspace based on preservation policy
                 try:
@@ -4880,25 +4156,19 @@ class Orchestrator:
 
                 remove_control_file = True
                 try:
-                    if cmd == "review_followup":
-                        await self._handle_review_followup_control(issue_id, extra)
-                    elif cmd == "rebase":
-                        # Route CLI-written rebase control files to
-                        # the built-in rebase path. Format::
-                        #   rebase\n<id>\nforce=0|1\n<reason>
-                        await self._handle_rebase_control(issue_id, extra)
+                    # 业务命令注册表（C2b，DESIGN §4.2 control_commands）：
+                    # review_followup / rebase / review_approve /
+                    # review_retry / retry / followup 由应用声明，handler
+                    # 返回值决定控制文件是否删除（followup 可保留）；
+                    # gateway_* 与 pause/resume/stop/takeover 等机制命令
+                    # 留宿主。
+                    business_handler = self._issue_app.control_commands().get(cmd)
+                    if business_handler is not None:
+                        remove_control_file = bool(
+                            await business_handler(issue_id, extra)
+                        )
                     elif cmd in {"gateway_connect", "gateway_disconnect"}:
                         await self._handle_gateway_control(cmd, extra)
-                    elif cmd == "review_approve":
-                        await self._handle_review_approve_control(issue_id, extra)
-                    elif cmd == "review_retry":
-                        await self._handle_review_retry_control(issue_id, extra)
-                    elif cmd == "retry":
-                        await self._handle_retry_control(issue_id, extra)
-                    elif cmd == "followup":
-                        remove_control_file = await self._handle_followup_control(
-                            issue_id, extra
-                        )
                     else:
                         self._apply_control_command(cmd, issue_id, extra)
                 finally:

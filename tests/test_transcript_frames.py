@@ -201,7 +201,7 @@ async def test_backend_send_records_exact_input_before_execution(tmp_path, monke
         10,
     )
     session = _session()
-    session.issue = SimpleNamespace(id="task")
+    session.issue = SimpleNamespace(id="task")  # legacy read face consumed by backend_runner
     session.workspace = SimpleNamespace(path=tmp_path)
     session._user_prompt = "Exact task\nincluding requirements <script>"
     spec = SimpleNamespace(resume_session_id=None, system_prompt="Workflow rules")
@@ -231,7 +231,7 @@ async def test_runner_records_terminal_even_without_backend_completion(
     )
     monkeypatch.setattr(runner, "_append_skill_index", lambda text: text)
     session = RunSession(
-        issue=RunSubject(id="task", identifier="task"),
+        subject=RunSubject(id="task", identifier="task"),
         workspace=Workspace(path=tmp_path, issue_identifier="task"),
         prompt_override="task input",
     )

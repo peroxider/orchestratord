@@ -18,7 +18,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -371,7 +371,7 @@ class BackendRunner:
         ctx = RunContext.from_task(task)
         task.conversation_id = ctx.conversation_id
         session = RunSession(
-            issue=ctx.subject,
+            subject=ctx.subject,
             task=task,
             workspace=ctx.workspace,
             run_kind=task.kind,
@@ -463,6 +463,7 @@ class BackendRunner:
         clarification_resolver: Any | None = None,
         progress_reporter: Any | None = None,
         diagnostics_callback: Callable[[AgentSession], None] | None = None,
+        conflict_files: Sequence[str] | None = None,
     ) -> None:
         """Execute one session via the configured AgentBackend.
 
@@ -470,6 +471,11 @@ class BackendRunner:
         carries mutable state that this method updates in-place:
         ``output_text``, ``turn_count``, ``tool_count``, ``status``,
         ``verification_status``, etc.
+
+        ``conflict_files`` is a prompt-decoration input supplied by the
+        application layer (DESIGN §4.2 prepare_run seam): the mechanism
+        never reads session business fields, so the rebase-reentry file
+        list is passed in explicitly by the caller that owns it.
         """
         issue = session.issue
         workspace = session.workspace
@@ -511,7 +517,7 @@ class BackendRunner:
             # Resolve the prompt and spec inside the lifecycle guard so even
             # configuration failures leave an inspectable terminal record.
             system_prompt_append, user_prompt = self._build_prompt(
-                session, workflow, issue, workspace,
+                session, workflow, issue, workspace, conflict_files=conflict_files,
             )
             system_prompt_append = self._append_skill_index(system_prompt_append)
             session._runtime_tasks = self.get_task_registry()
@@ -621,11 +627,15 @@ class BackendRunner:
         workflow: WorkflowConfig,
         issue: Any,
         workspace: Any,
+        conflict_files: Sequence[str] | None = None,
     ) -> tuple[str, str]:
         """Build the initial prompt for the agent.
 
         Returns (system_prompt_append, user_prompt) split by the
         USER_MESSAGE_MARKER in the workflow template.
+
+        ``conflict_files`` comes from the application layer (see
+        :meth:`run`) — rebase-reentry prompt decoration input.
         """
         if session.prompt_override:
             return "", session.prompt_override
@@ -637,7 +647,7 @@ class BackendRunner:
             session=session,
             previous_run_ids=session.previous_run_ids,
             previous_verification_error=session.previous_verification_error,
-            conflict_files=session.conflict_files,
+            conflict_files=conflict_files,
         )
         run_kind = getattr(session, "run_kind", "") or ""
         if run_kind in ("agent_followup", "review_retry", "review_followup"):

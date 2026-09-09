@@ -28,6 +28,7 @@ from orchestratord.db.models.issues import (
     IssueLabel,
     IssueStatusChange,
 )
+from orchestratord.db.models.peer import Peer
 from orchestratord.db.models.sessions import Approval, Event, Message, Run, Session
 from orchestratord.db.models.skills import Skill, SkillReference, SkillSourceMap
 from orchestratord.db.models.tenancy import Member, MemberAgentScope, Workspace
@@ -53,6 +54,7 @@ __all__ = [
     "Member",
     "MemberAgentScope",
     "Message",
+    "Peer",
     "Project",
     "ProjectDoc",
     "ProjectRepo",

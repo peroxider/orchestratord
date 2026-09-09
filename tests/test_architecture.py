@@ -13,12 +13,10 @@ time, so a broken import cannot hide a violated rule.
 Exemptions are registered explicitly with the count of import sites, the
 reason, and the phase that eliminates them (§7). The test fails both on
 undeclared violations *and* on stale registry entries, so the exemption
-list cannot rot silently:
-
-* backend_runner.py — Layer 1 执行器直接读取 session.conflict_files
-  （prompt 装饰透传，FIELD_READ_EXEMPTIONS，P4 消除）。import 域豁免
-  （approval_policy / git / VerificationFailed / TYPE_CHECKING Issue）
-  已随 P4 机制归位全部消除，EXEMPTIONS 现为空。
+list cannot rot silently. P4 结束时两个登记表均为空：import 域豁免
+（approval_policy / git / VerificationFailed / TYPE_CHECKING Issue）随
+机制归位消除；字段读取豁免（backend_runner conflict_files）改为应用侧
+显式传参（run(conflict_files=...)，DESIGN §4.2 prepare_run seam）后消除。
 """
 
 from __future__ import annotations
@@ -169,16 +167,7 @@ BUSINESS_ATTRS: frozenset[str] = frozenset(
     }
 )
 
-FIELD_READ_EXEMPTIONS: tuple[FieldReadExemption, ...] = (
-    FieldReadExemption(
-        file="backend_runner.py",
-        attr="conflict_files",
-        count=1,
-        reason="rebase 冲突文件作为 prompt 装饰参数透传 PromptBuilder.render_parts；"
-        "P4 prompt 装配随 prepare_run 迁应用侧后消除",
-        eliminated_in="P4",
-    ),
-)
+FIELD_READ_EXEMPTIONS: tuple[FieldReadExemption, ...] = ()
 
 
 def _iter_mechanism_trees():
@@ -321,3 +310,22 @@ def test_mechanism_paths_exist() -> None:
     """护栏扫描的目标路径必须真实存在，防止路径改名后规则静默失效。"""
     missing = [rel for rel in MECHANISM_PATHS if not (SRC_ROOT / rel).exists()]
     assert not missing, f"mechanism paths missing under {SRC_ROOT}: {missing}"
+
+
+def test_run_session_work_slot_is_subject() -> None:
+    """P6（DESIGN §4.3/:523）：RunSession 工作槽字段名为 ``subject``，
+    ``issue`` 只允许作为兼容 property 存在——数据字段面回归 issue
+    即为违例。"""
+    import dataclasses
+
+    from orchestratord.session_state import RunSession, RunSubject
+
+    names = {f.name for f in dataclasses.fields(RunSession)}
+    assert "subject" in names, "RunSession must carry the generic `subject` slot"
+    assert "issue" not in names, (
+        "RunSession.issue must stay a compat property (P6), never a dataclass field"
+    )
+    session = RunSession(subject=RunSubject(id="s1"), workspace=None)
+    assert session.issue is session.subject
+    session.issue = RunSubject(id="s2")
+    assert session.subject.id == "s2"
