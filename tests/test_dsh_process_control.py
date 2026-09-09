@@ -63,6 +63,19 @@ async def wait_until(predicate):
             await asyncio.sleep(.01)
 
 
+def _is_gone_or_zombie(proc: psutil.Process) -> bool:
+    """Return True if *proc* has exited or is a zombie.
+
+    Treat psutil probing errors (NoSuchProcess, AccessDenied) as the
+    process already having exited — these are TOCTOU races between the
+    PID being reaped and the status check.
+    """
+    try:
+        return not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initializing", [False, True])
 async def test_pause_resume_stop_reaches_detached_tools(tmp_path, monkeypatch, initializing):
@@ -97,7 +110,7 @@ async def test_pause_resume_stop_reaches_detached_tools(tmp_path, monkeypatch, i
         await controlled.pause()
         await asyncio.wait_for(controlled.close(), 2)
         await wait_until(lambda: all(
-            not p.is_running() or p.status() == psutil.STATUS_ZOMBIE for p in processes
+            _is_gone_or_zombie(p) for p in processes
         ))
         assert session._turn_task.done(), "SDK worker outlived a successful close"
         events = [event async for event in session.events()]
@@ -151,9 +164,16 @@ async def test_completed_session_flushes_before_cleaning_up_tools(tmp_path, monk
         root = psutil.Process(harness.client._proc.pid)
         processes = [root, *root.children(recursive=True)]
         await session.close()
+        # Deterministic sync: wait for the flush marker instead of relying
+        # on the relative timing between the worker thread and the cleanup
+        # path.  The 3s timeout ensures the test always fails fast if the
+        # shutdown flush never arrives (e.g. process killed before flush).
+        async with asyncio.timeout(3):
+            while flushed.read_text() != "flushed":
+                await asyncio.sleep(.01)
         assert flushed.read_text() == "flushed", "Normal completion lost SDK shutdown flush"
         await wait_until(lambda: all(
-            not p.is_running() or p.status() == psutil.STATUS_ZOMBIE for p in processes
+            _is_gone_or_zombie(p) for p in processes
         ))
     finally:
         for process in reversed(processes):

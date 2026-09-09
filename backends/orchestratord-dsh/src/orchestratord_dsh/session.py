@@ -257,15 +257,19 @@ class DshSession:
 
     def _resolve_provider_model(self) -> tuple[str, str]:
         """The (provider, model) pair for the runtime's initialize call."""
-        default_model = "deepseek-v4-flash"
+        from orchestratord_dsh.cordis_gen import (
+            DEFAULT_MODEL,
+            CordisConfigError,
+            resolve_route,
+        )
+
+        default_model = DEFAULT_MODEL
         providers = dict(self._spec.extra.get("providers") or {})
         if not providers:
             return (
                 self._spec.provider or "deepseek-official",
                 self._spec.model or default_model,
             )
-        from orchestratord_dsh.cordis_gen import CordisConfigError, resolve_route
-
         try:
             return resolve_route(
                 providers,
@@ -696,11 +700,15 @@ class DshSession:
     def close_sync(self) -> None:
         self._closed = True
         with self._lifecycle_lock:
+            # Always send the shutdown flush first so the runtime has a
+            # chance to persist any durable state before the process tree
+            # is killed.  Reordering this way ensures the flush completes
+            # before tool cleanup regardless of _turn_active timing.
+            if self._harness is not None:
+                self._harness.close()
+                self._harness = None
             if self._process_tree is not None and (
                 self._turn_active.is_set() or self._process_tree.frozen
             ):
                 self._process_tree.kill()
-            if self._harness is not None:
-                self._harness.close()
-                self._harness = None
             self._signal_process_ready()

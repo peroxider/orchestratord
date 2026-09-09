@@ -88,6 +88,46 @@ class StateMachineMixin:
             if record.next_retry_at is not None
         ]
 
+    def persist_retry_plan(
+        self,
+        issue_id: str,
+        *,
+        retry_count: int,
+        next_retry_at: float,
+    ) -> IssueRecord | None:
+        """Persist a scheduled retry plan on the registry record.
+
+        Public counterpart of the retry persistence that used to live in
+        the orchestrator (which reached into ``_save()`` directly).  A
+        waiting retry must survive daemon restarts: ``next_retry_at`` /
+        ``retry_count`` are what ``_recover_pending_retries`` reads back
+        to rebuild the in-memory retry queue.
+        """
+        record = self._records.get(issue_id)
+        if record is None:
+            return None
+        record.retry_count = retry_count
+        record.next_retry_at = next_retry_at
+        record.touch()
+        self._save()
+        return record
+
+    def clear_retry_plan(self, issue_id: str) -> IssueRecord | None:
+        """Clear a persisted retry plan (``next_retry_at``) — best-effort.
+
+        Called when the retry is consumed (launched), dropped by the
+        requeue ceiling, or cancelled by an operator stop/takeover.  A
+        non-``None`` ``next_retry_at`` is the only retry-plan marker, so
+        clearing it makes the record terminal again.
+        """
+        record = self._records.get(issue_id)
+        if record is None or record.next_retry_at is None:
+            return record
+        record.next_retry_at = None
+        record.touch()
+        self._save()
+        return record
+
     def records_by_status(self, status: IssueStatus) -> list[IssueRecord]:
         """Return all records currently in the given status."""
         return [record for record in self._records.values() if record.status == status]

@@ -69,6 +69,11 @@ _GENERATED_MARKER = (
 _RUNTIME_DEFAULT_CONTEXT_WINDOW = 262144
 _RUNTIME_DEFAULT_MAX_TOKENS = 32768
 
+# Default model for the stock deepseek-official adapter when no explicit
+# model is provided. Shared by backend._preflight_provider_routes and
+# session._resolve_provider_model so the literal never drifts.
+DEFAULT_MODEL = "deepseek-v4-flash"
+
 
 class CordisConfigError(RuntimeError):
     """Raised with an actionable message when a provider route table
@@ -192,6 +197,13 @@ def validate_providers(providers: dict[str, dict[str, Any]]) -> None:
     dropped. Static values are written verbatim to the generated cordis
     file, so operators must not place secrets in headers; credential-carrying
     headers should use the route's api_key / apiKeyEnv pipeline instead.
+
+    ``deepseek-official`` is rejected as a route name: the runtime
+    auto-mounts its stock adapter under that name, so a hand-declared
+    route would be half-respected (legacy credential chain, no
+    ``DSH_ROUTE_<NAME>_KEY`` injection, empty ``apiKeyEnv`` in the
+    generated cordis block) — the three-way special-case inconsistency
+    this function eliminates.
     """
     if not providers:
         raise CordisConfigError("provider route table is empty")
@@ -200,6 +212,19 @@ def validate_providers(providers: dict[str, dict[str, Any]]) -> None:
         if not isinstance(cfg, dict):
             raise CordisConfigError(
                 f"provider route '{route}': entry must be a mapping"
+            )
+        if route == "deepseek-official":
+            # The runtime auto-mounts its stock adapter under this name;
+            # a hand-declared route would be half-respected (legacy
+            # credential chain in backend/session, no DSH_ROUTE_*_KEY
+            # injection, empty apiKeyEnv in the generated cordis block).
+            # Reject it outright and point at the legacy configuration.
+            raise CordisConfigError(
+                f"provider route '{route}' is a reserved stock adapter "
+                "name — it cannot be redeclared under agent.providers. "
+                "The built-in adapter is always available: configure "
+                "agent.provider: deepseek-official with DEEPSEEK_API_KEY "
+                "(or agent.api_key), or rename the custom route."
             )
         api = cfg.get("api")
         if api is not None and api not in SUPPORTED_APIS:

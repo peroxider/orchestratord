@@ -542,3 +542,241 @@ async def test_recover_pending_retry_is_noop_without_plan(tmp_path: Path) -> Non
     orch._recover_pending_retries()
 
     assert orch._state.retry_queue == []
+
+
+# ---------------------------------------------------------------------------
+# #37 [O2+O3][MAJOR] retry 队列收不到 stop/takeover；takeover 是会被覆盖的
+# no-op。控制平面的核心承诺：操作者动作不可被自动重试推翻。
+#   - O2：issue 处于 retry_queue（等待 next_retry_at）时 stop/takeover 被
+#     running 门卫丢弃，重试到点照常触发。
+#   - O3：stop/takeover 分支不写 session_end_reason / takeover 不 cancel
+#     task，end_reason 不在 NON_RETRYABLE_END_REASONS 内被自动重试复活。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stop_on_retry_queue_cancels_pending_retry(tmp_path: Path) -> None:
+    """[O2] stop 文件在 issue 等待重试时必须生效。
+
+    A pending retry keeps the tracker issue open (GitCode cannot
+    reopen). The operator's stop must remove the queued retry (in-memory
+    item + persisted plan), record ``session_end_reason=operator_stop``
+    on the registry and close the tracker issue — the retry must never
+    fire later.
+    """
+    import asyncio
+    import time as _time
+
+    from orchestratord.session_state import RetryItem
+
+    orch = _orchestrator(tmp_path)
+    orch._state.max_concurrent_agents = 2
+    item = RetryItem(
+        issue_id="1",
+        attempt=1,
+        delay_seconds=300.0,
+        identifier="ISSUE-1",
+        scheduled_at=_time.time(),
+    )
+    orch._state.retry_queue = [item]
+    record = orch._registry.get("1")
+    assert record is not None
+    record.next_retry_at = _time.time() + 300.0
+    orch._registry._save()
+
+    tracker, calls = _tracker_recorder()
+    orch.tracker = tracker
+
+    orch._apply_control_command("stop", "1", "")
+    await asyncio.sleep(0)  # let the tracker-sync task run
+
+    # The queued retry must be gone — both in-memory and persisted.
+    assert orch._state.retry_queue == [], "stop must remove the queued retry"
+    assert record.next_retry_at is None, (
+        "stop must clear the persisted retry plan"
+    )
+    assert record.session_end_reason == "operator_stop"
+    # Tracker semantics: a pending retry keeps the issue open, so the
+    # operator stop must close it.
+    assert ("1", "failed") in calls, "stop must close the tracker issue"
+
+    # The retry must not fire later even after a queue pass.
+    launched: list[str] = []
+
+    async def _fake_launch(issue) -> None:
+        launched.append(issue.id)
+
+    orch._launch_issue = _fake_launch  # type: ignore[method-assign]
+    await orch._process_retry_queue()
+
+    assert launched == [], "cancelled retry must never launch"
+
+
+@pytest.mark.asyncio
+async def test_takeover_on_retry_queue_cancels_pending_retry(
+    tmp_path: Path,
+) -> None:
+    """[O2] takeover 对等待重试的 issue 同样必须生效。"""
+    import time as _time
+
+    from orchestratord.session_state import RetryItem
+
+    orch = _orchestrator(tmp_path)
+    orch._state.max_concurrent_agents = 2
+    item = RetryItem(
+        issue_id="1",
+        attempt=1,
+        delay_seconds=300.0,
+        identifier="ISSUE-1",
+        scheduled_at=_time.time(),
+    )
+    orch._state.retry_queue = [item]
+    record = orch._registry.get("1")
+    assert record is not None
+    record.next_retry_at = _time.time() + 300.0
+    orch._registry._save()
+
+    orch._apply_control_command("takeover", "1", "")
+
+    assert orch._state.retry_queue == [], (
+        "takeover must remove the queued retry"
+    )
+    assert record.next_retry_at is None, (
+        "takeover must clear the persisted retry plan"
+    )
+    assert record.session_end_reason == "operator_takeover"
+    assert orch._state.retry_attempts.get("1") is None
+
+
+@pytest.mark.asyncio
+async def test_stop_on_running_session_records_end_reason_and_cancels_task(
+    tmp_path: Path,
+) -> None:
+    """[O3] stop 必须写非重试 end_reason 并 cancel task。
+
+    Without the end_reason the runner completes normally, the status is
+    overwritten and the issue is auto-retried (stop → retry → stop loop).
+    """
+    import asyncio
+
+    orch = _orchestrator(tmp_path)
+
+    cancelled = asyncio.Event()
+
+    async def _run_until_cancelled() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(_run_until_cancelled())
+    # Let the task start running (await Event().wait()) before applying
+    # the control — otherwise task.cancel() on an unstarted task is
+    # handled at the task level without the coroutine body executing,
+    # so the except CancelledError block never fires.
+    await asyncio.sleep(0)
+    orch._issue_tasks = {"1": task}
+    session = SimpleNamespace(
+        issue=SimpleNamespace(id="1", identifier="ISSUE-1"),
+        status="running",
+        session_end_reason=None,
+        session_end_summary="",
+        pause_resume_event=asyncio.Event(),
+    )
+    orch._state.running["1"] = session
+
+    orch._apply_control_command("stop", "1", "")
+
+    assert session.status == "failed"
+    assert session.session_end_reason == "operator_stop"
+    await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    assert task.cancelled()
+
+    # The end reason must keep the issue out of the auto-retry loop.
+    await orch._schedule_retry(session)
+    assert orch._state.retry_queue == [], (
+        "operator_stop must not be auto-retried"
+    )
+
+
+@pytest.mark.asyncio
+async def test_takeover_on_running_session_cancels_task_and_skips_retry(
+    tmp_path: Path,
+) -> None:
+    """[O3] takeover 必须 cancel task 并写非重试 end_reason。
+
+    Historically takeover only set ``status`` and unblocked the pause
+    event: the runner completed normally and overwrote the status, and
+    the issue was auto-retried (end_reason not in
+    NON_RETRYABLE_END_REASONS).
+    """
+    import asyncio
+
+    orch = _orchestrator(tmp_path)
+
+    cancelled = asyncio.Event()
+
+    async def _run_until_cancelled() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    task = asyncio.create_task(_run_until_cancelled())
+    # Let the task start running (await Event().wait()) before applying
+    # the control — otherwise task.cancel() on an unstarted task is
+    # handled at the task level without the coroutine body executing,
+    # so the except CancelledError block never fires.
+    await asyncio.sleep(0)
+    orch._issue_tasks = {"1": task}
+    session = SimpleNamespace(
+        issue=SimpleNamespace(id="1", identifier="ISSUE-1"),
+        status="running",
+        session_end_reason=None,
+        session_end_summary="",
+        pause_resume_event=asyncio.Event(),
+    )
+    orch._state.running["1"] = session
+
+    orch._apply_control_command("takeover", "1", "")
+
+    assert session.status == "failed"
+    assert session.session_end_reason == "operator_takeover"
+    await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+    assert task.cancelled()
+
+    # The end reason must keep the issue out of the auto-retry loop.
+    await orch._schedule_retry(session)
+    assert orch._state.retry_queue == [], (
+        "operator_takeover must not be auto-retried"
+    )
+
+
+def test_non_retryable_end_reasons_defined_once() -> None:
+    """ST1: NON_RETRYABLE_END_REASONS 全库仅一处定义。
+
+    A duplicated definition regressed the operator-stop guard (the
+    runner's private copy did not contain the reason the control plane
+    wrote). Lock the single-definition invariant in a test.
+    """
+    import re
+
+    import orchestratord
+    from orchestratord import orchestrator as orch_module
+    from orchestratord.kernel.dispatch import NON_RETRYABLE_END_REASONS
+
+    pkg_root = Path(orchestratord.__file__).resolve().parent
+    pattern = re.compile(r"NON_RETRYABLE_END_REASONS\s*=\s*frozenset")
+    hits = [
+        str(path.relative_to(pkg_root))
+        for path in sorted(pkg_root.rglob("*.py"))
+        if pattern.search(path.read_text(encoding="utf-8"))
+    ]
+    assert hits == ["kernel/dispatch.py"], (
+        "NON_RETRYABLE_END_REASONS must be defined exactly once in "
+        f"kernel/dispatch.py, found: {hits}"
+    )
+    # The orchestrator must use the same object — not a private copy.
+    assert orch_module.NON_RETRYABLE_END_REASONS is NON_RETRYABLE_END_REASONS

@@ -256,6 +256,43 @@ def test_status_output_discloses_backend_and_issues(
     assert "Issues         : pending=1 · running=1 · completed=1" in out
 
 
+def test_slug_collision_does_not_cross_match_other_workspace(project: Path) -> None:
+    """Different workspaces may share a slug; `server stop` must not adopt
+    the other project's metadata just because the slug directory matches."""
+    from orchestratord.cli.server import _find_metadata, _slug_from_workspace
+    from orchestratord.workspace_locator import (
+        _slug_from_workspace as locator_slug,
+    )
+
+    # Two distinct workspace roots that collapse to the same slug because
+    # only the last 3 path segments are kept.  Both paths exist so
+    # get_workspace_root can resolve them.
+    ws_a = project / "corp-a" / "shared" / "team" / "repo"
+    ws_b = project / "corp-b" / "shared" / "team" / "repo"
+    ws_a.mkdir(parents=True)
+    ws_b.mkdir(parents=True)
+
+    # Write metadata for ws_a only.
+    md_a = write_orchestrator_metadata(ws_a)
+    slug = locator_slug(str(ws_a))
+
+    # Sanity: slugs really are identical.
+    assert slug == locator_slug(str(ws_b)) == _slug_from_workspace(str(ws_b))
+    assert md_a.parent.name == slug
+
+    # `server stop --workspace ws_b` must NOT resolve to ws_a's metadata —
+    # the slug path hit is only valid when workspace_root also matches.
+    args = SimpleNamespace(
+        workspace=str(ws_b), workflow=None, server_subcommand="stop"
+    )
+    found_path, found = _find_metadata(args)
+
+    assert found is None, (
+        f"slug collision cross-matched another project's metadata: "
+        f"stop for {ws_b} adopted {found_path}"
+    )
+
+
 def test_status_output_omits_new_lines_for_legacy_metadata(
     project: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

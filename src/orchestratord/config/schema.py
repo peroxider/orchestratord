@@ -1071,6 +1071,12 @@ class TelemetryConfig:
     Local event recording is always on (~/.orchestratord/telemetry/events/);
     this only controls the optional remote daily report. ``api_key`` left
     empty reuses the tracker's GitCode token from the workflow.
+
+    ``backfill_days`` widens each report sweep beyond today: an int N
+    covers the last N calendar days (days without a local events file are
+    skipped), the string ``"all"`` covers every day present locally. Days
+    that were never reported, or last reported before they ended (mid-day
+    upload), are backfilled/refreshed; complete days cost nothing.
     """
 
     reporting_enabled: bool = False
@@ -1079,6 +1085,17 @@ class TelemetryConfig:
     issue_title: str = "Orchestratord Telemetry"
     api_key: str = ""
     env_label: str = ""
+    backfill_days: int | str = 1
+
+
+def _parse_backfill_days(raw: Any) -> int | str:
+    """telemetry.backfill_days — int >= 1 (last N days) or the string "all"."""
+    if isinstance(raw, str) and raw.strip().lower() == "all":
+        return "all"
+    value = int(raw)
+    if value < 1:
+        raise ValueError("telemetry.backfill_days must be >= 1 or 'all'")
+    return value
 
 
 @dataclass
@@ -1596,6 +1613,7 @@ class WorkflowConfig:
                 ).strip(),
                 api_key=str(telemetry_raw.get("api_key", "")).strip(),
                 env_label=str(telemetry_raw.get("env_label", "")).strip(),
+                backfill_days=_parse_backfill_days(telemetry_raw.get("backfill_days", 1)),
             ),
             review_feedback=ReviewFeedbackConfig(
                 enabled=bool(review_feedback_raw.get("enabled", False)),

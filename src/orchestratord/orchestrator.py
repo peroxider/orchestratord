@@ -2414,6 +2414,7 @@ class Orchestrator:
             for fb in abandoned:
                 try:
                     await self.tracker.reply_to_pull_request_feedback(
+                        pull_request=pull_request,
                         feedback=fb,
                         body="（编排器）该检视经多次处理仍未解决——已放弃自动重试。"
                         "请人工确认或重新提出。",
@@ -3939,12 +3940,11 @@ class Orchestrator:
         # Persist the retry plan on the registry record so a
         # daemon restart cannot silently drop a waiting retry and
         # operators can see why nothing is running.
-        record = self._registry.get(issue_id)
-        if record is not None:
-            record.retry_count = attempt
-            record.next_retry_at = retry.scheduled_at + retry.delay_seconds
-            record.touch()
-            self._registry._save()
+        self._registry.persist_retry_plan(
+            issue_id,
+            retry_count=attempt,
+            next_retry_at=retry.scheduled_at + retry.delay_seconds,
+        )
         logger.info(
             "Scheduled retry issue_id=%s attempt=%s delay=%sms",
             issue_id,
@@ -4117,11 +4117,7 @@ class Orchestrator:
 
     def _clear_retry_plan(self, issue_id: str) -> None:
         """Clear ``next_retry_at`` on the registry record (best-effort)."""
-        record = self._registry.get(issue_id)
-        if record is not None and record.next_retry_at is not None:
-            record.next_retry_at = None
-            record.touch()
-            self._registry._save()
+        self._registry.clear_retry_plan(issue_id)
 
     async def _process_retry_queue(self) -> None:
         """Process retry queue with exponential backoff.
@@ -4763,6 +4759,32 @@ class Orchestrator:
                 {"pr": record.pr_url},
             )
 
+    def _cancel_pending_retry(self, issue_id: str) -> bool:
+        """Cancel any pending auto-retry for ``issue_id``.
+
+        Removes the issue from the in-memory retry queue and clears the
+        persisted retry plan on the registry record.  Returns ``True``
+        when a pending retry actually existed and was cancelled.
+
+        Used by stop/takeover control commands so an operator action is
+        never defeated by an already-scheduled auto-retry.
+        """
+        in_queue = False
+        retry_queue = getattr(self._state, "retry_queue", None)
+        if retry_queue is not None:
+            in_queue = any(r.issue_id == issue_id for r in retry_queue)
+            if in_queue:
+                self._state.retry_queue = [
+                    r for r in retry_queue if r.issue_id != issue_id
+                ]
+        if hasattr(self, "_registry") and hasattr(self._registry, "get"):
+            record = self._registry.get(issue_id)
+            had_plan = record is not None and record.next_retry_at is not None
+            if had_plan:
+                self._registry.clear_retry_plan(issue_id)
+            return in_queue or had_plan
+        return in_queue
+
     def _apply_control_command(self, cmd: str, issue_id: str, extra: str) -> None:
         """Apply a control command, including retries outside running sessions."""
         if cmd == "retry":
@@ -4774,6 +4796,47 @@ class Orchestrator:
                 return
             loop.create_task(self._sync_tracker_issue_state(issue_id, "open"))
             return
+
+        # Terminal operator commands (stop / takeover) must defeat any
+        # pending auto-retry.  An issue waiting in ``retry_queue`` is
+        # not in ``running`` — the running-session branch below would
+        # silently drop the command while the persisted plan still fired
+        # at ``next_retry_at``.  The operator's action must cancel the
+        # queued retry, persist the end reason, and close the tracker
+        # issue so the retry never fires.
+        if cmd in ("stop", "takeover") and issue_id:
+            end_reason = "operator_stop" if cmd == "stop" else "operator_takeover"
+            cancelled = self._cancel_pending_retry(issue_id)
+            if cancelled:
+                logger.info(
+                    "Control %s cancelled pending retry for issue %s",
+                    cmd,
+                    issue_id,
+                )
+                self._registry.update_report(
+                    issue_id,
+                    session_end_reason=end_reason,
+                    session_end_summary=f"operator requested {cmd} while issue was waiting for retry",
+                )
+                self._state.claimed.discard(issue_id)
+                retry_attempts = getattr(self._state, "retry_attempts", None)
+                if retry_attempts is not None:
+                    retry_attempts.pop(issue_id, None)
+                self._emit_im_event(
+                    issue_id,
+                    f"control.{cmd}",
+                    EventLevel.WARN,
+                    f"{cmd} requested (pending retry cancelled)",
+                )
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None:
+                    loop.create_task(
+                        self._sync_tracker_issue_state(issue_id, "failed")
+                    )
+                return
 
         if not issue_id or issue_id not in self._state.running:
             logger.debug("Control %s for unknown issue %s", cmd, issue_id)
@@ -4793,10 +4856,18 @@ class Orchestrator:
             # Restore running state in the registry.
             self._registry.mark_resumed(issue_id)
         elif cmd == "stop":
-            # Request cancellation via task cancel
+            # Terminal operator action: record the end reason so the
+            # auto-retry loop (which keys off NON_RETRYABLE_END_REASONS)
+            # leaves the issue alone, cancel the running task, and drop
+            # any scheduled retry (defensive — the item should already
+            # have been removed by the retry-queue check above, but
+            # there is a small window between launch and task start).
             logger.info("Stop requested for issue %s", issue_id)
             session.status = "failed"
+            session.session_end_reason = "operator_stop"
+            session.session_end_summary = "operator requested stop"
             session.pause_resume_event.set()  # Unblock if paused
+            self._cancel_pending_retry(issue_id)
             self._emit_im_event(issue_id, "control.stop", EventLevel.WARN, "stop requested")
             # Root-cause fix: cancel the asyncio task so the
             # CancelledError handler in _run_issue fires immediately
@@ -4807,11 +4878,25 @@ class Orchestrator:
                 task.cancel()
                 logger.info("Cancelled task for issue %s", issue_id)
         elif cmd == "takeover":
+            # Same terminal semantics as stop — record the end reason,
+            # cancel the running task, and drop any scheduled retry.
+            # Without the end_reason the runner completes normally, the
+            # status is overwritten, and the issue is auto-retried.
             logger.info("Takeover requested for issue %s", issue_id)
             session.status = "failed"
+            session.session_end_reason = "operator_takeover"
+            session.session_end_summary = "operator requested takeover"
             session.pause_resume_event.set()  # Unblock if paused
+            self._cancel_pending_retry(issue_id)
             self._emit_im_event(issue_id, "control.takeover", EventLevel.WARN, "takeover requested")
-            # Note: REPL takeover requires full session context - handled separately
+            # Root-cause fix: cancel the asyncio task so the
+            # CancelledError handler in _run_issue fires immediately
+            # instead of leaving the agent running until the next
+            # session end check.
+            task = self._issue_tasks.get(issue_id)
+            if task is not None and not task.done():
+                task.cancel()
+                logger.info("Cancelled task for issue %s", issue_id)
 
     def get_event_stream(self, issue_id: str) -> "asyncio.Queue | None":
         """Get the event queue for a running issue session (for CLI tail)."""

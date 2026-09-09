@@ -361,8 +361,92 @@ def _resolve_application_class(name: str) -> type:
 
 
 def _find_metadata(args: argparse.Namespace) -> tuple[Path | None, dict | None]:
-    """Compatibility adapter for the shared server service."""
-    return _call_shared("_find_metadata", args)
+    """Resolve orchestrator metadata.
+
+    Returns (metadata_path, metadata_dict) or (None, None) if not found.
+    """
+    from orchestratord.workspace_locator import (
+        _find_latest_metadata,
+        get_workspace_root,
+    )
+
+    # 0. 多项目歧义检测：无显式参数且有多个存活项目时提示
+    if not getattr(args, "workspace", None) and not getattr(args, "workflow", None):
+        from orchestratord.workspace_locator import (
+            get_live_projects,
+            print_multi_project_hint,
+        )
+
+        live = get_live_projects()
+        if len(live) > 1:
+            subcmd = getattr(args, "server_subcommand", "server")
+            print_multi_project_hint(live, f"orchestrator server {subcmd}")
+            return None, None
+
+    # Priority: explicit --workspace > --workflow > env var > latest metadata
+    workspace_root = get_workspace_root(
+        workspace_arg=getattr(args, "workspace", None),
+        workflow_path=getattr(args, "workflow", None),
+    )
+    if workspace_root:
+        # The daemon may have stored a relative workspace_root in
+        # legacy metadata; compare resolved paths so `--workspace
+        # ./workspace` matches "workspace" when CWDs align.
+        workspace_root_str = str(workspace_root)
+
+        def _same_root(stored: str | None) -> bool:
+            if not stored:
+                return False
+            if stored == workspace_root_str:
+                return True
+            try:
+                return Path(stored).resolve() == Path(workspace_root_str).resolve()
+            except OSError:
+                return False
+
+        slug = _slug_from_workspace(workspace_root_str)
+        metadata_path = ORCHESTRATORD_ORCHESTRATOR_DIR / slug / "metadata.json"
+        if metadata_path.exists():
+            import json
+
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                # Slug is a lossy index (only the last 3 path segments); a
+                # different workspace may share the same slug.  Verify the
+                # stored workspace_root before adopting the metadata, or fall
+                # through to the full scan below.
+                if _same_root(data.get("workspace_root")):
+                    return metadata_path, data
+            except Exception:
+                pass
+        # Fallback: search by workspace_root matching
+        if ORCHESTRATORD_ORCHESTRATOR_DIR.exists():
+            for md_dir in ORCHESTRATORD_ORCHESTRATOR_DIR.iterdir():
+                mf = md_dir / "metadata.json"
+                if mf.exists():
+                    import json
+
+                    try:
+                        data = json.loads(mf.read_text(encoding="utf-8"))
+                        if _same_root(data.get("workspace_root")):
+                            return mf, data
+                    except Exception:
+                        pass
+
+    # Fallback: latest metadata (only when no explicit --workspace/--workflow)
+    has_explicit = getattr(args, "workspace", None) or getattr(args, "workflow", None)
+    if not has_explicit:
+        latest = _find_latest_metadata()
+        if latest and latest.exists():
+            import json
+
+            try:
+                data = json.loads(latest.read_text(encoding="utf-8"))
+                return latest, data
+            except Exception:
+                pass
+
+    return None, None
 
 
 def _slug_from_workspace(ws_str: str) -> str:
