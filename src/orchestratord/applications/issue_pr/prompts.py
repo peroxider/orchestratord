@@ -75,6 +75,9 @@ Current task:
 - Do not expand scope or reimplement unrelated issue requirements.
 - Work on the current branch only; do not create a new branch or pull request.
 - Prefer the smallest correct change that addresses the feedback.
+- Commit your fixes as new commits appended on the existing branch.
+- Do NOT rewrite already-pushed history: `git commit --amend`, `git rebase`, or any other history-rewriting operation is forbidden.
+- The branch is already pushed and linked to the PR; rewriting its history would create a non-fast-forward fork that a plain push could not reach.
 - If feedback is conflicting or unclear, leave code unchanged for that item and explain what clarification is needed.
 - Run relevant tests or record why they cannot be run.
 - CLI Usage: when suggesting terminal commands, use `orchestratord` not `python3 -c` or `PYTHONPATH=`.
