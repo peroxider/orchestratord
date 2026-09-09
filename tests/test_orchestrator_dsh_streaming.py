@@ -22,6 +22,7 @@ import asyncio
 import time
 import unittest
 from types import SimpleNamespace
+from typing import Any
 
 from orchestratord_dsh.backend import DshBackend
 from orchestratord_dsh.session import DshSession
@@ -228,6 +229,168 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         t0 = time.monotonic()
         await asyncio.wait_for(session.close(), timeout=2.0)
         self.assertLess(time.monotonic() - t0, 2.0)
+
+    async def test_streaming_output_text_is_not_duplicated(self) -> None:
+        """Deltas + full message must not double-write output_text.
+
+        The SDK streams assistant/chunk TEXT_DELTA frames first and then
+        re-delivers the same text as a complete assistant/message TEXT
+        event.  Both shapes land in ``session.output_text`` — without
+        dedup the same turn renders as ``"HelloHello"`` instead of
+        ``"Hello"``.  This pins the total count of text events reaching
+        the progress sink as well (exactly the two deltas, no TEXT).
+        """
+        harness = FakeHarness(_script())
+        session = DshSession(_spec(), harness_factory=lambda: harness)
+
+        await session.send("task")
+        output_text = ""
+        sink = _TextSink()
+        async for ev in session.events():
+            if ev.kind is EventKind.TEXT:
+                text = ev.payload.get("text", "")
+                sink.on_text(text)
+                output_text += text
+            elif ev.kind is EventKind.TEXT_DELTA:
+                text = ev.payload.get("text", "") or ev.payload.get("delta", "")
+                sink.on_text_delta(text)
+                output_text += text
+
+        # Regression (#36): the complete message must not re-emit what
+        # chunks already streamed.
+        self.assertEqual(
+            output_text,
+            "Hello",
+            f"output_text was double-written: {output_text!r}",
+        )
+        self.assertEqual(
+            [kind for kind, _ in sink.text_events],
+            ["text_delta", "text_delta"],
+            "progress sink must see exactly the two TEXT_DELTA events, "
+            "no duplicate TEXT",
+        )
+        await session.close()
+
+    async def test_pure_assistant_message_without_chunks_emits_text(self) -> None:
+        """A message that never streamed deltas must still emit TEXT.
+
+        The dedup contract only skips the full TEXT for messages whose
+        deltas were already forwarded; a pure ``assistant/message``
+        (no preceding ``assistant/chunk``) is the only TEXT the core
+        would ever see for that turn.
+        """
+        harness = FakeHarness(
+            [
+                (0.0, {"type": "assistant/message", "data": {"message": {"content": [{"type": "text", "text": "Hello"}]}}}),
+                (0.0, {"type": "turn/end", "data": {"reason": {"kind": "completed"}}}),
+            ]
+        )
+        session = DshSession(_spec(), harness_factory=lambda: harness)
+
+        await session.send("task")
+        text_events = [
+            (ev.kind, ev.payload.get("text", ""))
+            async for ev in session.events()
+            if ev.kind in (EventKind.TEXT, EventKind.TEXT_DELTA)
+        ]
+        self.assertEqual(
+            text_events,
+            [(EventKind.TEXT, "Hello")],
+            "pure assistant/message must emit exactly one TEXT event",
+        )
+        await session.close()
+
+    async def test_runner_consumes_streaming_events_without_double_write(self) -> None:
+        """BackendRunner must fold the dsh stream into output_text once.
+
+        Runner-level regression (#36): the real dsh session (streaming
+        fixture) drives ``BackendRunner._process_events`` end to end —
+        the core sees the same event stream it would in production and
+        must land ``output_text == "Hello"`` (not "HelloHello") while
+        the progress sink sees exactly two TEXT_DELTA pushes.
+        """
+        from orchestratord.backend_runner import BackendRunner
+
+        runner = object.__new__(BackendRunner)
+        runner._check_file_changes = lambda *_args: _changed()  # type: ignore[method-assign]
+        sink = _TextSink()
+        session = SimpleNamespace(
+            turn_count=0,
+            tool_count=0,
+            status="running",
+            output_text="",
+            session_end_reason=None,
+            session_end_summary=None,
+            control_socket=None,
+            created_at=time.time(),
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            paused=False,
+            last_agent_event=None,
+            last_tool_name=None,
+            cost_usd=0.0,
+            token_usage={},
+            backend_error_detail=None,
+            backend_session_id=None,
+            run_id="run-test",
+            workspace=SimpleNamespace(path="/tmp"),
+            issue=SimpleNamespace(id="test-issue"),
+        )
+
+        # Real dsh session: the turn runs in a worker thread and events
+        # flow through the notification pump into the runner's loop.
+        harness = FakeHarness(_script())
+        spi_session = DshSession(_spec(), harness_factory=lambda: harness)
+        await spi_session.send("task")
+
+        await runner._process_events(
+            spi_session,
+            session,
+            {},
+            None,
+            None,
+            None,
+            sink,
+        )
+
+        self.assertEqual(
+            session.output_text,
+            "Hello",
+            f"runner output_text was double-written: {session.output_text!r}",
+        )
+        self.assertEqual(
+            [kind for kind, _ in sink.text_events],
+            ["text_delta", "text_delta"],
+            "progress sink must see exactly the two TEXT_DELTA events",
+        )
+        self.assertEqual(session.status, "completed")
+        await spi_session.close()
+
+
+class _TextSink:
+    """Progress-sink double: records text events the runner pushes."""
+
+    def __init__(self) -> None:
+        self.text_events: list[tuple[str, str]] = []
+        self.turn_events: list[tuple[Any, Any]] = []
+        self.completions: list[Any] = []
+
+    def on_text(self, text: str) -> None:
+        self.text_events.append(("text", text))
+
+    def on_text_delta(self, text: str) -> None:
+        self.text_events.append(("text_delta", text))
+
+    def on_turn_complete(self, event: Any, session: Any) -> None:
+        self.turn_events.append((event, session))
+
+    def on_session_complete(self, event: Any, session: Any) -> None:
+        self.completions.append((event, session))
+
+
+async def _changed() -> bool:
+    return True
 
 
 def test_session_id_fallback_is_uuid_backed() -> None:
