@@ -49,24 +49,28 @@ class _FakeApi:
         self.patched: list[tuple[int, str]] = []
         self._next_number = 101
 
-    def __call__(self, url: str, *, api_key: str, method: str = "GET", body: dict | None = None) -> Any:
+    def __call__(
+        self, url: str, *, api_key: str, method: str = "GET", body: dict | None = None
+    ) -> Any:
+        from orchestratord.telemetry.reporters.issue import _ApiResult
+
         if method == "GET":
             # Existing open issues mirror what we created, so find-or-create
             # reuses the same issue number on refresh sweeps.
-            return [
+            return _ApiResult(data=[
                 {"title": title, "number": 101 + i}
                 for i, title in enumerate(self.created)
-            ]
+            ])
         if method == "POST":
             number = self._next_number
             self._next_number += 1
             self.created.append(body["title"])
-            return {"number": number}
+            return _ApiResult(data={"number": number})
         if method == "PATCH":
             issue_number = int(url.rsplit("/", 1)[-1])
             self.patched.append((issue_number, body["body"]))
-            return {"ok": True}
-        return None
+            return _ApiResult(data={"ok": True})
+        return _ApiResult(data={})
 
 
 @pytest.fixture
@@ -334,3 +338,52 @@ def test_cli_report_prints_per_day_results(
     assert "✓ 2026-09-01: issue #7 updated" in capsys.readouterr().out
     assert seen["days"] == "all"
     assert seen["title"] == "Orchestratord Telemetry"
+
+
+# ── GitCodeIssueClient (ST10) ─────────────────────────────────────────
+
+
+def test_issue_client_returns_explicit_error_on_failure(monkeypatch) -> None:
+    """ST10: the client models API failures as an explicit _ApiResult
+    instead of a sentinel dict, and find_or_create/update honor it."""
+    from orchestratord.telemetry.reporters.issue import _ApiResult
+
+    def _fail(url, *, api_key, method="GET", body=None):
+        return _ApiResult(error="boom", http_code=500)
+
+    monkeypatch.setattr("orchestratord.telemetry.reporters.issue._api", _fail)
+    from orchestratord.telemetry.reporters.issue import GitCodeIssueClient
+
+    client = GitCodeIssueClient(owner="o", repo="r", api_key="k")
+    assert client.find_or_create("Tel 2026-09-01") is None
+    assert client.update(101, "body") is False
+
+
+def test_issue_client_builds_repo_url_from_owner_repo(monkeypatch) -> None:
+    """ST10: the client builds the repos/{owner}/{repo}/issues URL once
+    from its constructor args, not scattered across call sites."""
+    from orchestratord.telemetry.reporters.issue import _ApiResult
+
+    seen: list[tuple[str, str]] = []
+
+    def _fake(url, *, api_key, method="GET", body=None):
+        seen.append((url, method))
+        if method == "GET":
+            return _ApiResult(data=[])
+        if method == "POST":
+            return _ApiResult(data={"number": 42})
+        return _ApiResult(data={})
+
+    monkeypatch.setattr("orchestratord.telemetry.reporters.issue._api", _fake)
+    from orchestratord.telemetry.reporters.issue import GitCodeIssueClient
+
+    client = GitCodeIssueClient(owner="o", repo="r", api_key="k")
+    assert client.find_or_create("Tel 2026-09-01") == 42
+    assert client.update(42, "body") is True
+
+    base = "https://api.gitcode.com/api/v5/repos/o/r"
+    assert seen == [
+        (base + "/issues?state=open&per_page=100", "GET"),
+        (base + "/issues", "POST"),
+        (base + "/issues/42", "PATCH"),
+    ]

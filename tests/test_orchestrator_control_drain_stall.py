@@ -165,6 +165,48 @@ async def test_pause_blocks_backend_events_until_resume() -> None:
     assert session.output_text == "must wait for resume"
 
 
+@pytest.mark.asyncio
+async def test_handle_pause_gate_holds_and_reports_paused_duration() -> None:
+    """ST11: the extracted pause gate must block while paused and return
+    the paused wall time (for clock correction) plus the stop flag."""
+    session = _agent_session(with_stop=False)
+    session.paused = True
+
+    async def _resume() -> None:
+        await asyncio.sleep(0.3)
+        session.paused = False
+
+    resume_task = asyncio.create_task(_resume())
+    paused_for, stop_requested = await _runner()._handle_pause_gate(
+        _StalledSpiSession(0.0), session
+    )
+    await resume_task
+
+    assert stop_requested is False
+    assert paused_for >= 0.25
+
+
+@pytest.mark.asyncio
+async def test_handle_pause_gate_reports_stop_while_paused() -> None:
+    """ST11: a stop arriving during pause must surface as the stop flag so
+    the caller can break the event loop."""
+    session = _agent_session(with_stop=False)
+    session.paused = True
+
+    async def _stop() -> None:
+        await asyncio.sleep(0.2)
+        session.control_socket._command_queue.put_nowait(ControlCommand(cmd="stop"))
+
+    stop_task = asyncio.create_task(_stop())
+    paused_for, stop_requested = await _runner()._handle_pause_gate(
+        _ImmediateSpiSession(), session
+    )
+    await stop_task
+
+    assert stop_requested is True
+    assert paused_for >= 0.15
+
+
 def _timeouts(**overrides: float) -> dict[str, float]:
     base = {
         "total": 30.0,

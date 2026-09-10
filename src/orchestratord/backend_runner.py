@@ -584,8 +584,8 @@ class BackendRunner:
                     "duration_ms": (time.monotonic() - run_started) * 1000,
                 },
             })
-            # Always flush telemetry after the run.
-            self._telemetry_flush()
+            # Telemetry is appended immediately (no buffered flush), so
+            # there is nothing to flush here.
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1383,14 +1383,9 @@ class BackendRunner:
             # poll tick, and operator-paused time does not consume run timeout
             # budgets.
             if getattr(session, "paused", False):
-                pause_started = time.monotonic()
-                stop_while_paused = False
-                while getattr(session, "paused", False):
-                    await asyncio.sleep(_EVENT_POLL_INTERVAL)
-                    if await self._drain_backend_controls(spi_session, session):
-                        stop_while_paused = True
-                        break
-                paused_for = time.monotonic() - pause_started
+                paused_for, stop_while_paused = await self._handle_pause_gate(
+                    spi_session, session
+                )
                 run_start += paused_for
                 last_event_monotonic += paused_for
                 paused_total_s += paused_for
@@ -1976,6 +1971,32 @@ class BackendRunner:
             except Exception:
                 logger.debug("final diagnostics_callback failed", exc_info=True)
 
+    async def _handle_pause_gate(
+        self, spi_session: Any, session: AgentSession
+    ) -> tuple[float, bool]:
+        """Hold the event stream while the session is operator-paused.
+
+        Pause is a control-plane gate, not merely registry metadata. The
+        current event is held and no further backend events are requested
+        until resume arrives. Stop remains serviceable on every poll
+        tick, and operator-paused time does not consume run timeout budgets.
+
+        Returns ``(paused_seconds, stop_requested)``. The caller must
+        advance its monotonic clocks (``run_start`` / ``last_event_monotonic``
+        / ``turn_start_monotonic``) by ``paused_seconds`` so paused wall
+        time is excluded from timeout budgets, and break the loop when
+        ``stop_requested`` is true.
+        """
+        pause_started = time.monotonic()
+        stop_while_paused = False
+        while getattr(session, "paused", False):
+            await asyncio.sleep(_EVENT_POLL_INTERVAL)
+            if await self._drain_backend_controls(spi_session, session):
+                stop_while_paused = True
+                break
+        paused_for = time.monotonic() - pause_started
+        return paused_for, stop_while_paused
+
     @staticmethod
     async def _drain_backend_controls(spi_session: Any, session: AgentSession) -> bool:
         """Confirm native execution control before publishing a state change."""
@@ -2161,18 +2182,3 @@ class BackendRunner:
                 exc_info=True,
             )
             return True
-
-    # ------------------------------------------------------------------
-    # Telemetry
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _telemetry_flush() -> None:
-        """Flush telemetry after a run, best-effort.
-
-        Orchestratord telemetry appends events immediately (no buffered
-        flush) and records locally regardless of remote-reporting config,
-        so there is nothing to flush here. Kept as a no-op so existing call
-        sites stay intact.
-        """
-        return
