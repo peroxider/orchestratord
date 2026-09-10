@@ -170,6 +170,10 @@ class IntentMixin:
         record.pr_url = None
         # A deliberate retry restarts the "first PR created" clock.
         record.pr_created_at = None
+        # PR state cache is invalidated together with the PR metadata:
+        # a stale ``pr_state`` (e.g. "merged") must not block the new
+        # PR created by the retry from PR-conflict scanning.
+        record.pr_state = None
         record.report_path = None
         record.summary_comment_id = None
         record.verification_status = None

@@ -695,6 +695,111 @@ class TestProcessPrConflictScan(unittest.IsolatedAsyncioTestCase):
             # None from tracker → daemon scan is a no-op on GitCode.
             orch._process_rebase_intent.assert_not_called()
 
+    async def test_merged_pr_cached_state_skips_without_fetch(self) -> None:
+        """Cached ``pr_state=\"merged\"`` → zero-cost skip (no fetch, no rebase)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg = _make_registry_record(tmp_path, has_conflict=False)
+            reg.get("7").pr_state = "merged"
+            reg._save()
+            workflow = WorkflowConfig()
+            workflow.pr_conflict_scan = PrConflictScanConfig(enabled=True)
+            tracker = MagicMock()
+            tracker.fetch_pull_request_mergeable = AsyncMock()
+            orch = _make_orchestrator(tracker=tracker, registry=reg, workflow=workflow)
+            orch._process_rebase_intent = AsyncMock()
+            await orch._process_pr_conflict_scan()
+            # The cached state filter must kick in before the remote fetch:
+            # a merged PR is never probed again, so no rebase intent and no
+            # rate-limit quota burned.
+            tracker.fetch_pull_request_mergeable.assert_not_called()
+            orch._process_rebase_intent.assert_not_called()
+
+    async def test_merged_pr_detected_from_payload_skips_rebase(self) -> None:
+        """Fetched payload with ``state=\"closed\"`` + ``merged=True`` skips rebase
+        and writes ``pr_state=\"merged\"`` back to the registry record."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg = _make_registry_record(tmp_path, has_conflict=False)
+            workflow = WorkflowConfig()
+            workflow.pr_conflict_scan = PrConflictScanConfig(enabled=True)
+            tracker = MagicMock()
+            # GitCode returns "not mergeable" for a merged PR → previously
+            # misjudged as a conflict → repeated rebase attempts.
+            merged_status = MergeableStatus(
+                mergeable=False,
+                has_conflicts=True,
+                raw={
+                    "platform": "github",
+                    "payload": {"state": "closed", "merged": True, "mergeable": False},
+                },
+            )
+            tracker.fetch_pull_request_mergeable = AsyncMock(return_value=merged_status)
+            tracker.fetch_issue_states_by_ids = AsyncMock(return_value={})
+            orch = _make_orchestrator(tracker=tracker, registry=reg, workflow=workflow)
+            orch._process_rebase_intent = AsyncMock()
+            await orch._process_pr_conflict_scan()
+            orch._process_rebase_intent.assert_not_called()
+            reloaded = IssueRegistry(tmp_path / "r.json")
+            self.assertEqual(reloaded.get("7").pr_state, "merged")
+
+    async def test_open_conflicting_pr_still_rebased(self) -> None:
+        """Open + genuinely conflicting PR is still scanned and rebased."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg = _make_registry_record(tmp_path, has_conflict=False)
+            workflow = WorkflowConfig()
+            workflow.pr_conflict_scan = PrConflictScanConfig(enabled=True)
+            tracker = MagicMock()
+            conflict_status = MergeableStatus(
+                mergeable=False,
+                mergeable_state="dirty",
+                has_conflicts=True,
+                behind_by=2,
+                raw={
+                    "platform": "github",
+                    "payload": {"state": "open", "mergeable": False, "mergeable_state": "dirty"},
+                },
+            )
+            tracker.fetch_pull_request_mergeable = AsyncMock(return_value=conflict_status)
+            issue = _make_issue()
+            tracker.fetch_issue_states_by_ids = AsyncMock(return_value={"7": issue})
+            orch = _make_orchestrator(tracker=tracker, registry=reg, workflow=workflow)
+            orch._process_rebase_intent = AsyncMock()
+            await orch._process_pr_conflict_scan()
+            orch._process_rebase_intent.assert_awaited_once()
+            reloaded = IssueRegistry(tmp_path / "r.json")
+            self.assertEqual(reloaded.get("7").pr_state, "open")
+
+    async def test_terminal_issue_state_skips_rebase(self) -> None:
+        """Anti-race guard: an issue already in a terminal tracker state is
+        not rebased even when its PR reports conflicts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            reg = _make_registry_record(tmp_path, has_conflict=False)
+            workflow = WorkflowConfig()
+            workflow.pr_conflict_scan = PrConflictScanConfig(enabled=True)
+            tracker = MagicMock()
+            conflict_status = MergeableStatus(
+                mergeable=False,
+                mergeable_state="dirty",
+                has_conflicts=True,
+                behind_by=2,
+                raw={
+                    "platform": "github",
+                    "payload": {"state": "open", "mergeable": False, "mergeable_state": "dirty"},
+                },
+            )
+            tracker.fetch_pull_request_mergeable = AsyncMock(return_value=conflict_status)
+            tracker.terminal_states = ["closed"]
+            closed_issue = _make_issue()
+            closed_issue.state = "closed"
+            tracker.fetch_issue_states_by_ids = AsyncMock(return_value={"7": closed_issue})
+            orch = _make_orchestrator(tracker=tracker, registry=reg, workflow=workflow)
+            orch._process_rebase_intent = AsyncMock()
+            await orch._process_pr_conflict_scan()
+            orch._process_rebase_intent.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # _launch_rebase_resolution (completion handling)

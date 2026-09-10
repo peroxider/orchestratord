@@ -25,6 +25,7 @@ from orchestratord.status_dashboard import SessionStatus
 from orchestratord.tracker import (
     CommandIntentCapability,
     Intent,
+    MergeableStatus,
     PullRequestFeedback,
     PullRequestFeedbackCapability,
     PullRequestMaintenanceCapability,
@@ -719,6 +720,41 @@ class IssuePrInterpretation:
 
             task.add_done_callback(_finalize_rebase_callback)
 
+    def _extract_pr_state(self, status: MergeableStatus) -> str:
+        """Extract the remote PR ``state`` from a mergeable fetch payload.
+
+        Returns ``""`` when the payload does not expose a state (e.g. the
+        GitCode JS-rendered fallback) so callers can treat it as "unknown"
+        and keep scanning. ``closed`` PRs with ``merged: true`` are
+        normalized to ``"merged"`` so the registry records the semantic
+        state instead of the raw GitHub value.
+        """
+        raw = getattr(status, "raw", None)
+        payload = raw.get("payload", {}) if isinstance(raw, dict) else {}
+        if not isinstance(payload, dict):
+            return ""
+        state = str(payload.get("state") or "").strip().lower()
+        if state == "closed" and payload.get("merged"):
+            return "merged"
+        return state
+
+    def _is_terminal_issue_state(self, state: str | None) -> bool:
+        """True when the tracker reports the issue in a terminal state.
+
+        Uses the tracker adapter's ``terminal_states`` vocabulary when
+        available (list of strings, e.g. ``["closed"]`` for GitHub /
+        ``["Done", "Cancelled", ...]`` for Linear); returns False for
+        unknown / unset states so the daemon never blocks a legitimate
+        rebase on a missing vocabulary.
+        """
+        if not state or not state.strip():
+            return False
+        terminal_states = getattr(self.tracker, "terminal_states", None)
+        if not isinstance(terminal_states, (list, tuple)):
+            return False
+        normalized = {s.strip().lower() for s in terminal_states if s.strip()}
+        return state.strip().lower() in normalized
+
     async def _process_pr_conflict_scan(self) -> None:
         """Optional daemon scan of PR mergeable state.
 
@@ -767,10 +803,32 @@ class IssuePrInterpretation:
                     exc,
                 )
                 continue
-            if status is None or not status.has_conflicts:
+            if status is None:
+                continue
+            # 从 PR 详情载荷中取真实状态（open/closed/merged）并写回 registry：
+            # 非 open（如已合并/已关闭）的 PR 后续周期零成本跳过，不再反复
+            # 探测 mergeable、烧限流配额。仅当载荷带 state 时才写回，避免
+            # 覆盖已有记录。
+            remote_pr_state = self._extract_pr_state(status)
+            if remote_pr_state:
+                if record.pr_state != remote_pr_state:
+                    record.pr_state = remote_pr_state
+                    self._registry._save()
+                if remote_pr_state not in cfg.scan_states:
+                    continue
+            if not status.has_conflicts:
                 continue
             issue = await self.tracker.fetch_issue_states_by_ids([issue_id])
             issue_obj = issue.get(issue_id) if issue else None
+            # 防竞态：rebase intent 触发前再校验一次 issue 的 tracker 状态
+            # 非终态（扫描期间 issue 可能已被关闭/完成）。
+            if issue_obj is not None and self._is_terminal_issue_state(issue_obj.state):
+                logger.info(
+                    "Issue %s in terminal tracker state %r, skipping rebase intent",
+                    issue_id,
+                    issue_obj.state,
+                )
+                continue
             if issue_obj is None:
                 issue_obj = Issue(
                     id=issue_id,
