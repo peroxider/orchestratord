@@ -54,13 +54,6 @@ from .mode_selector import ModeSelector
 from . import modes as _modes
 from .modes.base import DEFAULT_MODE
 from .applications.issue_pr.provider import IssuePrWorkProvider
-from .repro_gate import (
-    ReproGateResult,
-    append_repro_hint,
-    build_repro_prompt,
-    evaluate_repro_gate,
-    format_repro_gate_comment,
-)
 from .status_dashboard import SessionStatus, StatusDashboard
 from .tracker import Intent, TrackerAdapter
 from .workspace import WorkspaceManager
@@ -582,6 +575,7 @@ class Orchestrator:
         if getattr(self, "im_event_deliver", None) is not None:
             from .sinks.channel import ChannelProgressSink
             from .events import OrchestratorEvent, OrchestratorEventEmitter
+            from .applications.issue_pr.payloads import issue_payload_for_task_id
 
             channel_sink = ChannelProgressSink(self.im_event_deliver)
             emitter = OrchestratorEventEmitter(
@@ -597,7 +591,11 @@ class Orchestrator:
                     issue_id=task_id,
                     level=EventLevel.INFO,
                     message="任务已启动",
-                    payload=self._issue_payload_for_task_id(task_id),
+                    payload=issue_payload_for_task_id(
+                        getattr(self, "tracker", None),
+                        getattr(self, "_registry", None),
+                        task_id,
+                    ),
                 )
             )
         # IM-side activity sink: attach only through the public card-update
@@ -672,94 +670,6 @@ class Orchestrator:
                 payload=dict(payload or {}),
             )
         )
-
-    def _issue_payload_for_task_id(self, task_id: str) -> dict[str, Any]:
-        """Build a payload for issue.started when only the task_id is known.
-
-        At sink-build time the Issue object is on ``session.issue`` but
-        ``_build_session_sink`` receives only the task_id. We look up the
-        registry record for branch/identifier, and the tracker for repo.
-        """
-        payload: dict[str, Any] = {}
-        registry = getattr(self, "_registry", None)
-        record = registry.get(task_id) if registry and task_id else None
-        if record is not None:
-            if getattr(record, "issue_identifier", None):
-                payload["title"] = record.issue_identifier
-            if getattr(record, "branch_name", None):
-                payload["branch"] = record.branch_name
-        repo = self._repo_label()
-        if repo:
-            payload["repo"] = repo
-        return payload
-
-    def _repo_label(self) -> str:
-        """Build a 'owner/repo' label from the tracker, or '' if unavailable."""
-        tracker = getattr(self, "tracker", None)
-        if tracker is None:
-            return ""
-        owner = getattr(tracker, "owner", None)
-        repo = getattr(tracker, "repo", None)
-        if owner and repo:
-            return f"{owner}/{repo}"
-        return ""
-
-    def _issue_payload(self, issue: Issue, **extra: Any) -> dict[str, Any]:
-        """Build a rich payload dict for IM events from an Issue + extras.
-
-        Centralizes the issue title / branch / repo context so every emit
-        call site gets consistent enrichment without repeating field
-        extraction. ``extra`` kwargs are merged in (e.g. commit=, pr=,
-        verification=, attempts=).
-        """
-        payload: dict[str, Any] = {}
-        title = getattr(issue, "title", None)
-        if title:
-            payload["title"] = title
-        branch = getattr(issue, "branch_name", None)
-        if branch:
-            payload["branch"] = branch
-        repo = self._repo_label()
-        if repo:
-            payload["repo"] = repo
-        payload.update({k: v for k, v in extra.items() if v is not None})
-        return payload
-
-    def _session_payload(self, session: Any, **extra: Any) -> dict[str, Any]:
-        """Build a rich payload from an AgentSession + extras.
-
-        Reads issue title/branch, repo, verification status, PR url, and
-        commit sha from the session/registry, then merges ``extra``.
-        """
-        issue = getattr(session, "issue", None)
-        payload: dict[str, Any] = {}
-        if issue is not None:
-            title = getattr(issue, "title", None)
-            if title:
-                payload["title"] = title
-            branch = getattr(issue, "branch_name", None)
-            if branch:
-                payload["branch"] = branch
-            pr_url = getattr(issue, "pr_url", None)
-            if pr_url:
-                payload["pr"] = pr_url
-        repo = self._repo_label()
-        if repo:
-            payload["repo"] = repo
-        ver = getattr(session, "verification_status", None)
-        if ver:
-            payload["verification"] = ver
-        # Try to get commit sha from the registry record
-        issue_id = getattr(issue, "id", None) if issue is not None else None
-        registry = getattr(self, "_registry", None)
-        if issue_id and registry is not None:
-            record = registry.get(issue_id)
-            if record is not None:
-                commit = getattr(record, "commit_sha", None)
-                if commit:
-                    payload.setdefault("commit", commit)
-        payload.update({k: v for k, v in extra.items() if v is not None})
-        return payload
 
     def _register_collaboration_modes(
         self, workflow: WorkflowConfig, agent_runner: BackendRunner
@@ -1425,122 +1335,6 @@ class Orchestrator:
             )
 
         self._update_run_diagnostics(session)
-
-    def _repro_gate_applies(self, session: AgentSession) -> bool:
-        """The gate only fronts fresh issue runs (not retries of other
-        run kinds), only when enabled, and — when ``labels`` is
-        configured — only for issues carrying one of those labels."""
-        config = self.workflow.agent.repro_first
-        if not config.enabled or session.run_kind != "issue":
-            return False
-        if config.labels:
-            issue_labels = {
-                label.strip().lower() for label in (getattr(session.issue, "labels", None) or [])
-            }
-            wanted = {label.strip().lower() for label in config.labels}
-            if not issue_labels & wanted:
-                return False
-        return True
-
-    async def _run_repro_gate(self, session: AgentSession, progress_sink: Any) -> bool:
-        """Run the reproduction stage; True means "bug demonstrated,
-        proceed to the fix stage".
-
-        On a closed gate the issue is marked FAILED with a
-        "cannot reproduce" report posted to the tracker, mirroring the
-        empty-branch failure path (no MR is opened).
-        """
-        issue = session.issue
-        config = self.workflow.agent.repro_first
-        session.run_kind = "repro"
-        session.prompt_override = build_repro_prompt(issue)
-        repro_timeout_seconds = config.timeout_ms / 1000.0
-        session.timeout_deadline_at = time.time() + repro_timeout_seconds
-        logger.info("Issue %s: repro-first gate starting", issue.id)
-        timed_out = False
-        try:
-            await asyncio.wait_for(
-                self.agent_runner.run(
-                    session,
-                    self.workflow,
-                    status_dashboard=self.status_dashboard,
-                    # The repro stage has its own executable completion
-                    # contract below. Passing the tracker here makes the
-                    # generic runner continue while the issue is still open,
-                    # even after the repro artifacts are complete.
-                    tracker=None,
-                    comment_tracker=self.tracker,
-                    clarification_resolver=self._clarification_resolver,
-                    progress_reporter=progress_sink,
-                    diagnostics_callback=self._update_run_diagnostics,
-                ),
-                timeout=repro_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            logger.warning("Issue %s: repro stage timed out", issue.id)
-
-        result = ReproGateResult(verdict="missing")
-        if not timed_out:
-            result = await evaluate_repro_gate(
-                session.workspace.path,
-                timeout_ms=config.command_timeout_ms,
-            )
-
-        if result.proceed:
-            assert result.command is not None
-            logger.info(
-                "Issue %s: reproduction established (%s) — opening fix stage",
-                issue.id,
-                result.command,
-            )
-            session.repro_command = result.command
-            append_repro_hint(session.workspace.path, result.command)
-            # Reset per-run state so the fix stage gets a clean session
-            # (mirrors the pipeline mode's between-stage reset).
-            session.turn_count = 0
-            session.status = "running"
-            session.output_text = ""
-            session.session_end_reason = None
-            session.session_end_summary = ""
-            session.run_id = None
-            session.consecutive_429_count = 0
-            session.rate_limit_pending_turn = None
-            session.prompt_override = None
-            session.run_kind = "issue"
-            return True
-
-        verdict = "repro_stage_timeout" if timed_out else result.verdict
-        logger.warning(
-            "Issue %s: repro-first gate closed (verdict=%s) — marking FAILED "
-            "without attempting a fix",
-            issue.id,
-            verdict,
-        )
-        session.status = "failed"
-        session.session_end_reason = "not_reproducible"
-        session.session_end_summary = f"repro gate closed: {verdict}"
-        self._registry.mark_failed_with_reason(
-            issue.id or "",
-            f"not_reproducible ({verdict}): the described behavior could not "
-            "be demonstrated; no fix attempted, no PR created.",
-        )
-        try:
-            await self.tracker.create_comment(
-                issue.id or "",
-                format_repro_gate_comment(issue, result),
-            )
-        except Exception:
-            logger.warning(
-                "Issue %s: failed to post repro-gate comment",
-                issue.id,
-                exc_info=True,
-            )
-        await self._sync_tracker_issue_state(issue.id or "", "failed")
-        self.status_dashboard.on_session_complete(issue.id or "")
-        self._state.completed.add(issue.id or "")
-        self._state.failed.add(issue.id or "")
-        return False
 
     def _resolve_session_runner(self, session: AgentSession) -> Any:
         """Resolve the requested runner without silently changing semantics."""
