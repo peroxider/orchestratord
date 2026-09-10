@@ -1148,6 +1148,11 @@ class GitSyncService:
         ".orchestratord_clarification_queue.json",
         ".orchestratord_workspace.lock",
         ".event_streams",
+        # Run-control sockets / endpoint transcripts (``.run_control/``)
+        # are per-run control-plane artifacts, same family as
+        # ``.orchestrator_control``; they must never ride along in an
+        # implementation commit.
+        ".run_control",
         "daemon.pid",
         "analysis.md",
         "changes_summary.md",
