@@ -520,12 +520,32 @@ def _fmt(values: dict[str, Any], key: str, unit: str = "s") -> str:
 
 
 # Display-only exchange rate: telemetry records raw USD cost (cost_usd);
-# the rendered report shows CNY. Summary dict values stay in USD.
+# the rendered report shows CNY and USD side by side. Summary dict values
+# stay in USD.
 USD_TO_CNY_RATE = 7.1
 
 
 def _cny(usd: float) -> str:
     return f"¥{usd * USD_TO_CNY_RATE:,.2f}"
+
+
+def _usd(usd: float) -> str:
+    return f"${usd:,.2f}"
+
+
+def _dual(usd: float) -> str:
+    """Both currencies for one USD amount — ``¥10.30 / $1.45``."""
+    return f"{_cny(usd)} / {_usd(usd)}"
+
+
+_CURRENCY_LABELS = {"cny": "人民币", "usd": "美元"}
+
+
+def _native_label(model: str) -> str:
+    """Vendor's original billing currency label for a model id."""
+    from ..cost.estimator import native_currency
+
+    return _CURRENCY_LABELS.get(native_currency(model), "美元")
 
 
 def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> str:
@@ -548,9 +568,20 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         f"| error 数 | {summary.get('errors', 0)} |",
         f"| session 成功/失败 | {summary.get('sessions_succeeded', 0)} / {summary.get('sessions_failed', 0)} |",
         f"| usage 事件 | {summary.get('usage_events', 0)} |",
-        f"| 总成本 (CNY) | {_cny(summary.get('total_cost_usd', 0.0))} |",
+        f"| 总成本 (CNY / USD) | {_dual(summary.get('total_cost_usd', 0.0))} |",
         f"| tokens (in/out) | {summary.get('tokens_input', 0)} / {summary.get('tokens_output', 0)} |",
         "",
+    ]
+
+    # 成本口径脚注：报表中的所有成本数字（汇总/闭环效率/按后端/按模型）
+    # 都是估算性质 —— 后端自报或按 token × 公开定价折算 —— 值得向读者声明。
+    if summary.get("usage_events") or summary.get("total_cost_usd"):
+        lines += [
+            "> 成本均为估算值：由 token 用量与模型公开定价折算，或来自后端自报数据，仅供参考。",
+            "",
+        ]
+
+    lines += [
         "## 按 issue 事件分布",
         "",
         issue_counts,
@@ -606,15 +637,15 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         if cost.get("closed_issues"):
             closed_avg = cost.get("closed_avg_usd")
             closed_avg_text = (
-                _cny(closed_avg) if closed_avg is not None else "-"
+                _dual(closed_avg) if closed_avg is not None else "-"
             )
             lines.append(
-                f"| 闭环 issue 成本 avg / 合计 | {closed_avg_text} / {_cny(cost.get('closed_total_usd', 0.0))} |"
+                f"| 闭环 issue 成本 avg / 合计 (CNY / USD) | {closed_avg_text} / {_dual(cost.get('closed_total_usd', 0.0))} |"
             )
             top_issues = cost.get("top_issues") or []
             if top_issues:
                 top_text = ", ".join(
-                    f"#{item['issue']}: {_cny(item['cost_usd'])}" for item in top_issues
+                    f"#{item['issue']}: {_dual(item['cost_usd'])}" for item in top_issues
                 )
                 lines.append(f"| 成本 Top {len(top_issues)} issue | {top_text} |")
         if retry.get("retryable_failures"):
@@ -686,7 +717,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         lines += [
             "## 按后端",
             "",
-            "| backend | 会话 | 成功/失败 | tokens (in/out) | 成本 CNY | 执行时长 | turns |",
+            "| backend | 会话 | 成功/失败 | tokens (in/out) | 成本 (CNY/USD) | 执行时长 | turns |",
             "|---------|------|-----------|-----------------|----------|----------|-------|",
         ]
         for name in sorted(by_backend):
@@ -695,7 +726,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
                 f"| {name} | {b.get('sessions', 0)} "
                 f"| {b.get('succeeded', 0)} / {b.get('failed', 0)} "
                 f"| {b.get('tokens_input', 0)} / {b.get('tokens_output', 0)} "
-                f"| {_cny(b.get('cost_usd', 0.0))} "
+                f"| {_dual(b.get('cost_usd', 0.0))} "
                 f"| {b.get('duration_s', 0.0):.1f}s "
                 f"| {b.get('turns', 0)} |"
             )
@@ -766,15 +797,16 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         lines += [
             "## 按模型 (usage)",
             "",
-            "| model | usage 事件 | tokens (in/out) | 成本 CNY |",
-            "|-------|------------|-----------------|----------|",
+            "| model | usage 事件 | tokens (in/out) | 成本 (CNY/USD) | 原计价 |",
+            "|-------|------------|-----------------|----------|--------|",
         ]
         for name in sorted(by_model):
             m = by_model[name]
             lines.append(
                 f"| {name} | {m.get('usage_events', 0)} "
                 f"| {m.get('tokens_input', 0)} / {m.get('tokens_output', 0)} "
-                f"| {_cny(m.get('cost_usd', 0.0))} |"
+                f"| {_dual(m.get('cost_usd', 0.0))} "
+                f"| {_native_label(name)} |"
             )
         lines.append("")
 

@@ -16,6 +16,7 @@ import pytest
 
 from orchestratord.cost.estimator import (
     estimate_cost_usd,
+    native_currency,
     resolve_model_alias,
 )
 
@@ -70,6 +71,23 @@ def test_estimate_glm_5_3_flash_rates() -> None:
         "glm-5.3-flash", 2_000_000, 1_000_000, allow_default=False
     )
     assert est == pytest.approx(0.15 * 2 + 0.50)
+
+
+# ── native_currency (原始计价币种标注) ────────────────────────────────
+
+
+def test_native_currency_cny_for_domestic_models() -> None:
+    # Domestic vendors bill in RMB — pricing.json tags their entries cny.
+    assert native_currency("glm-5.3-flash") == "cny"
+    assert native_currency("deepseek-chat") == "cny"
+
+
+def test_native_currency_usd_for_overseas_and_untagged() -> None:
+    # Untagged/unknown entries report usd — the table's rates are
+    # USD-denominated, so absence of a tag means USD billing.
+    assert native_currency("claude-sonnet-4") == "usd"
+    assert native_currency("totally-unknown-model") == "usd"
+    assert native_currency("") == "usd"
 
 
 # ── config parsing ────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "updated_at": "2026-09-10",
-  "comment": "USD per 1M tokens. Matched by exact id, then longest prefix (model ids often carry date suffixes), then `default`. Sources: provider price sheets; refresh when providers change pricing. GLM rates from docs.z.ai (GLM-5.3-Flash list price $0.15/$0.50, GLM-5.3/5.2 $1.40/$4.40, GLM-4.7 $0.60/$2.20).",
+  "comment": "USD per 1M tokens. Matched by exact id, then longest prefix (model ids often carry date suffixes), then `default`. Sources: provider price sheets; refresh when providers change pricing. GLM rates from docs.z.ai (GLM-5.3-Flash list price $0.15/$0.50, GLM-5.3/5.2 $1.40/$4.40, GLM-4.7 $0.60/$2.20). `currency` marks each vendor's original billing currency (domestic vendors bill CNY; rates themselves stay USD-converted, default USD when absent).",
   "default": {
     "input_per_mtok": 3.0,
     "output_per_mtok": 15.0
@@ -41,39 +41,48 @@
     },
     "deepseek-chat": {
       "input_per_mtok": 0.27,
-      "output_per_mtok": 1.1
+      "output_per_mtok": 1.1,
+      "currency": "cny"
     },
     "deepseek-reasoner": {
       "input_per_mtok": 0.55,
-      "output_per_mtok": 2.19
+      "output_per_mtok": 2.19,
+      "currency": "cny"
     },
     "kimi-k2": {
       "input_per_mtok": 0.6,
-      "output_per_mtok": 2.5
+      "output_per_mtok": 2.5,
+      "currency": "cny"
     },
     "glm-4.6": {
       "input_per_mtok": 0.6,
-      "output_per_mtok": 2.2
+      "output_per_mtok": 2.2,
+      "currency": "cny"
     },
     "glm-4.7": {
       "input_per_mtok": 0.6,
-      "output_per_mtok": 2.2
+      "output_per_mtok": 2.2,
+      "currency": "cny"
     },
     "glm-5.2": {
       "input_per_mtok": 1.4,
-      "output_per_mtok": 4.4
+      "output_per_mtok": 4.4,
+      "currency": "cny"
     },
     "glm-5.3": {
       "input_per_mtok": 1.4,
-      "output_per_mtok": 4.4
+      "output_per_mtok": 4.4,
+      "currency": "cny"
     },
     "glm-5.3-flash": {
       "input_per_mtok": 0.15,
-      "output_per_mtok": 0.5
+      "output_per_mtok": 0.5,
+      "currency": "cny"
     },
     "qwen3-coder": {
       "input_per_mtok": 0.4,
-      "output_per_mtok": 1.6
+      "output_per_mtok": 1.6,
+      "currency": "cny"
     }
   }
 }

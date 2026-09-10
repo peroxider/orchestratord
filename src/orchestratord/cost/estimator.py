@@ -106,6 +106,23 @@ def _rate_for(
     return default if isinstance(default, dict) else None
 
 
+def native_currency(model: str, pricing: dict[str, Any] | None = None) -> str:
+    """Original billing currency of the model's price sheet: ``cny`` or ``usd``.
+
+    Per-entry ``currency`` tag (exact → longest-prefix match); domestic
+    vendors (GLM/Zhipu, DeepSeek, Kimi, Qwen) bill in RMB while the
+    table's own rates and ``default`` are USD-denominated, so untagged
+    or unresolvable entries report ``usd``. Purely informational —
+    stored/estimated costs stay USD; the currency only annotates which
+    displayed figure is the vendor-authoritative one.
+    """
+    table = pricing if pricing is not None else load_pricing()
+    rates = _rate_for(model or "", table)
+    if not rates:
+        return "usd"
+    return str(rates.get("currency") or "usd")
+
+
 def estimate_cost_usd(
     model: str,
     tokens_in: int,
@@ -134,4 +151,10 @@ def estimate_cost_usd(
     return cost
 
 
-__all__ = ["estimate_cost_usd", "load_pricing", "reset_pricing_cache", "resolve_model_alias"]
+__all__ = [
+    "estimate_cost_usd",
+    "load_pricing",
+    "native_currency",
+    "reset_pricing_cache",
+    "resolve_model_alias",
+]
