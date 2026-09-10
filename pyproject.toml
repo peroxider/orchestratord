@@ -94,6 +94,9 @@ pythonpath = [
     "src",
     "scripts",
     ".",
+    # gate tests import ``gate_support`` as a top-level module (PR merge
+    # gate, docs/DESIGN_PR_GATE_TEST.md §5).
+    "tests/gate",
 ]
 # §9.3 test chimney (multica ``agentintegration`` build tag analogue):
 # tests marked ``agentintegration`` exercise REAL user-installed agent
@@ -106,6 +109,7 @@ pythonpath = [
 addopts = "-m 'not agentintegration'"
 markers = [
     "agentintegration: smoke-tests a real user-installed agent CLI (deselected by default; opt in with -m agentintegration)",
+    "gate: PR merge-gate suite (tests/gate, docs/DESIGN_PR_GATE_TEST.md) — real-process smoke; run via tests/gate/gate_runner.py",
 ]
 
 # Workspace source map: lets ``uv pip install -e .[backends]`` resolve
