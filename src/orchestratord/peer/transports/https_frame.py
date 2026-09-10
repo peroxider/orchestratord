@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -38,6 +39,35 @@ logger = logging.getLogger(__name__)
 # line-rate; a slow peer / dead socket back-pressures here rather than
 # letting the caller pile up unbounded frames.
 _OUTBOUND_QUEUE_MAXSIZE = 256
+
+
+def peer_tls_verify() -> str | bool:
+    """TLS trust configuration for outbound peer connections (PR-B6).
+
+    Resolution order:
+
+    1. ``ORCHESTRATORD_PEER_TLS_INSECURE=1`` → ``False`` (verification
+       disabled — development/diagnostics ONLY; a loud warning is
+       logged every call so it can never be enabled silently).
+    2. ``ORCHESTRATORD_PEER_TLS_CA=/path/ca.pem`` → trust that CA
+       bundle (the self-signed mini-CA produced by
+       ``scripts/gen_peer_tls_certs.sh``).
+    3. otherwise → ``True`` (system trust store; a publicly-trusted
+       cert or a CA installed system-wide works with no extra config).
+
+    Read per client construction so two-daemon integration runs can
+    flip it per process via env.
+    """
+    if os.environ.get("ORCHESTRATORD_PEER_TLS_INSECURE", "") == "1":
+        logger.warning(
+            "ORCHESTRATORD_PEER_TLS_INSECURE=1 — peer TLS certificate "
+            "verification DISABLED (development/diagnostics only)"
+        )
+        return False
+    ca_path = os.environ.get("ORCHESTRATORD_PEER_TLS_CA", "").strip()
+    if ca_path:
+        return ca_path
+    return True
 
 
 class HttpsFrameTransport:
@@ -113,7 +143,9 @@ class HttpsFrameTransport:
                     connect=self._connect_timeout,
                     read=None,  # long-lived stream — no read deadline
                     write=self._connect_timeout,
-                )
+                ),
+                # PR-B6: self-signed peer CAs / dev insecure mode.
+                verify=peer_tls_verify(),
             )
 
         async def body_gen() -> Any:

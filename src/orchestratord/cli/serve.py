@@ -99,6 +99,27 @@ def add_serve_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     serve_parser.add_argument(
+        "--tls-certfile",
+        type=str,
+        default=None,
+        help=(
+            "TLS server certificate (PEM) for the HTTPS listener "
+            "(PR-B6). Generate with scripts/gen_peer_tls_certs.sh. "
+            "Env fallback: ORCHESTRATORD_TLS_CERTFILE. Default: unset "
+            "— plain HTTP (loopback deployments)."
+        ),
+    )
+    serve_parser.add_argument(
+        "--tls-keyfile",
+        type=str,
+        default=None,
+        help=(
+            "TLS server private key (PEM) for the HTTPS listener "
+            "(PR-B6). Env fallback: ORCHESTRATORD_TLS_KEYFILE. "
+            "Required together with --tls-certfile."
+        ),
+    )
+    serve_parser.add_argument(
         "--redis-url",
         type=str,
         default="redis://localhost:6379/0",
@@ -132,6 +153,15 @@ def run(args: argparse.Namespace) -> int:
     peer_frame_listen = getattr(args, "peer_frame_listen", None)
     if peer_frame_listen:
         os.environ.setdefault("ORCHESTRATORD_PEER_FRAME_LISTEN", peer_frame_listen)
+    # PR-B6: TLS for the HTTPS listener. Flags seed the env (same
+    # pattern as --peer-listen) so two-daemon integration runs can
+    # enable TLS per process without CLI plumbing.
+    tls_certfile = getattr(args, "tls_certfile", None)
+    if tls_certfile:
+        os.environ.setdefault("ORCHESTRATORD_TLS_CERTFILE", tls_certfile)
+    tls_keyfile = getattr(args, "tls_keyfile", None)
+    if tls_keyfile:
+        os.environ.setdefault("ORCHESTRATORD_TLS_KEYFILE", tls_keyfile)
     os.environ.setdefault("ORCHESTRATORD_REDIS_URL", args.redis_url)
 
     # §10.2 first-boot seed — default workspace + fixed owner member +
@@ -161,6 +191,10 @@ def run(args: argparse.Namespace) -> int:
             host=args.host,
             port=args.port,
             reload=args.reload,
+            # PR-B6: None (env unset) keeps plain HTTP — uvicorn treats
+            # missing ssl args as HTTP-only.
+            ssl_certfile=os.environ.get("ORCHESTRATORD_TLS_CERTFILE"),
+            ssl_keyfile=os.environ.get("ORCHESTRATORD_TLS_KEYFILE"),
         )
 
         class _PeerDrainingServer(uvicorn.Server):

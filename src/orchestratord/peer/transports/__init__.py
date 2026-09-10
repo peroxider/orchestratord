@@ -18,7 +18,10 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 
 from orchestratord.peer.handshake import FrameTransport
-from orchestratord.peer.transports.https_frame import HttpsFrameTransport
+from orchestratord.peer.transports.https_frame import (
+    HttpsFrameTransport,
+    peer_tls_verify,
+)
 
 TransportFactory = Callable[[], Awaitable[FrameTransport]]
 
@@ -66,5 +69,6 @@ def select_transport_factory(
 __all__ = [
     "HttpsFrameTransport",
     "TransportFactory",
+    "peer_tls_verify",
     "select_transport_factory",
 ]
