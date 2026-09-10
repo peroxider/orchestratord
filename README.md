@@ -85,12 +85,15 @@ cd orchestratord
 ./install.sh --backends clawcodex,codex   # non-interactive: specific backends
 ./install.sh --no-backends                # core daemon only
 ./install.sh --all-backends               # all backends
+./install.sh --with-web                   # also build the Next.js Web client
+./install.sh --with-web --with-db         # web client + DB schema migration
+./install.sh --with-web --reset           # wipe node_modules / .pnpm first, then rebuild
 ./install.sh --dry-run                    # preview without changes
 ```
 
 The script:
 
-1. Verifies prerequisites — Python ≥ 3.11, `git`, `pip`; uses `uv` automatically when available.
+1. Verifies prerequisites — Python ≥ 3.11, `git`, `pip`; uses `uv` automatically when available. With `--with-web`, also requires Node.js ≥ 20.9 and pnpm ≥ 9 (the script aborts with install hints if either is missing).
 2. Creates `${ORCHESTRATORD_INSTALL_PREFIX:-~/.orchestratord}/venv` (use `--no-venv` to install into the current interpreter instead).
 3. Installs orchestratord from the local checkout (editable) — or clones from `ORCHESTRATORD_REPO` / branch when invoked outside a source tree.
 4. Probes each selected backend for its native runtime:
@@ -123,7 +126,41 @@ The script:
    If a runtime is missing, the script prints the install hint and (in interactive mode) asks whether to install the wrapper package anyway.
 
 5. Installs each backend wrapper from `backends/orchestratord-<name>/` (editable) or from PyPI.
-6. Runs `orchestratord --help` and lists discovered backends / skills.
+6. With `--with-web`, builds the Next.js Web client at `apps/web/`:
+   - Verifies the monorepo is complete (`pnpm-workspace.yaml` + every `packages/*/package.json`); a sparse / partial checkout aborts with a clear error instead of a cryptic pnpm link failure.
+   - If `--reset` was passed, wipes `node_modules`, `apps/*/node_modules`, `packages/*/node_modules`, and the `node_modules/.pnpm` virtual store first.
+   - Runs `pnpm install --prefer-offline` at the **repo root** so pnpm can resolve the monorepo `workspace:*` dependencies (`@orchestratord/core`, `ui`, `views`, `app-contracts`, `app-issue-pr`). `--prefer-offline` uses the local pnpm cache when available and only falls back to the registry on a miss — this keeps the install fast and resilient on networks with intermittent registry access. If the registry is unreachable and the cache is missing required packages, the script retries with `--offline` (cache-only); only if both fail does it abort, with a hint to re-run with `--reset`.
+   - Probes `apps/web/node_modules/next/dist/bin/next` to confirm the workspace is actually resolvable (pnpm can sometimes report "Done" while leaving broken symlinks). On failure, suggests `--reset`.
+   - Runs `pnpm --filter @orchestratord/web build` to produce `apps/web/.next`.
+7. Runs `orchestratord --help` and lists discovered backends / skills.
+
+> **Web client (--with-web) prerequisites:** The Next.js monorepo requires
+> Node.js ≥ 20.9 and pnpm ≥ 9. Install pnpm via Corepack (ships with
+> Node.js ≥ 16.10):
+> ```bash
+> corepack enable && corepack prepare pnpm@latest --activate
+> ```
+> The script aborts with an actionable error if either is missing or too old.
+
+> **Recovering from a broken web install:** If a previous `--with-web`
+> install left the workspace in an inconsistent state (broken
+> `node_modules` symlinks, partial `.pnpm` virtual store, etc.), the
+> integrity probe will catch it on the next run. Re-run with `--reset`
+> to wipe the pnpm state and rebuild from scratch:
+> ```bash
+> ./install.sh --with-web --reset
+> ```
+> This only touches the project's `node_modules` / `.pnpm` — the Python
+> venv and `pip` install are left alone.
+
+After install, the web client can be launched independently of the daemon:
+
+```bash
+orchestratord web                  # production server on :3100 (needs `next build`)
+orchestratord web --dev            # hot-reload dev server
+orchestratord serve --with-web     # daemon + web together (one process group)
+pnpm --filter @orchestratord/web dev   # in-repo dev server (next dev directly)
+```
 
 Activate the venv afterwards:
 
