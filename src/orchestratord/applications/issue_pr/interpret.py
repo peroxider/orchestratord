@@ -371,7 +371,7 @@ class IssuePrInterpretation:
         import asyncio
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None and loop.is_running():

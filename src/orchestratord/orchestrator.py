@@ -1877,15 +1877,31 @@ class Orchestrator:
                 continue
 
             self._state.claimed.add(retry_key)
-            # The plan is being executed — clear next_retry_at so
-            # the registry reflects reality.
-            self._clear_retry_plan(retry_key)
+            # 先 launch 再清 plan：`_launch_issue` 可能因守卫 /
+            # workspace / prepare_launch / post_viz_gate 早退，此时
+            # 若已清 plan，重试会静默丢失且不标失败。launch 成功以
+            # issue 进入 running map 为准；早退则把 retry 放回队列，
+            # 保留下一次机会（不会静默蒸发）。
             await self._launch_issue(issue)
-            logger.info(
-                "Retry launched issue_id=%s attempt=%s",
-                retry_key,
-                retry.attempt,
-            )
+            if issue.id in self._state.running:
+                # The plan is being executed — clear next_retry_at so
+                # the registry reflects reality.
+                self._clear_retry_plan(retry_key)
+                logger.info(
+                    "Retry launched issue_id=%s attempt=%s",
+                    retry_key,
+                    retry.attempt,
+                )
+            else:
+                # Launch was gated/skipped (guard / workspace /
+                # _prepare_intent_reset early exit). Re-queue so the
+                # retry is not silently lost; the same guard will skip
+                # it again if the blocker persists.
+                logger.warning(
+                    "Retry launch gated for issue_id=%s — restoring retry plan",
+                    retry_key,
+                )
+                self._state.retry_queue.append(retry)
 
     async def _process_control_commands(self) -> None:
         """Process lifecycle control commands from CLI.

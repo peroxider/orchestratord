@@ -28,6 +28,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import socket as socket_module
+import struct
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -288,11 +291,68 @@ class ControlSocket:
         coroutine callback, the registration would happen after the
         first ``await`` in the read loop, racing with the client's
         first ``send_event`` call.
+
+        The connection is gated by :meth:`_peer_authorized`: a peer that
+        fails the local identity check (e.g. another user on a shared
+        machine) is rejected up front and never joins ``_clients``, so
+        it cannot pause/stop/steal a run.
         """
+        if not self._peer_authorized(writer):
+            logger.warning(
+                "control_socket: rejecting unauthorized peer on %s",
+                self._path or self._endpoint,
+            )
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
         self._clients.add(writer)
         task = asyncio.create_task(self._read_loop(reader, writer))
         self._read_tasks.add(task)
         task.add_done_callback(self._read_tasks.discard)
+
+    def _peer_authorized(self, writer: asyncio.StreamWriter) -> bool:
+        """Verify the connecting peer is trusted to drive this run.
+
+        Unix sockets use ``SO_PEERCRED``: the connecting process must
+        run under the same UID as the daemon (rejects other users on a
+        shared host — the historical "any local process can
+        stop/pause/steal" hole). Same-process clients (the dashboard's
+        in-process ChatGateway) naturally pass because their PID is the
+        daemon's own.
+
+        Loopback TCP fallback (long Unix paths / Windows) keeps its
+        existing trust boundary: bound to 127.0.0.1 only, on a random
+        ephemeral port whose endpoint is discoverable only through the
+        per-workspace ``.endpoint.json`` file. ``SO_PEERCRED`` is not
+        available for TCP, so those connections remain permitted.
+
+        When the transport socket cannot be inspected (fake writers in
+        unit tests, non-Unix transports), the peer is accepted — the
+        check is best-effort and must never break legitimate clients.
+        """
+        sock = writer.get_extra_info("socket")
+        if sock is None:
+            return True
+        family = getattr(sock, "family", None)
+        if family != socket_module.AF_UNIX:
+            return True
+        try:
+            # SO_PEERCRED → struct { pid_t pid; uid_t uid; gid_t gid; }
+            creds = sock.getsockopt(
+                socket_module.SOL_SOCKET,
+                socket_module.SO_PEERCRED,
+                struct.calcsize("3i"),
+            )
+            _pid, uid, _gid = struct.unpack("3i", creds)
+        except (OSError, struct.error):
+            logger.warning(
+                "control_socket: SO_PEERCRED unavailable on %s — rejecting",
+                self._path or self._endpoint,
+            )
+            return False
+        return uid == os.getuid()
 
     async def _read_loop(
         self,
