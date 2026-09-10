@@ -89,8 +89,15 @@ class DshSession:
         self._turn_active = threading.Event()
         self._last_error_message: str | None = None
         # Real token usage accumulated from assistant/message
-        # events (data.usage) — surfaced on SESSION_COMPLETE.
+        # events (data.usage) — reset per turn, surfaced on each
+        # turn's terminal SESSION_COMPLETE.
         self._usage_totals: dict[str, int] = {}
+        # Set True by send() when a follow-up turn is dispatched,
+        # before the previous turn's task completes.  The stream
+        # checks this flag to decide whether a SESSION_COMPLETE is
+        # intermediate (follow-up in flight) or terminal.
+        self._followup_sent: bool = False
+        self._session_errored: bool = False
         self._streamed_text = ""
         self._tool_names: dict[str, str] = {}
 
@@ -300,14 +307,26 @@ class DshSession:
         text = content if isinstance(content, str) else str(content)
 
         # Serialize turns: a follow-up send waits for the previous turn
-        # thread to finish (including its terminal SESSION_COMPLETE).
+        # thread to finish before dispatching the next one.
         if self._turn_task is not None:
-            await self._turn_task
+            # Signal the stream (on the same event loop) that a
+            # follow-up turn is being dispatched.  The previous turn's
+            # SESSION_COMPLETE is therefore intermediate — the stream
+            # must stay alive to consume the follow-up turn's events.
+            # The flag is consumed by ``_stream`` when it yields that
+            # SESSION_COMPLETE.
+            self._followup_sent = True
+            try:
+                await self._turn_task
+            except BaseException:
+                self._followup_sent = False
+                raise
 
         self._loop = asyncio.get_running_loop()
         self._streamed_text = ""
         self._last_error_message = None
-        # Each send emits its own SESSION_COMPLETE; consumers add these totals.
+        # Each turn carries its own usage in the terminal SESSION_COMPLETE;
+        # consumers accumulate per-turn totals.
         self._usage_totals = {}
         self._turn_started = True
         self._turn_active.set()
@@ -328,6 +347,7 @@ class DshSession:
                     return
                 self._emit_error("dsh_init_error", exc)
                 error_emitted = True
+                self._session_errored = True
                 return
 
             if self._closed:
@@ -343,38 +363,54 @@ class DshSession:
                     return
                 self._emit_error("dsh_error", exc)
                 error_emitted = True
+                self._session_errored = True
             else:
                 # Incremental events were forwarded by the notification
                 # pump; the batched ``result.events`` are intentionally
                 # not re-emitted. Only the finish reason is read here.
-                if result.finish_reason not in (
-                    None,
-                    "success",
-                    "stop",
-                    "completed",
-                ):
-                    # The core reads payload["message"] — without
-                    # it the failure surfaces as "unknown error".
+                try:
+                    finish_reason = result.finish_reason if result is not None else None
+                except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
+                    if self._closed:
+                        return
+                    error_message = f"{type(exc).__name__}: {exc}"
+                    self._last_error_message = error_message
                     self._emit_threadsafe(
                         EventKind.ERROR,
                         {
                             "code": "dsh_finish",
-                            "reason": result.finish_reason,
-                            "message": self._last_error_message
-                            or f"turn finished with reason={result.finish_reason}",
+                            "message": error_message,
                         },
                     )
                     error_emitted = True
+                    self._session_errored = True
+                else:
+                    if finish_reason not in (
+                        None,
+                        "success",
+                        "stop",
+                        "completed",
+                    ):
+                        # The core reads payload["message"] — without
+                        # it the failure surfaces as "unknown error".
+                        self._emit_threadsafe(
+                            EventKind.ERROR,
+                            {
+                                "code": "dsh_finish",
+                                "reason": finish_reason,
+                                "message": self._last_error_message
+                                or f"turn finished with reason={finish_reason}",
+                            },
+                        )
+                        error_emitted = True
+                        self._session_errored = True
         finally:
             self._turn_active.clear()
             self._signal_process_ready()
             complete_payload: dict[str, Any] = {
-                "reason": "stopped" if self._closed else ("error" if error_emitted else "success")
+                "reason": "error" if error_emitted else ("stopped" if self._closed else "success")
             }
             if self._usage_totals:
-                # Real token usage (not fabricated USD — DeepSeek
-                # prices are not invented here; the core/consumer can
-                # convert with its own pricing table).
                 complete_payload["usage"] = dict(self._usage_totals)
             self._emit_threadsafe(EventKind.SESSION_COMPLETE, complete_payload)
 
@@ -636,6 +672,17 @@ class DshSession:
             envelope = await self._queue.get()
             yield envelope
             if envelope.kind is EventKind.SESSION_COMPLETE:
+                if self._closed:
+                    break
+                # When a follow-up was dispatched (send() set
+                # _followup_sent before awaiting the previous turn's
+                # task), this SESSION_COMPLETE is intermediate — the
+                # stream must stay alive to consume the next turn.
+                # Consume the flag so the terminal SESSION_COMPLETE
+                # (for the last turn) correctly breaks the stream.
+                if self._followup_sent:
+                    self._followup_sent = False
+                    continue
                 break
 
     async def interrupt(self) -> None:

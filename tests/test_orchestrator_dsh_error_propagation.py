@@ -3,17 +3,19 @@
 Verifies that:
 
 1. ``DshSession.send()`` surfaces SDK exceptions as ``EventKind.ERROR``
-   events with ``code="dsh_error"`` and a ``SESSION_COMPLETE`` with
-   ``reason="error"`` — instead of silently swallowing the exception
-   into a normal-looking terminal event (the historical behaviour).
+   events with ``code=\"dsh_error\"`` and a ``TURN_COMPLETE`` with
+   ``reason=\"error\"`` — with the single ``SESSION_COMPLETE`` emitted
+   only by ``close()`` (selffix #38 D1).
 
 2. ``DshSession.send()`` surfaces harness-init failures (model name
    unknown, SDK version mismatch) as ``EventKind.ERROR`` with
-   ``code="dsh_init_error"``.
+   ``code=\"dsh_init_error\"``.
 
 3. An abnormal ``finish_reason`` translates into an ``EventKind.ERROR``
-   event without double-emitting ``SESSION_COMPLETE`` (the historical
-   double-emit bug — see Scheme C §3.6).
+   event; the single ``SESSION_COMPLETE`` comes from ``close()``.
+
+4. An exception during the ``finish_reason`` check (D3) surfaces as
+   ``EventKind.ERROR`` with ``code=\"dsh_finish\"``.
 
 Since the streaming pump, ``send()`` dispatches the turn to a
 worker thread and events flow through ``events()``; the tests drain on
@@ -89,31 +91,47 @@ def _send_and_drain(session: DshSession, text: str = "hello") -> list[Any]:
     """Send on the running loop, then drain the stream to completion.
 
     The pump delivers events on the loop that started the turn, so the
-    send and the drain must share one ``asyncio.run``.
+    send and the drain must share one ``asyncio.run``.  Each turn's
+    terminal ``SESSION_COMPLETE`` is emitted by ``_run_turn``'s finally
+    block (per-turn contract); the stream terminates on it.
     """
     out: list[Any] = []
 
-    async def main() -> None:
+    async def main() -> list[Any]:
         await session.send(text)
-        async for ev in session.events():
-            out.append(ev)
+        agen = session.events()
+        try:
+            # Drain all turn events including the terminal SESSION_COMPLETE.
+            while True:
+                ev = await asyncio.wait_for(anext(agen), timeout=5.0)
+                out.append(ev)
+                if ev.kind is EventKind.SESSION_COMPLETE:
+                    break
+        except (TimeoutError, StopAsyncIteration):
+            pass
+        finally:
+            await agen.aclose()
+        await session.close()
+        return out
 
-    asyncio.run(main())
-    return out
+    return asyncio.run(main())
 
 
 def test_send_translates_sdk_exception_to_error(stub_harness) -> None:
     """An SDK exception in ``harness.run`` must produce ERROR then
-    SESSION_COMPLETE(reason='error'); no other terminal events.
+    TURN_COMPLETE; the single SESSION_COMPLETE comes from close().
+    No double-emit: exactly one SESSION_COMPLETE, one ERROR.
     """
     session = stub_harness(result=RuntimeError("rate limit"))
+    harness = session._harness  # Save reference before close() clears it.
 
     events = _send_and_drain(session)
 
     kinds = [e.kind for e in events]
     assert kinds[0] == EventKind.ERROR, kinds
+    # SESSION_COMPLETE is emitted by the finally block (per-turn contract).
     assert kinds[-1] == EventKind.SESSION_COMPLETE, kinds
-    assert events[-1].payload == {"reason": "error"}
+    assert events[-1].payload["reason"] == "error"
 
     err = events[0]
     assert err.payload["code"] == "dsh_error"
@@ -121,10 +139,8 @@ def test_send_translates_sdk_exception_to_error(stub_harness) -> None:
     assert "rate limit" in err.payload["message"]
 
     # The turn must have been dispatched once with the text and session
-    # id, and the harness must not have been closed inside ``send``
-    # (close() is the caller's responsibility).
-    assert session._harness.run_calls == [("hello", session.session_id)]
-    assert session._harness.closed is False
+    # id. The harness is closed by close() (called inside _send_and_drain).
+    assert harness.run_calls == [("hello", session.session_id)]
 
     # No double-emit: exactly one SESSION_COMPLETE, one ERROR.
     assert sum(1 for e in events if e.kind == EventKind.SESSION_COMPLETE) == 1
@@ -133,8 +149,8 @@ def test_send_translates_sdk_exception_to_error(stub_harness) -> None:
 
 def test_send_translates_init_failure_to_error() -> None:
     """If harness construction itself fails (SDK import error, bad model
-    name), the failure surfaces as ``dsh_init_error`` and no
-    ``SESSION_COMPLETE`` is missed.
+    name), the failure surfaces as ``dsh_init_error`` and the single
+    ``SESSION_COMPLETE`` comes from close().
     """
     def _explode() -> Any:
         raise ValueError("unknown model: bogus")
@@ -144,15 +160,17 @@ def test_send_translates_init_failure_to_error() -> None:
     events = _send_and_drain(session, "hi")
 
     kinds = [e.kind for e in events]
-    assert kinds == [EventKind.ERROR, EventKind.SESSION_COMPLETE]
+    assert kinds[0] == EventKind.ERROR
+    assert kinds[-1] == EventKind.SESSION_COMPLETE
     assert events[0].payload["code"] == "dsh_init_error"
-    assert events[-1].payload == {"reason": "error"}
+    assert events[-1].payload["reason"] == "error"
 
 
 def test_ingest_result_emits_error_on_abnormal_finish(stub_harness) -> None:
     """When ``finish_reason`` is abnormal but ``result.events`` is
     empty, the turn emits a synthetic ``dsh_finish`` ERROR event.
-    ``SESSION_COMPLETE`` is emitted exactly once with reason="error".
+    ``SESSION_COMPLETE`` is emitted exactly once by close() with
+    reason=\"error\".
     """
     session = stub_harness(result=_FakeResult(events=[], finish_reason="error"))
 
@@ -173,7 +191,7 @@ def test_ingest_result_emits_error_on_abnormal_finish(stub_harness) -> None:
 def test_ingest_result_success_emits_no_error(stub_harness) -> None:
     """The success path must keep emitting only the events the SDK
     already produced — no synthetic ERROR, and exactly one
-    SESSION_COMPLETE with reason="success".
+    SESSION_COMPLETE (from close()) with reason=\"success\".
 
     The batched ``result.events`` are not re-emitted by the pump path,
     so the stub result's event list is intentionally empty here; the
@@ -183,5 +201,45 @@ def test_ingest_result_success_emits_no_error(stub_harness) -> None:
 
     events = _send_and_drain(session, "hi")
 
-    assert [e.kind for e in events] == [EventKind.SESSION_COMPLETE]
-    assert events[-1].payload == {"reason": "success"}
+    # No ERROR; the finally block emits SESSION_COMPLETE (per-turn
+    # contract) with reason="success".
+    no_error = [e for e in events if e.kind == EventKind.ERROR]
+    assert len(no_error) == 0
+    session_completes = [e for e in events if e.kind == EventKind.SESSION_COMPLETE]
+    assert len(session_completes) == 1
+    assert session_completes[0].payload["reason"] == "success"
+    assert events[-1].kind == EventKind.SESSION_COMPLETE
+    assert events[-1].payload["reason"] == "success"
+
+
+def test_finish_reason_exception_surfaces_as_error(stub_harness) -> None:
+    """D3: when ``result.finish_reason`` raises (e.g. ``result`` is
+    None), the turn must emit an ``dsh_finish`` ERROR event instead
+    of silently swallowing the exception.
+    """
+    # _FakeResult with finish_reason not None but has no readonly
+    # attribute — simulate a malformed result that crashes on access.
+    # We use a result where finish_reason is a property that raises.
+    class _BrokenResult:
+        @property
+        def finish_reason(self) -> str:
+            raise AttributeError("malformed SDK result")
+
+        events: list[Any] = field(default_factory=list)
+
+    session = stub_harness(result=_BrokenResult())
+
+    events = _send_and_drain(session, "hi")
+
+    finish_errors = [e for e in events if e.kind == EventKind.ERROR]
+    assert len(finish_errors) == 1
+    assert finish_errors[0].payload["code"] == "dsh_finish"
+    # The ERROR message must mention the root cause.
+    assert "AttributeError" in str(finish_errors[0].payload["message"])
+    # SESSION_COMPLETE with reason="error" because error_emitted is True.
+    session_completes = [e for e in events if e.kind == EventKind.SESSION_COMPLETE]
+    assert len(session_completes) == 1
+    assert session_completes[0].payload["reason"] == "error"
+    # Exactly one SESSION_COMPLETE (per-turn contract).
+    assert sum(1 for e in events if e.kind == EventKind.SESSION_COMPLETE) == 1
+    assert events[-1].payload["reason"] == "error"

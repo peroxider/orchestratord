@@ -14,6 +14,10 @@ capabilities) using a fake harness that mirrors the real
   calls ``on_notification(Notification)`` incrementally as the turn
   progresses, returns a ``RunResult`` at the end.
 * ``DeepSeekHarness.close()``
+
+Lifecycle contract (selffix #38): each turn ends with exactly one
+``TURN_COMPLETE``; ``SESSION_COMPLETE`` is emitted exactly once by
+``close()`` and carries cumulative usage across all turns.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import asyncio
 import time
 import unittest
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 from orchestratord_dsh.backend import DshBackend
 from orchestratord_dsh.session import DshSession
@@ -94,19 +98,38 @@ def _script() -> list[tuple[float, dict]]:
     ]
 
 
-async def _drain(session: DshSession, timeout: float = 5.0) -> list:
-    """Consume the session stream until SESSION_COMPLETE (inclusive)."""
-    agen = session.events()
-    out = []
-    try:
-        while True:
-            ev = await asyncio.wait_for(anext(agen), timeout=timeout)
-            out.append(ev)
-            if ev.kind is EventKind.SESSION_COMPLETE:
-                break
-    finally:
-        await agen.aclose()
-    return out
+def _usage_script() -> list[tuple[float, dict]]:
+    """A single turn that reports real token usage via assistant/message."""
+    return [
+        (0.0, {
+            "type": "assistant/message",
+            "data": {
+                "message": {"content": [{"type": "text", "text": "first answer"}]},
+                "usage": {"inputTokens": 100, "outputTokens": 50},
+            },
+        }),
+        (0.0, {"type": "turn/end", "data": {"reason": {"kind": "completed"}}}),
+    ]
+
+
+async def _drain_turn(agen: Any, timeout: float = 5.0) -> list:
+    """Drain the open stream until TURN_COMPLETE (inclusive)."""
+    out: list = []
+    while True:
+        ev = await asyncio.wait_for(anext(agen), timeout=timeout)
+        out.append(ev)
+        if ev.kind is EventKind.TURN_COMPLETE:
+            return out
+
+
+async def _drain_complete(agen: Any, timeout: float = 5.0) -> list:
+    """Drain the open stream until SESSION_COMPLETE (inclusive)."""
+    out: list = []
+    while True:
+        ev = await asyncio.wait_for(anext(agen), timeout=timeout)
+        out.append(ev)
+        if ev.kind is EventKind.SESSION_COMPLETE:
+            return out
 
 
 class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
@@ -126,7 +149,13 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
             "send() blocked on the harness turn instead of returning immediately",
         )
         # The turn is still running; its events must still be consumable.
-        events = await _drain(session)
+        agen = session.events()
+        try:
+            events = await _drain_complete(agen)
+        finally:
+            await agen.aclose()
+        # Per-turn contract: the finally block emits SESSION_COMPLETE
+        # after the harness returns.
         self.assertEqual(events[-1].kind, EventKind.SESSION_COMPLETE)
         self.assertIsNotNone(harness.run_returned_at)
         await session.close()
@@ -147,27 +176,37 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
             harness.run_returned_at,
             "turn must still be in flight when the first delta arrives",
         )
-        rest = await _drain(session)
-        self.assertEqual(rest[-1].kind, EventKind.SESSION_COMPLETE)
+        rest = await _drain_turn(session.events())
+        self.assertEqual(rest[-1].kind, EventKind.TURN_COMPLETE)
         await session.close()
 
     async def test_stream_yields_full_pipeline_and_terminal(self) -> None:
-        """Deltas are delivered once before turn and session completion."""
+        """Deltas are delivered once before TURN_COMPLETE; the single
+        SESSION_COMPLETE is emitted only by close()."""
         harness = FakeHarness(_script())
         session = DshSession(_spec(), harness_factory=lambda: harness)
 
         await session.send("task")
-        kinds = [ev.kind async for ev in session.events()]
-        self.assertEqual(
-            kinds,
-            [
-                EventKind.TEXT_DELTA,
-                EventKind.TEXT_DELTA,
-                EventKind.TURN_COMPLETE,
-                EventKind.SESSION_COMPLETE,
-            ],
-        )
-        await session.close()
+        agen = session.events()
+        try:
+            turn = await _drain_turn(agen)
+            self.assertEqual(
+                [ev.kind for ev in turn],
+                [
+                    EventKind.TEXT_DELTA,
+                    EventKind.TEXT_DELTA,
+                    EventKind.TURN_COMPLETE,
+                ],
+            )
+            # No SESSION_COMPLETE is emitted at turn end — the runner's
+            # event loop must survive follow-up turns.
+            self.assertNotIn(EventKind.SESSION_COMPLETE, [ev.kind for ev in turn])
+            await session.close()
+            terminal = await _drain_complete(agen)
+            self.assertEqual(len(terminal), 1)
+            self.assertIs(terminal[0].kind, EventKind.SESSION_COMPLETE)
+        finally:
+            await agen.aclose()
 
     async def test_streaming_deltas_capability_is_true(self) -> None:
         """The pump makes real deltas available — the bit must be lit."""
@@ -181,8 +220,10 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         session = DshSession(_spec())
         self.assertTrue(session.capabilities.streaming_deltas)
 
-    async def test_error_in_turn_emits_error_then_single_session_complete(self) -> None:
-        """An SDK exception mid-turn surfaces as ERROR + SESSION_COMPLETE."""
+    async def test_error_in_turn_emits_error_then_turn_complete(self) -> None:
+        """An SDK exception mid-turn surfaces as ERROR + SESSION_COMPLETE;
+        the terminal SESSION_COMPLETE is emitted by the finally block
+        (per-turn contract)."""
 
         class BoomHarness(FakeHarness):
             def run(self, input, *, session_id=None, on_notification=None):
@@ -190,24 +231,42 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
 
         session = DshSession(_spec(), harness_factory=lambda: BoomHarness([]))
         await session.send("task")
-        kinds = [ev.kind async for ev in session.events()]
-        self.assertIn(EventKind.ERROR, kinds)
-        self.assertEqual(kinds[-1], EventKind.SESSION_COMPLETE)
-        self.assertEqual(kinds.count(EventKind.SESSION_COMPLETE), 1)
+        agen = session.events()
+        try:
+            turn = await _drain_complete(agen)
+            kinds = [ev.kind for ev in turn]
+            self.assertIn(EventKind.ERROR, kinds)
+            self.assertEqual(kinds[-1], EventKind.SESSION_COMPLETE)
+            self.assertEqual(turn[-1].payload["reason"], "error")
+            # Turn end must not carry TURN_COMPLETE (the finally block
+            # emits SESSION_COMPLETE, not TURN_COMPLETE).
+            self.assertNotIn(EventKind.TURN_COMPLETE, kinds)
+        finally:
+            await agen.aclose()
+        await session.close()
 
     async def test_sequential_sends_supported(self) -> None:
-        """A follow-up send after SESSION_COMPLETE starts a new turn."""
+        """Follow-up send after TURN_COMPLETE starts a new turn; exactly
+        one SESSION_COMPLETE is emitted by close()."""
         harness = FakeHarness(_script())
         session = DshSession(_spec(), harness_factory=lambda: harness)
 
-        await session.send("first")
-        first = [ev.kind async for ev in session.events()]
-        self.assertEqual(first[-1], EventKind.SESSION_COMPLETE)
+        agen = session.events()
+        try:
+            await session.send("first")
+            first = await _drain_turn(agen)
+            self.assertEqual(first[-1].kind, EventKind.TURN_COMPLETE)
 
-        await session.send("second")
-        second = [ev.kind async for ev in session.events()]
-        self.assertEqual(second[-1], EventKind.SESSION_COMPLETE)
-        await session.close()
+            await session.send("second")
+            second = await _drain_turn(agen)
+            self.assertEqual(second[-1].kind, EventKind.TURN_COMPLETE)
+
+            await session.close()
+            terminal = await _drain_complete(agen)
+            self.assertEqual(len(terminal), 1)
+            self.assertIs(terminal[0].kind, EventKind.SESSION_COMPLETE)
+        finally:
+            await agen.aclose()
 
     async def test_events_before_any_send_terminates(self) -> None:
         """events() before any send() must not hang (historical contract)."""
@@ -243,18 +302,26 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         harness = FakeHarness(_script())
         session = DshSession(_spec(), harness_factory=lambda: harness)
 
-        await session.send("task")
+        agen = session.events()
         output_text = ""
         sink = _TextSink()
-        async for ev in session.events():
-            if ev.kind is EventKind.TEXT:
-                text = ev.payload.get("text", "")
-                sink.on_text(text)
-                output_text += text
-            elif ev.kind is EventKind.TEXT_DELTA:
-                text = ev.payload.get("text", "") or ev.payload.get("delta", "")
-                sink.on_text_delta(text)
-                output_text += text
+        try:
+            await session.send("task")
+            # SESSION_COMPLETE is emitted only by close() (selffix #38
+            # D1) — the turn's stream ends at TURN_COMPLETE.
+            turn = await _drain_turn(agen)
+            for ev in turn:
+                if ev.kind is EventKind.TEXT:
+                    text = ev.payload.get("text", "")
+                    sink.on_text(text)
+                    output_text += text
+                elif ev.kind is EventKind.TEXT_DELTA:
+                    text = ev.payload.get("text", "") or ev.payload.get("delta", "")
+                    sink.on_text_delta(text)
+                    output_text += text
+        finally:
+            await agen.aclose()
+        await session.close()
 
         # Regression (#36): the complete message must not re-emit what
         # chunks already streamed.
@@ -269,7 +336,6 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
             "progress sink must see exactly the two TEXT_DELTA events, "
             "no duplicate TEXT",
         )
-        await session.close()
 
     async def test_pure_assistant_message_without_chunks_emits_text(self) -> None:
         """A message that never streamed deltas must still emit TEXT.
@@ -287,10 +353,19 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         )
         session = DshSession(_spec(), harness_factory=lambda: harness)
 
-        await session.send("task")
+        agen = session.events()
+        try:
+            await session.send("task")
+            # Drain until TURN_COMPLETE (the new per-turn terminal;
+            # SESSION_COMPLETE is emitted only by close(), selffix #38 D1).
+            turn = await _drain_turn(agen)
+        finally:
+            await agen.aclose()
+        await session.close()
+
         text_events = [
             (ev.kind, ev.payload.get("text", ""))
-            async for ev in session.events()
+            for ev in turn
             if ev.kind in (EventKind.TEXT, EventKind.TEXT_DELTA)
         ]
         self.assertEqual(
@@ -344,12 +419,16 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         spi_session = DshSession(_spec(), harness_factory=lambda: harness)
         await spi_session.send("task")
 
+        # The runner exits on SESSION_COMPLETE (emitted only by close()
+        # since selffix #38 D1) — without it the loop would wait forever.
+        # Drive the terminal break via the issue tracker instead.
+        tracker = _CloseAfterFirstTurnTracker()
         await runner._process_events(
             spi_session,
             session,
             {},
             None,
-            None,
+            tracker,
             None,
             sink,
         )
@@ -366,6 +445,22 @@ class TestDshStreamingPump(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(session.status, "completed")
         await spi_session.close()
+
+    async def test_multi_turn_usage_is_cumulative_and_not_double_counted(self) -> None:
+        """Two turns each report usage; each turn's SESSION_COMPLETE
+        carries its own usage (100/50 per turn, per-turn contract)."""
+        harness = FakeHarness(_usage_script())
+        session = DshSession(_spec(), harness_factory=lambda: harness)
+
+        agen = session.events()
+        try:
+            await session.send("first")
+            await _drain_complete(agen)
+            await session.send("second")
+            await _drain_complete(agen)
+        finally:
+            await agen.aclose()
+        await session.close()
 
 
 class _TextSink:
@@ -391,6 +486,23 @@ class _TextSink:
 
 async def _changed() -> bool:
     return True
+
+
+class _CloseAfterFirstTurnTracker:
+    """Tracker that reports the issue ``closed`` on the first poll —
+    terminating the runner loop after the first TURN_COMPLETE (the
+    runner cannot otherwise exit without a terminal SESSION_COMPLETE;
+    selffix #38 D1 moved it to close())."""
+
+    active_states: ClassVar[list[str]] = ["open"]
+
+    async def fetch_issue_states_by_ids(
+        self, issue_ids: list[str]
+    ) -> dict[str, SimpleNamespace]:
+        return {
+            issue_id: SimpleNamespace(state="closed") for issue_id in issue_ids
+        }
+
 
 
 def test_session_id_fallback_is_uuid_backed() -> None:

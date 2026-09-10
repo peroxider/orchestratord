@@ -74,11 +74,28 @@ def _run(script: list[dict], finish_reason: str | None = "completed") -> list:
     async def main() -> list:
         await session.send("task")
         out = []
-        async for ev in session.events():
-            out.append(ev)
-            if ev.kind is EventKind.SESSION_COMPLETE:
-                break
-        await session.close()
+        agen = session.events()
+        try:
+            # Drain the turn events (terminated by TURN_COMPLETE).
+            while True:
+                ev = await asyncio.wait_for(anext(agen), timeout=5.0)
+                out.append(ev)
+                if ev.kind is EventKind.TURN_COMPLETE:
+                    break
+        except (TimeoutError, StopAsyncIteration):
+            pass
+        finally:
+            # close() emits the single SESSION_COMPLETE (selffix #38 D1).
+            await session.close()
+            try:
+                while True:
+                    ev = await asyncio.wait_for(anext(agen), timeout=5.0)
+                    out.append(ev)
+                    if ev.kind is EventKind.SESSION_COMPLETE:
+                        break
+            except (TimeoutError, StopAsyncIteration):
+                pass
+            await agen.aclose()
         return out
 
     return asyncio.run(main())
@@ -335,27 +352,42 @@ class TestErrorDetailPropagation:
 
 
 class TestCostUsageReporting:
-    """Real token usage must reach the SESSION_COMPLETE payload."""
+    """Real token usage must reach the single SESSION_COMPLETE payload."""
 
-    def test_each_send_reports_only_its_own_usage(self) -> None:
+    def test_usage_is_cumulative_across_sends(self) -> None:
+        """Two sends each report usage; each turn's SESSION_COMPLETE
+        carries its own usage (per-turn contract).  The consumer
+        accumulates per-turn totals.
+        """
         session = _session([
             {"type": "assistant/message", "data": {"message": {"content": []}, "usage": {"inputTokens": 100, "outputTokens": 10}}},
             {"type": "turn/end", "data": {"reason": {"kind": "completed"}}},
         ])
 
         async def main():
-            totals = []
+            usages = []
+            await session.send("First request")
+            agen = session.events()
             try:
-                for prompt in ["First request", "Follow-up request"]:
-                    await session.send(prompt)
-                    async for event in session.events():
-                        if event.kind is EventKind.SESSION_COMPLETE:
-                            totals.append(event.payload["usage"])
-                            break
+                # Drain first turn (including its SESSION_COMPLETE).
+                while True:
+                    ev = await asyncio.wait_for(anext(agen), timeout=5.0)
+                    if ev.kind is EventKind.SESSION_COMPLETE:
+                        usages.append(ev.payload.get("usage"))
+                        break
+                await session.send("Follow-up request")
+                # Drain second turn (including its SESSION_COMPLETE).
+                while True:
+                    ev = await asyncio.wait_for(anext(agen), timeout=5.0)
+                    if ev.kind is EventKind.SESSION_COMPLETE:
+                        usages.append(ev.payload.get("usage"))
+                        break
             finally:
-                await session.close()
-            return totals
+                await agen.aclose()
+            await session.close()
+            return usages
 
+        # Each turn reports its own usage: 100/10 per turn.
         assert asyncio.run(main()) == [
             {"inputTokens": 100, "outputTokens": 10},
             {"inputTokens": 100, "outputTokens": 10},

@@ -1360,6 +1360,16 @@ class BackendRunner:
         tool_call_started: dict[str, tuple[str, float]] = {}
         tool_stats: dict[str, dict[str, float]] = {}
 
+        # True when a follow-up was dispatched at the previous turn
+        # boundary; the next SESSION_COMPLETE is then intermediate for
+        # per-turn-terminal backends (dsh et al.).
+        _followup_dispatched = False
+        # Remember the last SESSION_COMPLETE that was consumed as
+        # intermediate.  If the event stream terminates right after it
+        # (terminal-only backends such as opencode), it is reprocessed
+        # as the terminal frame below.
+        _last_session_complete: tuple[Any, EventEnvelope, dict[str, Any], str] | None = None
+
         async for event in _poll_events(spi_session.events()):
             # Commands are drained before handling the event so an operator
             # request arriving at a turn boundary is available immediately.
@@ -1613,6 +1623,12 @@ class BackendRunner:
                         logger.exception("followup delivery failed run_id=%s", session.run_id)
                     else:
                         pending_followups.clear()
+                        # The follow-up turn is in flight.  The next
+                        # SESSION_COMPLETE is therefore intermediate for
+                        # backends that emit a terminal frame per turn
+                        # (dsh et al.) — the stream must stay alive to
+                        # consume the follow-up's events.
+                        _followup_dispatched = True
 
                 # Check if issue is still active via tracker.
                 if tracker is not None and not await self._should_continue(
@@ -1632,6 +1648,30 @@ class BackendRunner:
                     # instead of letting a generic success terminal erase it.
                     reason = "backend_error"
                     payload["reason"] = reason
+                usage = payload.get("usage")
+                if isinstance(usage, dict) and usage:
+                    existing = getattr(session, "token_usage", None)
+                    merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+                    # Normalize backend-specific key formats (dsh camelCase,
+                    # opencode lowercase) to the canonical lowercase keys the
+                    # registry / CLI / dashboard consume.  Per-turn
+                    # SESSION_COMPLETE frames carry that turn's usage; the
+                    # values are accumulated across turns.
+                    for key, value in _normalize_token_usage(usage).items():
+                        merged[key] = merged.get(key, 0) + int(value)
+                    session.token_usage = merged
+                if _followup_dispatched:
+                    # A follow-up turn was dispatched at the previous
+                    # turn boundary.  For backends that emit a terminal
+                    # frame per turn (dsh et al.) this SESSION_COMPLETE
+                    # is intermediate: consume its per-turn usage, then
+                    # keep the loop alive to pick up the follow-up
+                    # turn's events.  If the stream terminates right
+                    # after this frame (terminal-only backends), it is
+                    # reprocessed as terminal below the loop.
+                    _followup_dispatched = False
+                    _last_session_complete = (kind, event, payload, reason)
+                    continue
                 session.status = "completed" if reason in ("success", "turn_complete") else "failed"
                 session.session_end_reason = reason
                 # Extract cost telemetry from the terminal payload.
@@ -1647,16 +1687,6 @@ class BackendRunner:
                             "SESSION_COMPLETE total_cost_usd not numeric: %r",
                             total_cost_usd,
                         )
-                usage = payload.get("usage")
-                if isinstance(usage, dict) and usage:
-                    existing = getattr(session, "token_usage", None)
-                    merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
-                    # Normalize backend-specific key formats (dsh camelCase,
-                    # opencode lowercase) to the canonical lowercase keys the
-                    # registry / CLI / dashboard consume, then accumulate.
-                    for key, value in _normalize_token_usage(usage).items():
-                        merged[key] = merged.get(key, 0) + int(value)
-                    session.token_usage = merged
                 # Record run-level usage into orchestratord telemetry
                 # (best-effort; local JSONL — independent of clawcodex).
                 try:
@@ -1693,6 +1723,7 @@ class BackendRunner:
                 # chat clients can settle the final assistant bubble before
                 # the socket closes and they receive RunEnded.
                 await _broadcast_to_socket(session, event)
+                _last_session_complete = None
                 break
 
             elif kind == EventKind.ERROR:
@@ -1829,6 +1860,61 @@ class BackendRunner:
             if await self._drain_backend_controls(spi_session, session):
                 session.status = "failed"
                 break
+
+        # If the stream terminated right after an intermediate
+        # SESSION_COMPLETE (terminal-only backends such as opencode
+        # that emit a single frame per session), reprocess it as the
+        # terminal frame.
+        if _last_session_complete is not None:
+            _kind, _event, _payload, _reason = _last_session_complete
+            _last_session_complete = None
+            _payload.setdefault(
+                "duration_ms", max(0.0, (time.monotonic() - run_start) * 1000)
+            )
+            if backend_error_message and _reason in ("success", "turn_complete"):
+                _reason = "backend_error"
+                _payload["reason"] = _reason
+            session.status = "completed" if _reason in ("success", "turn_complete") else "failed"
+            session.session_end_reason = _reason
+            total_cost_usd = _payload.get("total_cost_usd")
+            if total_cost_usd is not None:
+                try:
+                    session.cost_usd = float(total_cost_usd)
+                except (TypeError, ValueError):
+                    logger.debug(
+                        "SESSION_COMPLETE total_cost_usd not numeric: %r",
+                        total_cost_usd,
+                    )
+            try:
+                from orchestratord.telemetry import record_usage
+
+                record_usage(
+                    session_id=(
+                        getattr(session, "session_id", None)
+                        or getattr(session, "backend_session_id", None)
+                        or getattr(session, "run_id", None)
+                        or ""
+                    ),
+                    run_id=getattr(session, "run_id", None) or "",
+                    issue_id=(
+                        session.issue.id
+                        if getattr(session, "issue", None) is not None
+                        else ""
+                    ),
+                    backend=getattr(session, "backend_name", None) or "",
+                    model=getattr(session, "_snapshot_model", None) or "",
+                    cost_usd=session.cost_usd,
+                    token_usage=getattr(session, "token_usage", None) or {},
+                    duration_s=max(0.0, time.monotonic() - run_start),
+                    turn_count=session.turn_count or 0,
+                )
+            except Exception:
+                pass
+            if progress_reporter is not None and hasattr(progress_reporter, "on_session_complete"):
+                progress_reporter.on_session_complete(
+                    SessionComplete(reason=_reason), session
+                )
+            await _broadcast_to_socket(session, _event)
 
         session.completed_at = time.time()
         session.duration_ms = max(0.0, (time.monotonic() - run_start) * 1000)
