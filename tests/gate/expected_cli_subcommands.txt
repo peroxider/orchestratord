@@ -6,6 +6,7 @@ db
 gateway
 issue
 peer
+recall
 rules
 run
 serve
