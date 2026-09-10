@@ -55,6 +55,9 @@ class ReviewFeedbackService:
         self._bot_login: str | None = None
         self._bot_login_resolved = False
         self._bot_login_explicit = False
+        # 距上次成功采集的时长（单位：秒，来自 time.monotonic()）。
+        # 注意与配置 poll_interval_ms（单位：毫秒）为两套单位，比较时需换算。
+        self._last_collect_monotonic: float = 0.0
         self._ignored_body_patterns = _compile_patterns(
             getattr(config, "ignored_body_patterns", [])
         )
@@ -62,6 +65,16 @@ class ReviewFeedbackService:
     async def collect_followups(self, available_slots: int) -> list[ReviewFollowup]:
         if available_slots <= 0 or not getattr(self.config, "enabled", False):
             return []
+
+        # 节流：遵循配置中的 poll_interval_ms（主循环每周期都会调用本方法，
+        # 但只有间隔到达时才真正轮询 registry 中全部 PR 的反馈）。
+        # 首次调用时 _last_collect_monotonic 为 0，time.monotonic() - 0 恒大于
+        # 任何合理间隔，因此首轮采集不会被跳过。
+        poll_interval_ms = getattr(self.config, "poll_interval_ms", 60_000)
+        if poll_interval_ms > 0:
+            elapsed_s = time.monotonic() - self._last_collect_monotonic
+            if elapsed_s < poll_interval_ms / 1000.0:
+                return []
 
         if not self._bot_login_resolved:
             explicit = getattr(self.config, "bot_login", None)
@@ -134,6 +147,7 @@ class ReviewFeedbackService:
                     prompt="",
                 )
             )
+        self._last_collect_monotonic = time.monotonic()
         return followups
 
     def _filter_pending(
