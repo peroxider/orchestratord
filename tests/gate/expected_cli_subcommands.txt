@@ -3,6 +3,7 @@ backend
 daemon
 dashboard
 db
+gateway
 issue
 peer
 rules
