@@ -838,6 +838,49 @@ class IssuePrInterpretation:
                 )
             await self._process_rebase_intent(issue_obj)
 
+    async def _close_merged_pr_issues(self) -> None:
+        """Close remote issues whose PRs have been merged.
+
+        Scans registry records with a pr_number and non-terminal status
+        (SYNCED / COMPLETED), checks whether the upstream PR has been
+        merged via ``fetch_pull_request_mergeable``, and if so closes the
+        remote issue with ``_sync_tracker_issue_state("completed")``.
+        Runs at most once per poll cycle (60s interval).
+        """
+        now = time.monotonic()
+        interval_s = 60.0
+        last_run = self._state.pr_merge_close_last_run
+        if last_run > 0 and now - last_run < interval_s:
+            return
+        self._state.pr_merge_close_last_run = now
+
+        for record in list(self._registry._records.values()):
+            issue_id = record.issue_id or ""
+            if not issue_id or not record.pr_number:
+                continue
+            if record.status not in (IssueStatus.SYNCED, IssueStatus.COMPLETED):
+                continue
+            pr_ref = PullRequestRef(
+                number=record.pr_number, url=record.pr_url,
+            )
+            try:
+                status = await self.tracker.fetch_pull_request_mergeable(
+                    pull_request=pr_ref,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "PR merge scan: fetch failed for %s PR #%s: %s",
+                    issue_id, record.pr_number, exc,
+                )
+                continue
+            if status is None or not status.merged:
+                continue
+            logger.info(
+                "Issue %s PR #%s merged — closing remote issue",
+                issue_id, record.pr_number,
+            )
+            await self._sync_tracker_issue_state(issue_id, "completed")
+
     async def _launch_rebase_resolution(self, issue: Issue) -> AgentSession:
         """Launch an ``agent_rebase`` session to resolve a content conflict.
 

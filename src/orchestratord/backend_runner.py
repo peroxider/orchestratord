@@ -793,6 +793,11 @@ class BackendRunner:
         # Merge agent-level env from workflow config
         agent_env = getattr(self.agent_config, "env", None) or {}
         env.update(agent_env)
+        # NOTE: do NOT inject $CLAWCODEX_SOURCE/src into PYTHONPATH here.
+        # clawcodex's src/types/ shadows the stdlib `types` module,
+        # breaking worker process startup entirely. The worker already
+        # adds $CLAWCODEX_SOURCE to sys.path in session.py so
+        # extensions.api.query is importable without PYTHONPATH.
         return env
 
     @staticmethod

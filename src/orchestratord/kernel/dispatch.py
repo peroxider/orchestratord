@@ -48,6 +48,7 @@ class OrchestratorState:
     # seconds (not ms) of the last scan — compared against
     # ``time.monotonic()`` so a backwards clock jump is benign.
     pr_conflict_scan_last_run: float = 0.0
+    pr_merge_close_last_run: float = 0.0
     codex_totals: dict[str, int] = field(
         default_factory=lambda: {
             "input_tokens": 0,

@@ -171,6 +171,7 @@ class MergeableStatus:
     behind_by: int | None = None
     ahead_by: int | None = None
     has_conflicts: bool = False
+    merged: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 

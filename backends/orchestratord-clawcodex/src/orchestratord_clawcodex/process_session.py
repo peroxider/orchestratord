@@ -126,7 +126,12 @@ class ClawcodexProcessSession:
 
     async def _read_messages(self) -> None:
         process = self._process
-        failure = "ClawCodex worker exited before completing the request"
+
+        def _failure_reason() -> str:
+            tail = self._stderr_tail[-2000:] if self._stderr_tail else "(no stderr)"
+            return f"ClawCodex worker exited before completing the request | stderr: {tail}"
+
+        failure: str | None = None
         try:
             while line := await process.stdout.readline():
                 message = json.loads(line)
@@ -157,6 +162,8 @@ class ClawcodexProcessSession:
             await asyncio.to_thread(self._tree.kill)
         finally:
             await process.wait()
+            if failure is None:
+                failure = _failure_reason()
             for reply in self._pending.values():
                 if not reply.done():
                     reply.set_exception(RuntimeError("session closed" if self._closed else failure))

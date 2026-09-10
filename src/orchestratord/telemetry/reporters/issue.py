@@ -175,7 +175,8 @@ class GitCodeIssueClient:
             if str(it.get("title", "")).strip() == title:
                 return it.get("number") or it.get("id")
         created = self._request(
-            "/issues", method="POST", body={"title": title, "body": ""}
+            "/issues", method="POST",
+            body={"title": title, "body": "Telemetry summary pending..."},
         )
         if not created.ok:
             return None
