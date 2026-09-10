@@ -35,6 +35,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from orchestratord.agent_runner import AgentSession
+from orchestratord.applications.issue_pr.interpret import IssuePrInterpretation
+from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
 from orchestratord.config.schema import (
     PrConflictScanConfig,
     WorkflowConfig,
@@ -1201,6 +1203,95 @@ class TestRecoverPersistentStates(unittest.IsolatedAsyncioTestCase):
 
             orch._launch_issue.assert_not_awaited()
             self.assertIn("7", orch._state.pending_review)
+
+
+class TestIssuePrInterpretationReviewFollowup(unittest.TestCase):
+    """Regression: _uses_review_feedback_followup must be a @staticmethod.
+
+    Issue #42: after the method moved from Orchestrator into
+    IssuePrInterpretation, the @staticmethod decorator was dropped.  Instance-
+    style calls like lifecycle.post_viz_gate / provider._provide both invoke
+    ``self._interpretation._uses_review_feedback_followup(record)``, which
+    bound the instance as the first argument and raised TypeError.
+    """
+
+    def _make_interpretation(self) -> IssuePrInterpretation:
+        return IssuePrInterpretation(host=SimpleNamespace())
+
+    def test_instance_call_chat_followup_returns_false(self) -> None:
+        """Instance-style call records that do NOT need a review round."""
+        record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="chat")
+        interpretation = self._make_interpretation()
+        # Before the @staticmethod fix this raises TypeError.
+        self.assertFalse(interpretation._uses_review_feedback_followup(record))
+
+    def test_instance_call_command_followup_returns_true(self) -> None:
+        """Instance-style call records that DO need a review round."""
+        record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="cli")
+        interpretation = self._make_interpretation()
+        self.assertTrue(interpretation._uses_review_feedback_followup(record))
+
+    def test_instance_call_none_record_returns_false(self) -> None:
+        """None record (no registry entry) never triggers review feedback."""
+        interpretation = self._make_interpretation()
+        self.assertFalse(interpretation._uses_review_feedback_followup(None))
+
+    def test_class_call_matches_orchestrator_shim(self) -> None:
+        """Class-level calls must stay consistent with Orchestrator shim."""
+        chat = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="chat")
+        cli = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="cli")
+        self.assertFalse(IssuePrInterpretation._uses_review_feedback_followup(chat))
+        self.assertTrue(IssuePrInterpretation._uses_review_feedback_followup(cli))
+        self.assertFalse(Orchestrator._uses_review_feedback_followup(chat))
+        self.assertTrue(Orchestrator._uses_review_feedback_followup(cli))
+
+
+class TestPostVizGateReviewFollowupCrash(unittest.IsolatedAsyncioTestCase):
+    """Regression: post_viz_gate must not crash on followup records.
+
+    Issue #42 traceback hit lifecycle.post_viz_gate:
+    ``self._interpretation._uses_review_feedback_followup(followup_record)``
+    raised TypeError when the method lost its @staticmethod.  The bare
+    instance-call tests above prove the decorator; this test drives the
+    REAL call site so the gate intercepts the exact crash path the issue
+    described (previously uncovered: "post_viz_gate 的 launch 链路无测试").
+    """
+
+    def _make_lifecycle(self, record: Any) -> IssueToPrLifecycle:
+        host = SimpleNamespace()
+        host._registry = SimpleNamespace(get=lambda issue_id: record)
+        lifecycle = IssueToPrLifecycle(host)
+        # Do not fetch real PR feedback / launch a real follow-up run.
+        lifecycle._interpretation._launch_followup_with_pending_reviews = AsyncMock(
+            return_value=True
+        )
+        # Do not wire a real intent session for the non-followup branch.
+        lifecycle._interpretation._prepare_intent_session = MagicMock()
+        return lifecycle
+
+    async def test_command_followup_returns_false_without_typeerror(self) -> None:
+        """Command followup: post_viz_gate must not raise TypeError."""
+        record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="cli")
+        lifecycle = self._make_lifecycle(record)
+        session = SimpleNamespace(issue=Issue(id="42"), run_kind=None)
+        # Before the @staticmethod fix this raised
+        # TypeError: takes 1 positional argument but 2 were given.
+        handled = await lifecycle.post_viz_gate(session)
+        self.assertFalse(handled)
+        lifecycle._interpretation._launch_followup_with_pending_reviews.assert_awaited_once_with(
+            session.issue
+        )
+
+    async def test_none_record_returns_true_without_typeerror(self) -> None:
+        """None record: gate is skipped, session wiring proceeds, no crash."""
+        lifecycle = self._make_lifecycle(None)
+        session = SimpleNamespace(issue=Issue(id="42"), run_kind=None)
+        handled = await lifecycle.post_viz_gate(session)
+        self.assertTrue(handled)
+        lifecycle._interpretation._launch_followup_with_pending_reviews.assert_not_awaited()
+        lifecycle._interpretation._prepare_intent_session.assert_called_once_with(
+            session
+        )
 
 
 if __name__ == "__main__":
