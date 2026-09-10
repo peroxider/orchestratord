@@ -190,6 +190,7 @@ class IssueToPrLifecycle:
         await self._interpretation._process_review_feedback()
         await self._interpretation._process_pending_rebase_conflicts()
         await self._interpretation._process_pr_conflict_scan()
+        await self._interpretation._close_merged_pr_issues()
 
     async def prepare_launch(self, issue: Issue) -> PreparedRun | None:
         """执行前业务装配（协议 prepare_run 的 interim 直参形态）。
@@ -573,7 +574,18 @@ class IssueToPrLifecycle:
             )
             self._host._state.completed.add(session.issue.id or "")
             self._host._registry.mark_completed(session.issue.id or "")
-            await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "completed")
+            record = self._host._registry.get(session.issue.id or "")
+            if record and record.pr_number:
+                logger.info(
+                    "Issue %s completed with unmerged PR #%s — "
+                    "leaving issue open on tracker (close when PR merges)",
+                    session.issue.id,
+                    record.pr_number,
+                )
+            else:
+                await self._interpretation._sync_tracker_issue_state(
+                    session.issue.id or "", "completed"
+                )
             outcome = Outcome.dispose("completed")
         elif session.status == "verification_failed":
             self._host.status_dashboard.on_session_failed(

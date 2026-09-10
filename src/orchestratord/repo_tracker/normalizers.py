@@ -387,13 +387,13 @@ def _normalize_mergeable_status(
 
     has_conflicts = False
     if platform == "gitcode":
-        # GitCode: when fields are missing, leave has_conflicts False
-        # so daemon treats it as no-op.
         if mergeable is False or mergeable_state == "dirty":
             has_conflicts = True
     else:
         if mergeable is False or mergeable_state == "dirty":
             has_conflicts = True
+
+    merged = _coerce_bool(payload_dict.get("merged")) or False
 
     ahead_by = _coerce_int(payload_dict.get("ahead_by"))
     behind_by = _coerce_int(payload_dict.get("behind_by"))
@@ -404,6 +404,7 @@ def _normalize_mergeable_status(
         ahead_by=ahead_by,
         behind_by=behind_by,
         has_conflicts=has_conflicts,
+        merged=merged,
         raw={"platform": platform, "payload": payload_dict},
     )
 
