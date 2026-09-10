@@ -49,6 +49,7 @@ from orchestratord.modes.base import DEFAULT_MODE, ModeDecision
 from orchestratord.tracker import Intent, PullRequestCapability, supports
 from .commands import IssuePrCommands
 from .interpret import IssuePrInterpretation
+from .payloads import session_payload
 
 if TYPE_CHECKING:
     from orchestratord.config.schema import WorkflowConfig
@@ -86,8 +87,6 @@ class _IssueLifecycleHost(Protocol):
         message: str = "",
         payload: dict[str, Any] | None = None,
     ) -> None: ...
-
-    def _session_payload(self, session: Any, **extra: Any) -> dict[str, Any]: ...
 
     async def _schedule_retry(
         self,
@@ -570,7 +569,7 @@ class IssueToPrLifecycle:
                 "issue.completed",
                 EventLevel.SUCCESS,
                 "任务完成",
-                self._host._session_payload(session),
+                session_payload(self._host.tracker, self._host._registry, session),
             )
             self._host._state.completed.add(session.issue.id or "")
             self._host._registry.mark_completed(session.issue.id or "")
@@ -774,7 +773,9 @@ class IssueToPrLifecycle:
                 "issue.failed",
                 EventLevel.WARN,
                 detail,
-                self._host._session_payload(
+                session_payload(
+                    self._host.tracker,
+                    self._host._registry,
                     session,
                     turns=getattr(session, "turn_count", None),
                 ),

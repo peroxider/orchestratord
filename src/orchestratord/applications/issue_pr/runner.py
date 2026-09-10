@@ -23,6 +23,8 @@ from orchestratord.premise_check import format_cannot_proceed_comment, read_cann
 from orchestratord.runner_utils import _await_with_active_timeout
 from orchestratord.session_state import AgentSession
 from orchestratord.kernel.work_provider import WorkItem
+from .repro import repro_gate_applies, run_repro_gate
+from .payloads import session_payload
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +78,8 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                 # failure (executable check, non-zero exit). A closed
                 # gate fails the issue with a "cannot reproduce"
                 # report instead of an unverifiable fix MR.
-                if host._repro_gate_applies(session):
-                    gate_open = await host._run_repro_gate(session, progress_sink)
+                if repro_gate_applies(host, session):
+                    gate_open = await run_repro_gate(host, session, progress_sink)
                     if not gate_open:
                         return
 
@@ -315,7 +317,9 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                                 "pr.updated" if is_followup else "pr.opened",
                                 EventLevel.INFO,
                                 "PR updated" if is_followup else "PR opened",
-                                host._session_payload(
+                                session_payload(
+                                    host.tracker,
+                                    host._registry,
                                     session,
                                     pr=pr_url,
                                     commit=getattr(sync_result, "commit_sha", None),
@@ -344,7 +348,7 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                                     "pr.pending_review_gate",
                                     EventLevel.WARN,
                                     "pending human review",
-                                    host._session_payload(session, pr=pr_url),
+                                    session_payload(host.tracker, host._registry, session, pr=pr_url),
                                 )
                                 host._state.pending_review.add(session.issue.id or "")
                                 # Do NOT cleanup workspace �� human needs to review it
@@ -457,7 +461,9 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                 "post_commit_failed",
                 EventLevel.ERROR,
                 str(exc),
-                host._session_payload(
+                session_payload(
+                    host.tracker,
+                    host._registry,
                     session,
                     pr=sync_result.pull_request.url
                     if sync_result.pull_request is not None
@@ -486,7 +492,7 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                 "verification.failed",
                 EventLevel.WARN,
                 exc.output or str(exc),
-                host._session_payload(session),
+                session_payload(host.tracker, host._registry, session),
             )
         except HookFailedError as exc:
             logger.warning(
@@ -504,7 +510,7 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                 "verification.failed",
                 EventLevel.WARN,
                 f"{exc.hook_name}: {exc.output or exc}",
-                host._session_payload(session),
+                session_payload(host.tracker, host._registry, session),
             )
         except asyncio.TimeoutError:
             reason = (
@@ -541,7 +547,9 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                 "issue.failed",
                 EventLevel.WARN,
                 reason,
-                host._session_payload(
+                session_payload(
+                    host.tracker,
+                    host._registry,
                     session,
                     turns=getattr(session, "turn_count", None),
                 ),

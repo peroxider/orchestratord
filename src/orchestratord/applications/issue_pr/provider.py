@@ -22,6 +22,7 @@ from orchestratord.events import EventLevel
 from orchestratord.issue_registry import IssueStatus
 from orchestratord.kernel.work_provider import WorkItem
 from orchestratord.tracker import Command, Intent
+from .payloads import issue_payload
 
 if TYPE_CHECKING:
     from orchestratord.config.schema import WorkflowConfig
@@ -137,7 +138,7 @@ class IssuePrWorkProvider:
                     "issue.detected",
                     EventLevel.INFO,
                     "新增 ISSUE",
-                    self._host._issue_payload(issue, url=issue.url),
+                    issue_payload(self._host.tracker, issue, url=issue.url),
                 )
             elif issue.author_login:
                 record = self._host._registry.get(issue.id or "")

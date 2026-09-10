@@ -34,6 +34,7 @@ from orchestratord.tracker import (
     supports,
 )
 from .prompts import render_feedback_summary, render_rebase, render_review_feedback
+from .payloads import issue_payload
 
 logger = logging.getLogger(__name__)
 _SUCCESS_END_REASONS = frozenset({"success"})
@@ -926,7 +927,7 @@ class IssuePrInterpretation:
                 "pr.updated",
                 EventLevel.SUCCESS,
                 "rebase 冲突已解决，PR 已更新",
-                self._issue_payload(issue, pr=pr_url, commit=new_head),
+                issue_payload(self.host.tracker, issue, pr=pr_url, commit=new_head),
             )
             self._log_audit_event(
                 issue_id=issue_id,
@@ -951,7 +952,7 @@ class IssuePrInterpretation:
             "issue.failed",
             EventLevel.WARN,
             "rebase 冲突未解决，请人工介入",
-            self._issue_payload(issue, pr=pr_url),
+            issue_payload(self.host.tracker, issue, pr=pr_url),
         )
         self._log_audit_event(
             issue_id=issue_id,
