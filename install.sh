@@ -141,7 +141,13 @@ ${BOLD}Options:${RESET}
   --python PATH           Python interpreter to use (default: auto-detect)
   --no-venv               Install into current Python environment (no venv)
   --with-db               Initialize/migrate the database schema after install
-  --with-web              Also build the Next.js Web client (apps/web)
+  --with-web              Build the Next.js Web client (apps/web)
+                          (requires Node.js >= 20.9 + pnpm >= 9; runs
+                          pnpm install at the repo root to resolve the
+                          monorepo workspace:* deps)
+  --reset                 (with --with-web) wipe the project's pnpm state
+                          (node_modules, .pnpm store) before installing.
+                          Use to recover from a broken install.
   --dry-run               Show what would be done, don't execute
   --help                  Show this help message
 
@@ -245,6 +251,138 @@ _pip_install_editable() {
     fi
 }
 
+# ── Workspace / version helpers ─────────────────────────────────────────────
+# Required for --with-web (Next.js 16 monorepo build). Optional otherwise.
+MIN_NODE_VERSION="20.9.0"
+MIN_PNPM_VERSION="9.0.0"
+
+_version_ge() {
+    # Returns 0 if $1 >= $2 (dot-separated numeric versions).
+    local cur="$1" min="$2"
+    local IFS='.'
+    local -a cur_parts=($cur) min_parts=($min)
+    local i
+    for i in 0 1 2; do
+        local c=${cur_parts[$i]:-0}
+        local m=${min_parts[$i]:-0}
+        if (( c > m )); then return 0; fi
+        if (( c < m )); then return 1; fi
+    done
+    return 0
+}
+
+_assert_workspace_layout() {
+    # The web client lives in a pnpm workspace; workspace:* deps resolve
+    # at the monorepo root (where pnpm-workspace.yaml lives) BEFORE
+    # `next build` is invoked. A sparse / partial checkout that is missing
+    # packages/* fails with a cryptic link error from pnpm; surface the
+    # real cause up front.
+    local src="$1"
+    local missing=()
+
+    if [[ ! -f "${src}/pnpm-workspace.yaml" ]]; then
+        missing+=("pnpm-workspace.yaml (repo root)")
+    fi
+    if [[ ! -f "${src}/apps/web/package.json" ]]; then
+        missing+=("apps/web/package.json")
+    fi
+
+    # Runtime workspace packages required by apps/web (workspace:* deps).
+    local required_pkgs=(
+        "packages/app-contracts/package.json"
+        "packages/app-issue-pr/package.json"
+        "packages/core/package.json"
+        "packages/ui/package.json"
+        "packages/views/package.json"
+    )
+    local rel
+    for rel in "${required_pkgs[@]}"; do
+        if [[ ! -f "${src}/${rel}" ]]; then
+            missing+=("${rel}")
+        fi
+    done
+
+    if (( ${#missing[@]} > 0 )); then
+        error "Monorepo layout incomplete — the web build needs:"
+        local m
+        for m in "${missing[@]}"; do
+            echo "    - ${m}"
+        done
+        echo ""
+        echo "  Ensure you cloned the full repository (not a sparse / partial checkout)."
+        return 1
+    fi
+}
+
+_verify_web_integrity() {
+    # After pnpm install reports success, confirm a key workspace package is
+    # actually resolvable. pnpm can claim "Done" while leaving broken symlinks
+    # (e.g. apps/web/node_modules/next → .pnpm/.../next when .pnpm/ wasn't
+    # populated from a global store). Catching this before `next build` saves
+    # a 30-second compile → immediate MODULE_NOT_FOUND failure cycle.
+    local web_dir="$1"
+    local next_bin="${web_dir}/node_modules/next/dist/bin/next"
+    if [[ -e "$next_bin" ]]; then
+        return 0
+    fi
+    error "Web workspace integrity check FAILED"
+    echo "  Expected: ${next_bin}"
+    if [[ -L "$next_bin" ]]; then
+        local target
+        target=$(readlink "$next_bin")
+        echo "  Found:    broken symlink → ${target}"
+    else
+        echo "  Found:    missing"
+    fi
+    echo ""
+    echo "  pnpm install reported success, but a key workspace package is not"
+    echo "  resolvable. This typically means the local pnpm virtual store"
+    echo "  (node_modules/.pnpm) was not populated."
+    echo ""
+    echo "  Recovery:"
+    echo "    1. Re-run with --reset: ./install.sh --with-web --reset"
+    echo "    2. Or manually:"
+    echo "         rm -rf node_modules apps/*/node_modules packages/*/node_modules"
+    echo "         pnpm install"
+    return 1
+}
+
+_reset_node_modules() {
+    # Wipe the project's pnpm state so the next install starts from a clean
+    # virtual store. Only the web (Node) side is affected — Python venv /
+    # orchestratord pip install are untouched.
+    local src="$1"
+    info "Resetting pnpm state at ${src} (deleting node_modules / .pnpm)…"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "  [DRY RUN] rm -rf ${src}/node_modules"
+        echo "  [DRY RUN] find ${src}/apps ${src}/packages -type d -name node_modules -prune -exec rm -rf {} +"
+        echo "  [DRY RUN] rm -rf ${src}/node_modules/.pnpm"
+        return 0
+    fi
+    rm -rf "${src}/node_modules"
+    # Each workspace member keeps its own node_modules; wipe them all.
+    local sub
+    for sub in apps packages; do
+        if [[ -d "${src}/${sub}" ]]; then
+            find "${src}/${sub}" -type d -name node_modules -prune -exec rm -rf {} + 2>/dev/null || true
+        fi
+    done
+    rm -rf "${src}/node_modules/.pnpm"
+    success "pnpm state reset"
+}
+
+_format_duration() {
+    # Render a non-negative integer of seconds as a short human string.
+    local s=${1:-0}
+    if (( s < 60 )); then
+        echo "${s}s"
+    elif (( s < 3600 )); then
+        echo "$(( s / 60 ))m$(( s % 60 ))s"
+    else
+        echo "$(( s / 3600 ))h$(( (s % 3600) / 60 ))m"
+    fi
+}
+
 # ── Prerequisite checks ──────────────────────────────────────────────────────
 check_prerequisites() {
     header "Checking Prerequisites"
@@ -280,6 +418,58 @@ check_prerequisites() {
     else
         HAS_UV=false
         info "uv not found (optional); will use pip for installation"
+    fi
+
+    # Node.js + pnpm are only required when --with-web is requested, but
+    # probe them here so the user gets one consolidated, actionable error
+    # path. Skip the hard checks when the web client is not in scope.
+    check_node_and_pnpm
+}
+
+check_node_and_pnpm() {
+    local node_ok=false
+    local pnpm_ok=false
+    local node_ver=""
+    local pnpm_ver=""
+
+    if command -v node &>/dev/null; then
+        node_ver=$(node --version 2>/dev/null | sed 's/^v//' | head -c 32)
+        if _version_ge "$node_ver" "$MIN_NODE_VERSION"; then
+            node_ok=true
+            success "node — v${node_ver}"
+        else
+            warn "node v${node_ver} found, but >= ${MIN_NODE_VERSION} required for --with-web"
+        fi
+    else
+        info "node not found (required for --with-web; install Node.js ${MIN_NODE_VERSION}+)"
+    fi
+
+    if command -v pnpm &>/dev/null; then
+        pnpm_ver=$(pnpm --version 2>/dev/null | head -c 32)
+        if _version_ge "$pnpm_ver" "$MIN_PNPM_VERSION"; then
+            pnpm_ok=true
+            success "pnpm — v${pnpm_ver}"
+        else
+            warn "pnpm v${pnpm_ver} found, but >= ${MIN_PNPM_VERSION} required for --with-web"
+        fi
+    else
+        info "pnpm not found (required for --with-web; see install hints below)"
+    fi
+
+    if [[ "$WITH_WEB" == "true" ]]; then
+        if [[ "$node_ok" != "true" ]]; then
+            error "Node.js ${MIN_NODE_VERSION}+ is required for --with-web (Next.js 16)"
+            echo "    Install: https://nodejs.org/  (or use nvm: nvm install 20)"
+            exit 1
+        fi
+        if [[ "$pnpm_ok" != "true" ]]; then
+            error "pnpm ${MIN_PNPM_VERSION}+ is required for --with-web"
+            echo "    Install via Corepack (ships with Node.js):"
+            echo "        corepack enable && corepack prepare pnpm@latest --activate"
+            echo "    Or:    npm install -g pnpm"
+            echo "    See:   https://pnpm.io/installation"
+            exit 1
+        fi
     fi
 }
 
@@ -604,11 +794,31 @@ for b in list_backends():
 print_summary() {
     header "Installation Complete"
 
-    echo "  ${BOLD}orchestratord core${RESET}  installed"
+    local total_duration=""
+    if [[ -n "${TOTAL_START:-}" ]]; then
+        total_duration="  $(_format_duration $(($(date +%s) - TOTAL_START)))"
+    fi
+
+    echo "  ${BOLD}orchestratord core${RESET}  installed$(_step_time_str "${STEP_CORE_DURATION:-}")"
     if [[ -n "${INSTALLED_BACKENDS:-}" ]]; then
-        echo "  ${BOLD}Backends${RESET}          ${INSTALLED_BACKENDS// /, }"
+        echo "  ${BOLD}Backends${RESET}          ${INSTALLED_BACKENDS// /, }$(_step_time_str "${STEP_BACKENDS_DURATION:-}")"
     else
         echo "  ${BOLD}Backends${RESET}          none (core only)"
+    fi
+    if [[ "$WITH_WEB" == "true" ]]; then
+        if [[ "$WEB_BUILT_OK" == "true" ]]; then
+            echo "  ${BOLD}Web client${RESET}        built (apps/web/.next)$(_step_time_str "${STEP_WEB_DURATION:-}")"
+        else
+            echo "  ${BOLD}Web client${RESET}        FAILED (see errors above; run ./install.sh --with-web again)"
+        fi
+    fi
+    if [[ "$WITH_DB" == "true" && -n "${STEP_DB_DURATION:-}" ]]; then
+        echo "  ${BOLD}DB schema${RESET}          migrated$(_step_time_str "${STEP_DB_DURATION}")"
+    fi
+
+    if [[ -n "$total_duration" ]]; then
+        echo "  ${BOLD}──────────${RESET}"
+        echo "  ${BOLD}Total${RESET}              ${total_duration#  }"
     fi
 
     if [[ "$USE_VENV" == "true" ]]; then
@@ -626,7 +836,25 @@ print_summary() {
     echo "    orchestratord server list-backends"
     echo "    orchestratord workflow init --kind local"
     echo "    orchestratord server start --workflow ./workflow.md"
+    if [[ "$WITH_WEB" == "true" ]]; then
+        echo ""
+        echo "  ${BOLD}Web client (default :3100):${RESET}"
+        echo "    orchestratord web                       # production (next start)"
+        echo "    orchestratord web --dev                 # hot-reload dev server"
+        echo "    orchestratord serve --with-web          # daemon + web together"
+        echo "    pnpm --filter @orchestratord/web dev    # in-repo dev server"
+    fi
     echo ""
+}
+
+# Helper: format a step duration as "  (Xs)" or "" if unset/zero.
+_step_time_str() {
+    local d=${1:-}
+    if [[ -z "$d" || "$d" == "0" ]]; then
+        echo ""
+    else
+        echo "  ($(_format_duration "$d"))"
+    fi
 }
 
 # ── Argument parsing ─────────────────────────────────────────────────────────
@@ -638,6 +866,8 @@ parse_args() {
     USE_VENV=true
     WITH_WEB=false
     WITH_DB=false
+    WEB_BUILT_OK=false
+    RESET_NODE_MODULES=false
     USER_BACKENDS=""
     USER_PREFIX=""
     USER_PYTHON=""
@@ -709,6 +939,10 @@ parse_args() {
                 WITH_WEB=true
                 shift
                 ;;
+            --reset)
+                RESET_NODE_MODULES=true
+                shift
+                ;;
             --with-db)
                 WITH_DB=true
                 shift
@@ -777,27 +1011,67 @@ setup_database() {
 
 # ── Web client build (--with-web, §3.5) ─────────────────────────────────────
 build_web_client() {
-    local web_dir="${ORCH_SRC}/apps/web"
-    if [[ ! -f "${web_dir}/package.json" ]]; then
-        warn "apps/web not found at ${web_dir} — skipping web client build"
-        return 1
-    fi
-    if ! command -v pnpm >/dev/null 2>&1; then
-        warn "pnpm not found on PATH — skipping web client build"
+    # The web client lives in a pnpm workspace; workspace:* deps MUST be
+    # resolved at the monorepo root (where pnpm-workspace.yaml lives) before
+    # `next build` runs. Running pnpm install from inside apps/web either
+    # errors out or links incomplete transpilePackages sources.
+    step "Building Next.js web client (apps/web)"
+
+    if ! _assert_workspace_layout "${ORCH_SRC}"; then
         return 1
     fi
 
-    step "Building Next.js web client (apps/web)"
+    if [[ "$RESET_NODE_MODULES" == "true" ]]; then
+        _reset_node_modules "${ORCH_SRC}"
+    fi
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        echo "  [DRY RUN] (cd ${web_dir} && pnpm install && pnpm run build)"
+        echo "  [DRY RUN] (cd ${ORCH_SRC} && pnpm install --prefer-offline --config.confirmModulesPurge=false)"
+        echo "  [DRY RUN] (cd ${ORCH_SRC} && pnpm --filter @orchestratord/web build --config.confirmModulesPurge=false)"
         return 0
     fi
-    (cd "$web_dir" && pnpm install && pnpm run build)
+
+    info "Resolving monorepo workspace deps (pnpm install at ${ORCH_SRC})..."
+    WEB_STEP_START=$(date +%s)
+    # --prefer-offline: prefer the local pnpm store / cache; only hit the
+    #   registry on a miss. Resilient in environments with intermittent
+    #   network access (CI runners, behind proxies, etc.).
+    # confirmModulesPurge=false: pnpm 10 refuses to wipe node_modules in a
+    #   non-TTY environment (CI, piped scripts). Set explicitly so the
+    #   install can proceed unattended.
+    if (cd "$ORCH_SRC" && pnpm install --prefer-offline --config.confirmModulesPurge=false); then
+        success "Workspace deps resolved ($(_format_duration $(($(date +%s) - WEB_STEP_START))))"
+    elif (cd "$ORCH_SRC" && pnpm install --offline --config.confirmModulesPurge=false); then
+        warn "pnpm install with --prefer-offline failed; succeeded in --offline (cache-only) mode"
+        success "Workspace deps resolved ($(_format_duration $(($(date +%s) - WEB_STEP_START))), offline)"
+    else
+        error "pnpm install failed in both --prefer-offline and --offline modes"
+        echo "  Common causes:"
+        echo "    - registry unreachable AND local pnpm cache empty/missing required packages,"
+        echo "    - workspace in an inconsistent state (e.g. broken symlinks from a prior failed install)."
+        echo "  Recovery: re-run with --reset:"
+        echo "      ./install.sh --with-web --reset"
+        return 1
+    fi
+
+    if ! _verify_web_integrity "${ORCH_SRC}/apps/web"; then
+        return 1
+    fi
+
+    info "Building @orchestratord/web (next build)..."
+    WEB_STEP_START=$(date +%s)
+    (cd "$ORCH_SRC" && pnpm --filter @orchestratord/web build --config.confirmModulesPurge=false) || {
+        error "next build failed"
+        return 1
+    }
+    success "Web client built at apps/web/.next ($(_format_duration $(($(date +%s) - WEB_STEP_START))))"
+    WEB_BUILT_OK=true
 }
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
+    TOTAL_START=$(date +%s)
 
     echo ""
     echo -e "${BOLD}${CYAN}╔══════════════════════════════════════════════════════════════╗${RESET}"
@@ -810,18 +1084,33 @@ main() {
         echo -e "  ${YELLOW}[DRY RUN]${RESET} No changes will be made\n"
     fi
 
+    STEP_START=$(date +%s)
     check_prerequisites
+    STEP_PREREQ_DURATION=$(($(date +%s) - STEP_START))
+
+    STEP_START=$(date +%s)
     setup_venv
+    STEP_VENV_DURATION=$(($(date +%s) - STEP_START))
+
+    STEP_START=$(date +%s)
     install_core
+    STEP_CORE_DURATION=$(($(date +%s) - STEP_START))
+
     select_backends
     if [[ -n "${SELECTED_BACKENDS:-}" ]]; then
+        STEP_START=$(date +%s)
         install_backends
+        STEP_BACKENDS_DURATION=$(($(date +%s) - STEP_START))
     fi
     if [[ "$WITH_DB" == "true" ]]; then
+        STEP_START=$(date +%s)
         setup_database || true
+        STEP_DB_DURATION=$(($(date +%s) - STEP_START))
     fi
     if [[ "$WITH_WEB" == "true" ]]; then
+        STEP_START=$(date +%s)
         build_web_client || true
+        STEP_WEB_DURATION=$(($(date +%s) - STEP_START))
     fi
     verify_installation
     print_summary
