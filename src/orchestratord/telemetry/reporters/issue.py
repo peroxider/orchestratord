@@ -85,7 +85,37 @@ def _day_end_ts(day: str) -> float:
         return float("inf")
 
 
-def _api(url: str, *, api_key: str, method: str = "GET", body: dict | None = None) -> dict | None:
+class _ApiResult:
+    """Outcome of one GitCode API call.
+
+    Replaces the previous ``{"_http_error": code}`` sentinel dict so a
+    failed request is a distinct type, not a payload shape. ``data``
+    holds the parsed JSON body on success; ``error`` / ``http_code``
+    describe the failure when ``ok`` is false.
+    """
+
+    __slots__ = ("data", "error", "http_code")
+
+    def __init__(
+        self,
+        *,
+        data: Any = None,
+        error: str | None = None,
+        http_code: int | None = None,
+    ) -> None:
+        self.data = data
+        self.error = error
+        self.http_code = http_code
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+def _api(url: str, *, api_key: str, method: str = "GET", body: dict | None = None) -> _ApiResult:
     headers = {
         "Authorization": "Bearer " + api_key,
         "Content-Type": "application/json",
@@ -94,45 +124,69 @@ def _api(url: str, *, api_key: str, method: str = "GET", body: dict | None = Non
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.load(resp)
+            return _ApiResult(data=json.load(resp))
     except urllib.error.HTTPError as exc:
-        return {"_http_error": exc.code, "_msg": exc.read().decode()[:200]}
+        return _ApiResult(error=exc.read().decode()[:200], http_code=exc.code)
     except Exception:
-        return None
+        return _ApiResult(error="request failed")
 
 
-def _find_or_create_issue(*, owner: str, repo: str, api_key: str, title: str) -> int | None:
-    # search existing open issues with the exact title
-    issues = _api(
-        f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=open&per_page=100",
-        api_key=api_key,
-    )
-    items = issues if isinstance(issues, list) else (issues or {}).get("data", [])
-    for it in items:
-        if str(it.get("title", "")).strip() == title:
-            # GitCode's issues API paths use the public number, not the
-            # internal id — prefer number so follow-up calls (PATCH etc.)
-            # target the right issue.
-            return it.get("number") or it.get("id")
-    created = _api(
-        f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues",
-        api_key=api_key,
-        method="POST",
-        body={"title": title, "body": ""},
-    )
-    if isinstance(created, dict) and created.get("_http_error"):
-        return None
-    return created.get("number") or created.get("id") if created else None
+class GitCodeIssueClient:
+    """Small GitCode issues-API client bound to one ``(owner, repo)`` pair.
 
+    Holds the connection credentials so the ``owner/repo/api_key``
+    triplet is not threaded through every call, and models failures with
+    :class:`_ApiResult` instead of sentinel dicts. The
+    ``repos/{owner}/{repo}/issues`` URL prefix is constructed here, once,
+    instead of being rebuilt at every call site.
+    """
 
-def _update_issue(*, owner: str, repo: str, api_key: str, issue_id: int, body: str) -> bool:
-    result = _api(
-        f"https://api.gitcode.com/api/v5/repos/{owner}/{repo}/issues/{issue_id}",
-        api_key=api_key,
-        method="PATCH",
-        body={"body": body},
-    )
-    return not (isinstance(result, dict) and result.get("_http_error"))
+    _BASE_URL = "https://api.gitcode.com/api/v5/repos"
+
+    def __init__(self, *, owner: str, repo: str, api_key: str) -> None:
+        self.owner = owner
+        self.repo = repo
+        self.api_key = api_key
+
+    def _request(
+        self, path: str, *, method: str = "GET", body: dict | None = None
+    ) -> _ApiResult:
+        return _api(
+            f"{self._BASE_URL}/{self.owner}/{self.repo}{path}",
+            api_key=self.api_key,
+            method=method,
+            body=body,
+        )
+
+    def find_or_create(self, title: str) -> int | None:
+        """Return the public number of the open issue with ``title``,
+        creating it when missing. ``None`` when the API call failed.
+
+        GitCode's issues API paths use the public number, not the
+        internal id — prefer number so follow-up calls (PATCH etc.)
+        target the right issue.
+        """
+        # Search existing open issues with the exact title first.
+        result = self._request("/issues?state=open&per_page=100")
+        if not result.ok:
+            return None
+        items = result.data if isinstance(result.data, list) else (result.data or {}).get("data", [])
+        for it in items:
+            if str(it.get("title", "")).strip() == title:
+                return it.get("number") or it.get("id")
+        created = self._request(
+            "/issues", method="POST", body={"title": title, "body": ""}
+        )
+        if not created.ok:
+            return None
+        return created.data.get("number") or created.data.get("id") if created.data else None
+
+    def update(self, issue_id: int, body: str) -> bool:
+        """Replace an issue body. ``True`` on success."""
+        result = self._request(
+            f"/issues/{issue_id}", method="PATCH", body={"body": body}
+        )
+        return result.ok
 
 
 def _trend_section(day: str, *, window: int = 7) -> str:
@@ -199,13 +253,12 @@ def report_day(
     if not owner or not repo or not api_key:
         return False, "missing owner/repo/api_key"
 
-    issue_id = _find_or_create_issue(
-        owner=owner, repo=repo, api_key=api_key, title=full_title
-    )
+    client = GitCodeIssueClient(owner=owner, repo=repo, api_key=api_key)
+    issue_id = client.find_or_create(full_title)
     if not issue_id:
         return False, "find/create issue failed"
 
-    ok = _update_issue(owner=owner, repo=repo, api_key=api_key, issue_id=issue_id, body=rendered)
+    ok = client.update(issue_id, rendered)
     if ok:
         _write_cursor(key, day)
     return ok, f"issue #{issue_id} updated" if ok else "update failed"

@@ -11,7 +11,6 @@ under ``reporters/``.
 """
 
 from .recorder import (
-    get_recorder,
     record_command_run,
     record_crash,
     record_error,
@@ -24,7 +23,6 @@ from .recorder import (
 from .storage import events_dir, read_events, telemetry_dir
 
 __all__ = [
-    "get_recorder",
     "record_command_run",
     "record_crash",
     "record_error",

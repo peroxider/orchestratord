@@ -68,24 +68,3 @@ def record_verification(**kw: Any) -> None:
 def record_crash(**kw: Any) -> None:
     """One process-death signal (kind: daemon_unclean_shutdown/backend_worker)."""
     append_event(_event("crash", **kw))
-
-
-def get_recorder():
-    """Minimal recorder handle — the module functions record directly.
-
-    Provided for call sites that previously used
-    ``telemetry.recorder.get_recorder()`` from the clawcodex package; the
-    handle exposes the same record_* methods backed by this module.
-    """
-
-    class _Recorder:
-        record_session_start = staticmethod(record_session_start)
-        record_session_end = staticmethod(record_session_end)
-        record_command_run = staticmethod(record_command_run)
-        record_error = staticmethod(record_error)
-        record_turn = staticmethod(record_turn)
-        record_usage = staticmethod(record_usage)
-        record_verification = staticmethod(record_verification)
-        record_crash = staticmethod(record_crash)
-
-    return _Recorder()
