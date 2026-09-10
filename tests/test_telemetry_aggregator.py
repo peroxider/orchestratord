@@ -355,7 +355,7 @@ def test_closed_loop_efficiency_intervention_and_time_dimensions(
     rendered = render_summary_markdown(summary)
     assert "## 闭环效率" in rendered
     assert "闭环耗时 avg / 中位 / p95 | 300.0s" in rendered
-    assert "$0.6000" in rendered
+    assert "¥4.26" in rendered  # 0.60 USD × 7.1 display rate
     assert "自动失败次数 / 自愈 issue 数 / 平均重试到成功 | 2 / 1 / 1.0" in rendered
     assert "## 人工干预" in rendered
     assert "codex_spawn_error×1" in rendered

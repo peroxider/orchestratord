@@ -355,6 +355,10 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
         elif etype == "usage":
             summary["usage_events"] += 1
             cost = payload.get("cost_usd")
+            if not isinstance(cost, (int, float)):
+                # Same key-shape variance as tokens below: some backends
+                # report cost as totalCostUsd / total_cost_usd.
+                cost = payload.get("totalCostUsd", payload.get("total_cost_usd"))
             cost_f = float(cost) if isinstance(cost, (int, float)) else 0.0
             summary["total_cost_usd"] += cost_f
             if issue:
@@ -515,6 +519,15 @@ def _fmt(values: dict[str, Any], key: str, unit: str = "s") -> str:
     return f"{value:.1f}{unit}"
 
 
+# Display-only exchange rate: telemetry records raw USD cost (cost_usd);
+# the rendered report shows CNY. Summary dict values stay in USD.
+USD_TO_CNY_RATE = 7.1
+
+
+def _cny(usd: float) -> str:
+    return f"¥{usd * USD_TO_CNY_RATE:,.2f}"
+
+
 def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> str:
     """Render an aggregated summary as the Markdown body for the issue report."""
     header = "Orchestratord Telemetry" + (f" [{env_label}]" if env_label else "")
@@ -535,7 +548,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         f"| error 数 | {summary.get('errors', 0)} |",
         f"| session 成功/失败 | {summary.get('sessions_succeeded', 0)} / {summary.get('sessions_failed', 0)} |",
         f"| usage 事件 | {summary.get('usage_events', 0)} |",
-        f"| 总成本 (USD) | {summary.get('total_cost_usd', 0.0):.4f} |",
+        f"| 总成本 (CNY) | {_cny(summary.get('total_cost_usd', 0.0))} |",
         f"| tokens (in/out) | {summary.get('tokens_input', 0)} / {summary.get('tokens_output', 0)} |",
         "",
         "## 按 issue 事件分布",
@@ -593,15 +606,15 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         if cost.get("closed_issues"):
             closed_avg = cost.get("closed_avg_usd")
             closed_avg_text = (
-                f"${closed_avg:.4f}" if closed_avg is not None else "-"
+                _cny(closed_avg) if closed_avg is not None else "-"
             )
             lines.append(
-                f"| 闭环 issue 成本 avg / 合计 | {closed_avg_text} / ${cost.get('closed_total_usd', 0.0):.4f} |"
+                f"| 闭环 issue 成本 avg / 合计 | {closed_avg_text} / {_cny(cost.get('closed_total_usd', 0.0))} |"
             )
             top_issues = cost.get("top_issues") or []
             if top_issues:
                 top_text = ", ".join(
-                    f"#{item['issue']}: ${item['cost_usd']:.4f}" for item in top_issues
+                    f"#{item['issue']}: {_cny(item['cost_usd'])}" for item in top_issues
                 )
                 lines.append(f"| 成本 Top {len(top_issues)} issue | {top_text} |")
         if retry.get("retryable_failures"):
@@ -673,7 +686,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         lines += [
             "## 按后端",
             "",
-            "| backend | 会话 | 成功/失败 | tokens (in/out) | 成本 USD | 执行时长 | turns |",
+            "| backend | 会话 | 成功/失败 | tokens (in/out) | 成本 CNY | 执行时长 | turns |",
             "|---------|------|-----------|-----------------|----------|----------|-------|",
         ]
         for name in sorted(by_backend):
@@ -682,7 +695,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
                 f"| {name} | {b.get('sessions', 0)} "
                 f"| {b.get('succeeded', 0)} / {b.get('failed', 0)} "
                 f"| {b.get('tokens_input', 0)} / {b.get('tokens_output', 0)} "
-                f"| {b.get('cost_usd', 0.0):.4f} "
+                f"| {_cny(b.get('cost_usd', 0.0))} "
                 f"| {b.get('duration_s', 0.0):.1f}s "
                 f"| {b.get('turns', 0)} |"
             )
@@ -753,7 +766,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         lines += [
             "## 按模型 (usage)",
             "",
-            "| model | usage 事件 | tokens (in/out) | 成本 USD |",
+            "| model | usage 事件 | tokens (in/out) | 成本 CNY |",
             "|-------|------------|-----------------|----------|",
         ]
         for name in sorted(by_model):
@@ -761,7 +774,7 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
             lines.append(
                 f"| {name} | {m.get('usage_events', 0)} "
                 f"| {m.get('tokens_input', 0)} / {m.get('tokens_output', 0)} "
-                f"| {m.get('cost_usd', 0.0):.4f} |"
+                f"| {_cny(m.get('cost_usd', 0.0))} |"
             )
         lines.append("")
 

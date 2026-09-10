@@ -195,7 +195,7 @@ def _trend_section(day: str, *, window: int = 7) -> str:
     Days without a local events file are skipped; the reported day itself
     is the last row. Pure local aggregation — no network calls.
     """
-    from ..aggregator import aggregate_day
+    from ..aggregator import USD_TO_CNY_RATE, aggregate_day
 
     base = time.mktime(time.strptime(day, "%Y-%m-%d"))
     rows: list[str] = []
@@ -208,15 +208,15 @@ def _trend_section(day: str, *, window: int = 7) -> str:
         ok = summary.get("sessions_succeeded") or 0
         rate = (summary.get("unattended") or {}).get("rate")
         rate_text = f"{rate * 100:.0f}%" if rate is not None else "-"
-        cost = summary.get("total_cost_usd") or 0.0
-        rows.append(f"| {d} | {ended} | {ok}/{ended} | {rate_text} | {cost:.2f} |")
+        cost = (summary.get("total_cost_usd") or 0.0) * USD_TO_CNY_RATE
+        rows.append(f"| {d} | {ended} | {ok}/{ended} | {rate_text} | ¥{cost:,.2f} |")
     if not rows:
         return ""
     return "\n".join(
         [
             "## 近 7 天趋势",
             "",
-            "| 日期 | 会话结束 | 成功/结束 | 无人干预闭环率 | 成本 USD |",
+            "| 日期 | 会话结束 | 成功/结束 | 无人干预闭环率 | 成本 CNY |",
             "|------|----------|-----------|----------------|----------|",
             *rows,
         ]
