@@ -1153,6 +1153,7 @@ class IssuePrInterpretation:
             session.base_branch,
         )
 
+    @staticmethod
     def _uses_review_feedback_followup(record: Any) -> bool:
         """Keep command follow-ups distinct from Dashboard conversation turns."""
         return bool(
