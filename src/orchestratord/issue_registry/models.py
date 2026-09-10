@@ -157,6 +157,11 @@ class IssueRecord:
     collaboration_mode: str = "single"
     # Why that mode was picked — for operator audit.
     mode_decision_reason: str | None = None
+    # Cached PR state from remote (``"open"``, ``"closed"``, ``"merged"``).
+    # Populated by ``_process_pr_conflict_scan`` after the first fetch;
+    # subsequent scans rely on this field to skip non-open PRs at zero
+    # cost instead of re-fetching the remote state on every cycle.
+    pr_state: str | None = None
     # PR conflict persistence.
     has_conflict: bool = False
     conflict_files: list[str] = field(default_factory=list)
