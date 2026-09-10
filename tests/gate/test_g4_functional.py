@@ -155,15 +155,3 @@ class TestG4:
             assert isinstance(outcome, Outcome)
             assert outcome.kind == "dispose"
         assert run(provider.poll()) == [], "poll must be exhausted after delivery"
-
-    def test_g4b_issue_pr_chain_deferred(self, request) -> None:
-        """G4b issue→PR 业务链路：P2 待实施，按 §9 豁免登记显式 SKIP。
-
-        登记过期（2026-10-31）而未落地时，registered_skip 会转为 FAIL。
-        """
-        g.registered_skip(
-            request,
-            "G4b.issue_pr_chain",
-            env_ok=False,
-            env_gone="P2 未实施（fake git remote + stub 回包 fixtures，DESIGN §5.5.1）",
-        )

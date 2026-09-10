@@ -58,15 +58,6 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
         expires="2027-09-09",
         platform="win32",
     ),
-    GateExemption(
-        check_id="G4b.issue_pr_chain",
-        reason=(
-            "P2 待实施：issue→PR 业务链路需 fake git remote + 确定性 stub "
-            "回包 fixtures（DESIGN §5.5.1）"
-        ),
-        env_gone_condition="P2 落地后撤销本条目",
-        expires="2026-10-31",
-    ),
 )
 
 

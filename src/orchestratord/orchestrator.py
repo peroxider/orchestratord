@@ -1175,17 +1175,6 @@ class Orchestrator:
 
 
 
-
-
-
-
-
-    @staticmethod
-
-
-
-
-
     async def _launch_issue(self, issue: Issue) -> None:
         """Launch one issue: 业务装配在应用侧（3-seam 保序委托，C2b），
         本壳只做机制段——AgentSession/pause 回调、viz journal、running

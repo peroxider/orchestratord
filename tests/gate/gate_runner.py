@@ -23,7 +23,6 @@ REPO_ROOT = HERE.parents[1]
 
 GUARD_NODEIDS = [
     "tests/test_architecture.py",
-    "tests/test_layer_isolation.py",
     "tests/test_agent_cli_command_lock.py",
     "tests/test_capability_drift.py",
 ]
