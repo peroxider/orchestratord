@@ -119,6 +119,7 @@ class TestConfigSegmentViews(unittest.TestCase):
         "hooks",
         "review_feedback",
         "rules",
+        "experience",
         "telemetry",
         "observability",
         "server",

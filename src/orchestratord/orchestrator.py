@@ -1504,6 +1504,21 @@ class Orchestrator:
             attempt,
             delay_ms,
         )
+        try:
+            from orchestratord.telemetry import record_retry_scheduled
+
+            record_retry_scheduled(
+                session_id=getattr(session, "session_id", None)
+                or getattr(session, "run_id", None)
+                or "",
+                run_id=getattr(session, "run_id", None) or "",
+                issue_id=issue_id,
+                attempt=attempt,
+                delay_ms=delay_ms,
+                reason=f"agent failed: {session.status}",
+            )
+        except Exception:
+            logger.debug("retry telemetry failed", exc_info=True)
         self._emit_im_event(
             issue_id,
             "intent.retry",

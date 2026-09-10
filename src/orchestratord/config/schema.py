@@ -1072,6 +1072,22 @@ class RulesConfig:
 
 
 @dataclass
+class ExperienceConfig:
+    """Experience-loop config (DESIGN_EXPERIENCE_LOOP.md §5/§8).
+
+    Thresholds are absolute floors; the rolling-percentile gates
+    (P75/P50 of the last ``percentile_window`` sessions) are applied in
+    ``telemetry/experience_hook.py``. Calibration is deferred to Phase C.
+    """
+
+    enabled: bool = False
+    friction_threshold_distill: int = 60
+    friction_threshold_learnings: int = 40
+    percentile_window: int = 20
+    privacy_allowlist: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TelemetryConfig:
     """Remote telemetry reporting config (daily run summary -> GitCode issue).
 
@@ -1299,6 +1315,7 @@ class WorkflowConfig:
     hooks: HooksConfig = field(default_factory=HooksConfig)
     review_feedback: ReviewFeedbackConfig = field(default_factory=ReviewFeedbackConfig)
     rules: RulesConfig = field(default_factory=RulesConfig)
+    experience: ExperienceConfig = field(default_factory=lambda: ExperienceConfig())
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -1325,6 +1342,7 @@ class WorkflowConfig:
         hooks_raw = raw.get("hooks", {})
         review_feedback_raw = raw.get("review_feedback", {})
         rules_raw = raw.get("rules", {})
+        experience_raw = raw.get("experience", {}) or {}
         telemetry_raw = raw.get("telemetry", {})
         modes_raw = raw.get("modes", {}) or {}
         observability_raw = raw.get("observability", {})
@@ -1611,6 +1629,19 @@ class WorkflowConfig:
                 path=str(rules_raw.get("path", "")).strip(),
                 max_rules=int(rules_raw.get("max_rules", 20)),
                 min_confidence=str(rules_raw.get("min_confidence", "low")).strip().lower(),
+            ),
+            experience=ExperienceConfig(
+                enabled=bool(experience_raw.get("enabled", False)),
+                friction_threshold_distill=int(
+                    experience_raw.get("friction_threshold_distill", 60)
+                ),
+                friction_threshold_learnings=int(
+                    experience_raw.get("friction_threshold_learnings", 40)
+                ),
+                percentile_window=int(experience_raw.get("percentile_window", 20)),
+                privacy_allowlist=_normalize_string_list(
+                    experience_raw.get("privacy_allowlist"), []
+                ),
             ),
             telemetry=TelemetryConfig(
                 reporting_enabled=bool(telemetry_raw.get("reporting_enabled", False)),

@@ -758,6 +758,7 @@ class RuleEngine:
         )
         return len(candidates)
 
+    @staticmethod
     def get_rules_path(config: Any, workflow_path: str | None) -> str | None:
         rules_config = getattr(config, "rules", None)
         if not rules_config or not getattr(rules_config, "enabled", False):

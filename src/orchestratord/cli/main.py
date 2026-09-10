@@ -57,6 +57,7 @@ def app() -> None:
     from orchestratord.cli.gateway import add_gateway_parser
     from orchestratord.cli.issue import add_issue_parser
     from orchestratord.cli.peer import add_peer_parser
+    from orchestratord.cli.recall import add_recall_parser
     from orchestratord.cli.rules import add_rules_parser
     from orchestratord.cli.run import add_run_parser
     from orchestratord.cli.serve import add_serve_parser
@@ -84,6 +85,7 @@ def app() -> None:
     add_peer_parser(subparsers)
     add_skills_parser(subparsers)
     add_telemetry_parser(subparsers)
+    add_recall_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -121,6 +123,8 @@ def app() -> None:
         from orchestratord.cli.skills import run
     elif subcommand == "telemetry":
         from orchestratord.cli.telemetry import run
+    elif subcommand == "recall":
+        from orchestratord.cli.recall import run
     else:
         parser.print_help()
         sys.exit(2)

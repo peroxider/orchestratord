@@ -1559,16 +1559,69 @@ class IssuePrInterpretation:
                 "Failed to update summary comment issue_id=%s: %s", session.issue.id, exc
             )
 
-    async def _apply_review_rules(self, session: AgentSession) -> None:
-        """确保 review commit 包含 review metadata。
+    async def _apply_review_rules(
+        self, session: AgentSession, sync_result: Any = None
+    ) -> None:
+        """Extract rules from the review follow-up reply (断链复活).
 
-        规则提取已从 follow-up 流水线中移除，改为 CLI 命令
-        ``orchestratord rules extract`` 手动触发。
-        Commit message 中已由 ``GitSyncService`` 写入 review
-        metadata（review-pr / review-id），供 CLI extract 命令
-        扫描 commit log 时解析。
+        Daemon-side automatic trigger for the RuleEngine
+        (DESIGN_EXPERIENCE_LOOP.md §1.1); the ``orchestratord rules learn``
+        CLI remains the manual backfill entry. Idempotent per follow-up
+        commit SHA via ``ExtractTracker`` — the SHA is only consumed after
+        a successful rules write, so a failed extraction can be retried.
         """
-        pass
+        from orchestratord.rules_learner import ExtractTracker, RuleEngine
+        from orchestratord.workflow_store import get_workflow_store
+
+        commit_sha = getattr(sync_result, "commit_sha", None) if sync_result else None
+        if not commit_sha:
+            return
+        try:
+            rules_path = RuleEngine.get_rules_path(
+                self.workflow, get_workflow_store().workflow_path
+            )
+            if not rules_path:
+                return
+            tracker = ExtractTracker(rules_path)
+            processed = tracker.load()
+            if commit_sha in processed:
+                return
+            agent_reply = getattr(session, "output_text", "") or ""
+            if "## Extracted Rules" not in agent_reply:
+                # The review-feedback template asks for an Extracted Rules
+                # section; without it there is nothing to parse. The
+                # feedback body is a last-resort fallback (low recall,
+                # debug-only).
+                fallback = getattr(session, "feedback_commit_body", "") or ""
+                if not fallback:
+                    logger.debug(
+                        "review follow-up %s produced no Extracted Rules section",
+                        commit_sha,
+                    )
+                    return
+                logger.debug(
+                    "falling back to feedback body for rule extraction %s",
+                    commit_sha,
+                )
+                agent_reply = fallback
+            issue = getattr(session, "issue", None)
+            count = await RuleEngine().apply(
+                agent_reply,
+                rules_path,
+                max_rules=self.workflow.rules.max_rules,
+                min_confidence=self.workflow.rules.min_confidence,
+                source=f"review {getattr(issue, 'id', None) or ''}",
+            )
+            if count > 0:
+                processed.add(commit_sha)
+                tracker.save(processed)
+                logger.info(
+                    "extracted %d rule(s) from review follow-up %s",
+                    count,
+                    commit_sha,
+                )
+        except Exception:
+            logger.warning("review rule extraction failed", exc_info=True)
 
     async def _reply_to_processed_feedback(self, session: AgentSession) -> None:
         if not self.workflow.review_feedback.reply_to_comments:
@@ -1656,6 +1709,48 @@ class IssuePrInterpretation:
             await self.tracker.create_comment(session.issue.id or "", summary)
         except Exception as exc:
             logger.warning("Failed to post feedback summary issue_id=%s: %s", session.issue.id, exc)
+
+    def _broadcast_clarification_status(self) -> None:
+        """收集所有 issue 的澄清状态，推送到 dashboard。"""
+        if self.status_dashboard is None:
+            return
+        from orchestratord.status_dashboard import ClarificationEntry
+
+        now = time.time()
+        max_rounds = getattr(
+            getattr(self.workflow, "clarifier", None),
+            "max_rounds",
+            2,
+        )
+        entries: list[ClarificationEntry] = []
+        for issue_id, record in self._registry._records.items():
+            status = record.clarification_status
+            if status in ("awaiting_author", "awaiting_local", "manual_required", "resolved"):
+                elapsed = now - (record.updated_at or now)
+                entries.append(
+                    ClarificationEntry(
+                        issue_id=issue_id,
+                        status=status or "",
+                        open_questions=list(record.open_questions),
+                        round_num=record.clarification_round,
+                        max_rounds=max_rounds,
+                        elapsed_seconds=elapsed,
+                        author_login=record.author_login,
+                    )
+                )
+        self.status_dashboard.on_clarification_update(entries)
+
+    def _recovery_status_sets(self) -> dict[str, frozenset[IssueStatus]]:
+        """Map in-memory state-set names to registry statuses restored on startup.
+
+        The composition root rehydrates its ``_state`` sets from registry
+        records without knowing which business statuses belong to which
+        set; the issue→PR application owns that mapping.
+        """
+        return {
+            "pending_review": frozenset({IssueStatus.PENDING_REVIEW}),
+            "completed": frozenset({IssueStatus.COMPLETED}),
+        }
 
     async def _process_escalated_issues(self) -> None:
         """Check for clarification-exhausted issues and apply escalation policy.

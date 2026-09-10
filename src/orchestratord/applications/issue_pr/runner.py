@@ -25,6 +25,7 @@ from orchestratord.session_state import AgentSession
 from orchestratord.kernel.work_provider import WorkItem
 from .repro import repro_gate_applies, run_repro_gate
 from .payloads import session_payload
+from .workflow import run_issue_with_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,7 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                     host._workflow_orchestrator is not None
                     and session.run_kind != "review_followup"
                 ):
-                    await host._run_issue_with_workflow(session, progress_sink)
+                    await run_issue_with_workflow(host, session, progress_sink)
                 else:
                     # Collaboration-mode dispatch. For the
                     # default ``single`` mode (the only one
@@ -262,7 +263,7 @@ async def run_issue_body(host: Any, session: AgentSession) -> None:
                             )
                             await host._reply_to_processed_feedback(session)
                             await host._post_feedback_summary(session, sync_result)
-                            await host._apply_review_rules(session)
+                            await host._apply_review_rules(session, sync_result)
                         elif session.run_kind in ("agent_followup", "review_retry"):
                             # A follow-up keeps the
                             # existing pr_number / pr_url / status;

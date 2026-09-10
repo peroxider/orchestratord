@@ -1749,6 +1749,17 @@ class BackendRunner:
                     )
                 except Exception:
                     pass
+                # Experience loop (DESIGN_EXPERIENCE_LOOP.md): friction
+                # scoring + learnings/rules distillation triggers.
+                # Best-effort — never fails the run.
+                try:
+                    from orchestratord.telemetry.experience_hook import (
+                        on_session_complete,
+                    )
+
+                    await on_session_complete(session, payload)
+                except Exception:
+                    logger.warning("experience hook failed", exc_info=True)
                 if progress_reporter is not None and hasattr(progress_reporter, "on_session_complete"):
                     progress_reporter.on_session_complete(
                         SessionComplete(reason=reason), session
@@ -2100,6 +2111,18 @@ class BackendRunner:
         approved = self._approval_policy.evaluate(policy_event, session_context)
         decision = ApprovalDecision.ALLOW if approved else ApprovalDecision.DENY
         await spi_session.approve(request_id, decision)
+        try:
+            from orchestratord.telemetry import record_approval
+
+            record_approval(
+                session_id=session_context.get("session_id")
+                or getattr(spi_session, "session_id", "")
+                or "",
+                tool=policy_event.tool_name,
+                decision=decision.value,
+            )
+        except Exception:
+            pass
         logger.info(
             "Approval request resolved: request_id=%s tool=%s decision=%s",
             request_id,

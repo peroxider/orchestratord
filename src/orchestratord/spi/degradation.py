@@ -60,6 +60,16 @@ class DegradingSession:
     def __init__(self, inner: "AgentSession") -> None:
         self._inner = inner
         self._seq = 0
+        if not getattr(inner.capabilities, "streaming_deltas", False):
+            try:
+                from orchestratord.telemetry import record_degradation
+
+                record_degradation(
+                    session_id=inner.session_id,
+                    reason="streaming_deltas_degraded",
+                )
+            except Exception:
+                pass
 
     @property
     def session_id(self) -> str:

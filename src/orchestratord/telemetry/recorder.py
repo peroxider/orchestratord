@@ -68,3 +68,18 @@ def record_verification(**kw: Any) -> None:
 def record_crash(**kw: Any) -> None:
     """One process-death signal (kind: daemon_unclean_shutdown/backend_worker)."""
     append_event(_event("crash", **kw))
+
+
+def record_retry_scheduled(**kw: Any) -> None:
+    """One retry scheduling decision (friction signal; payload: attempt/delay_ms/reason)."""
+    append_event(_event("retry", **kw))
+
+
+def record_degradation(**kw: Any) -> None:
+    """One capability degradation applied by the core SPI path (payload: reason)."""
+    append_event(_event("degradation", **kw))
+
+
+def record_approval(**kw: Any) -> None:
+    """One approval-gate resolution (payload: tool/decision)."""
+    append_event(_event("approval", **kw))

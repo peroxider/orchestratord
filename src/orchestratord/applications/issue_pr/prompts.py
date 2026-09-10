@@ -95,6 +95,17 @@ Feedback:
 {% endif %}   Body:
 {{ item.body | indent(3) }}
 {% endfor %}
+
+Output convention:
+- At the very end of your reply, after all other content, append a
+  section titled exactly `## Extracted Rules` if — and only if — the
+  feedback revealed a generalizable convention worth enforcing on future
+  work (e.g. naming, structure, process, tooling rules). One rule per
+  entry in this format:
+  - <category>: <one-line summary>
+    <rule body: the concrete constraint, 1-3 sentences>
+- If the feedback contains no generalizable convention, omit the
+  section entirely. Do not restate the task-specific fix as a rule.
 """
 
 #: issue 任务的业务模板（当前与机制侧 generic 兜底逐字节一致；
