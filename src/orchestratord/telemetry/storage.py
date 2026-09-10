@@ -5,6 +5,10 @@ Events are written under ``~/.orchestratord/telemetry/events/<YYYY-MM-DD>.jsonl`
 This module is self-contained (stdlib only) — it does NOT depend on the
 clawcodex ``telemetry`` package, so orchestratord telemetry works even when
 clawcodex telemetry is disabled.
+
+The base dir is resolved lazily on every call (not at import time) so
+test isolation can point ``ORCHESTRATORD_HOME`` at a tmp dir via
+monkeypatch without reloading this module.
 """
 
 from __future__ import annotations
@@ -14,20 +18,23 @@ import os
 import time
 from pathlib import Path
 
-_TELEMETRY_DIR = Path(
-    os.environ.get("ORCHESTRATORD_HOME", str(Path.home() / ".orchestratord"))
-) / "telemetry"
-_EVENTS_DIR = _TELEMETRY_DIR / "events"
+
+def _base_dir() -> Path:
+    return Path(
+        os.environ.get("ORCHESTRATORD_HOME", str(Path.home() / ".orchestratord"))
+    )
 
 
 def telemetry_dir() -> Path:
-    _TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
-    return _TELEMETRY_DIR
+    path = _base_dir() / "telemetry"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def events_dir() -> Path:
-    _EVENTS_DIR.mkdir(parents=True, exist_ok=True)
-    return _EVENTS_DIR
+    path = telemetry_dir() / "events"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def append_event(event: dict) -> None:
@@ -63,7 +70,7 @@ def local_days() -> list[str]:
     that does not parse as a date (stray files) is ignored.
     """
     days: list[str] = []
-    for path in _EVENTS_DIR.glob("*.jsonl"):
+    for path in events_dir().glob("*.jsonl"):
         name = path.stem
         try:
             time.strptime(name, "%Y-%m-%d")

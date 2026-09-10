@@ -195,6 +195,32 @@ def test_legacy_string_cursor_entry_is_refreshed_once(
     assert [d for d, _, _ in _report_backfill(days="all")] == [_day_from_today(0)]
 
 
+# ── trend section ─────────────────────────────────────────────────────
+
+
+def test_trend_section_covers_recent_local_days(telemetry_home) -> None:
+    from orchestratord.telemetry.reporters.issue import _trend_section
+
+    today = _day_from_today(0)
+    yesterday = _day_from_today(1)
+    for day in (yesterday, today):
+        _write_day(telemetry_home, day)
+
+    section = _trend_section(today)
+
+    assert "## 近 7 天趋势" in section
+    assert f"| {yesterday} |" in section
+    assert f"| {today} |" in section
+    # No fabricated rows for days without local events.
+    assert _day_from_today(3) not in section
+
+
+def test_trend_section_empty_without_local_days(telemetry_home) -> None:
+    from orchestratord.telemetry.reporters.issue import _trend_section
+
+    assert _trend_section(_day_from_today(0)) == ""
+
+
 # ── config parsing ────────────────────────────────────────────────────
 
 

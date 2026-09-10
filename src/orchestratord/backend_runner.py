@@ -1327,6 +1327,32 @@ class BackendRunner:
             if getattr(session, "created_at", None)
             else None
         )
+        # Agent-run session_start: the daemon's own polling session emits
+        # one, agent runs previously only emitted session_end — the daily
+        # report's "session 数" stayed at 0. Best-effort, same id scheme
+        # as the session_end flush below.
+        try:
+            from orchestratord.telemetry import record_session_start
+
+            record_session_start(
+                session_id=(
+                    getattr(session, "session_id", None)
+                    or getattr(session, "backend_session_id", None)
+                    or getattr(session, "run_id", None)
+                    or ""
+                ),
+                run_id=getattr(session, "run_id", None) or "",
+                issue_id=(
+                    session.issue.id
+                    if getattr(session, "issue", None) is not None
+                    else ""
+                ),
+                backend=getattr(session, "backend_name", None) or "",
+                model=getattr(session, "_snapshot_model", None) or "",
+                queue_wait_s=queue_wait_s,
+            )
+        except Exception:
+            pass
         first_event_latency_s: float | None = None
         first_turn_latency_s: float | None = None
         turn_start_monotonic = run_start

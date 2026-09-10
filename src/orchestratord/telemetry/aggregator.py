@@ -81,10 +81,13 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     Base keys: date, events, sessions, commands, errors, usage_events,
     sessions_succeeded, sessions_failed, total_cost_usd, tokens
     (input/output summed across usage events when present), by_issue.
-    Enriched keys: session_duration / session_e2e distributions, latency
-    (queue/first-event/first-turn averages), paused_s / backoff_429_s
-    totals, turns, by_backend, by_model, end_reasons_failed,
-    errors_by_reason, tools.
+    Enriched keys: session_duration / session_e2e / turn_duration
+    distributions, latency (queue/first-event/first-turn averages),
+    paused_s / backoff_429_s totals, turns, by_backend, by_model,
+    end_reasons_failed, errors_by_reason, tools. Cross-cutting:
+    unattended (closed-loop rates incl. settled-issue adjusted rate),
+    closed_loop_time / cost / retry (闭环效率), intervention (干预前
+    征兆), concurrency / hourly (时间维度).
     """
     day = day or _day_key()
     events = read_events(day)
@@ -138,9 +141,40 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             "issues_seen": 0,
             "issues_closed": 0,
             "issues_unattended": 0,
+            "issues_settled": 0,
+            "issues_in_progress": 0,
             "rate": None,
             "closed_loop_rate": None,
+            "rate_settled": None,
         },
+        # 闭环效率: wall-clock time from an issue's first event to its
+        # first successful agent session, and cost rollups per issue.
+        "closed_loop_time": _duration_stats([]),
+        "cost": {
+            "closed_issues": 0,
+            "closed_total_usd": 0.0,
+            "closed_avg_usd": None,
+            "top_issues": [],
+        },
+        # 重试自愈: retryable (automatic) failures followed by a success
+        # on the same issue — did the loop recover without a human?
+        "retry": {
+            "retryable_failures": 0,
+            "issues_self_healed": 0,
+            "avg_retries_to_success": None,
+        },
+        # 干预分析: for human-intervention sessions, what went wrong before?
+        "intervention": {
+            "human_sessions": 0,
+            "with_prior_errors": 0,
+            "avg_prior_errors": None,
+            "prior_error_reasons": Counter(),
+        },
+        # 时间维度: concurrency sweep over agent session intervals,
+        # hourly event histogram.
+        "concurrency": {"max": 0, "avg": None},
+        "hourly": Counter(),
+        "turn_duration": _duration_stats([]),
     }
 
     durations: list[float] = []
@@ -153,6 +187,18 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     issue_seen: set[str] = set()
     issue_closed: set[str] = set()
     issue_human: set[str] = set()
+    # 闭环效率 / 干预分析 / 时间维度 bookkeeping.
+    issue_first_ts: dict[str, float] = {}
+    issue_success_ts: dict[str, float] = {}
+    issue_cost_usd: dict[str, float] = {}
+    issue_retryable_fails: dict[str, int] = {}
+    issue_settled_last: dict[str, bool] = {}
+    start_ts_by_session: dict[str, float] = {}
+    session_intervals: list[tuple[float, float]] = []
+    human_session_ids: list[str] = []
+    errors_by_session: Counter = Counter()
+    error_reasons_by_session: dict[str, Counter] = {}
+    hourly: Counter = Counter()
 
     def backend_bucket(backend: Any) -> dict[str, Any]:
         return summary["by_backend"].setdefault(
@@ -179,16 +225,28 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
         etype = ev.get("type")
         payload = ev.get("payload") or {}
         issue = str(ev.get("issue_id") or "")
+        ts = float(ev.get("ts") or 0.0)
+        if ts > 0:
+            hourly[time.localtime(ts).tm_hour] += 1
         if issue:
             summary["by_issue"][issue] += 1
 
         if etype == "session_start":
             summary["sessions"] += 1
+            sid = str(ev.get("session_id") or "")
+            if sid and sid not in start_ts_by_session:
+                start_ts_by_session[sid] = ts
         elif etype == "command_run":
             summary["commands"] += 1
         elif etype == "error":
             summary["errors"] += 1
             summary["errors_by_reason"][str(payload.get("reason") or "unknown")] += 1
+            sid = str(ev.get("session_id") or "")
+            if sid:
+                errors_by_session[sid] += 1
+                error_reasons_by_session.setdefault(sid, Counter())[
+                    str(payload.get("reason") or "unknown")
+                ] += 1
         elif etype == "session_end":
             summary["sessions_ended"] += 1
             status = payload.get("exit_status")
@@ -206,14 +264,28 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             # agent runs only — a daemon session spans the whole day.
             if "turn_count" in payload:
                 end_reason = str(payload.get("end_reason") or "")
+                sid = str(ev.get("session_id") or "")
                 unattended = summary["unattended"]
                 unattended["sessions_total"] += 1
                 if issue:
                     issue_seen.add(issue)
+                    issue_first_ts.setdefault(issue, ts)
+                    if ok:
+                        issue_success_ts.setdefault(issue, ts)
+                    issue_settled_last[issue] = bool(ok) or (
+                        end_reason in _HUMAN_END_REASONS
+                    )
                     if end_reason in _HUMAN_END_REASONS:
                         issue_human.add(issue)
+                    elif ok is False and end_reason:
+                        # Automatic failure (backend error / watchdog /
+                        # preflight…) — the daemon will retry on its own.
+                        issue_retryable_fails[issue] = (
+                            issue_retryable_fails.get(issue, 0) + 1
+                        )
                 if end_reason in _HUMAN_END_REASONS:
                     unattended["sessions_human"] += 1
+                    human_session_ids.append(sid)
                 bucket = backend_bucket(ev.get("backend") or payload.get("backend"))
                 bucket["sessions"] += 1
                 if ok:
@@ -226,6 +298,10 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
                 if duration is not None:
                     durations.append(duration)
                     bucket["duration_s"] += duration
+                    # Concurrency interval; approximate the start when no
+                    # matching session_start was recorded.
+                    start_ts = start_ts_by_session.get(sid, ts - duration)
+                    session_intervals.append((start_ts, ts))
                 queue_wait = _num(payload.get("queue_wait_s"))
                 if queue_wait is not None and duration is not None:
                     queue_waits.append(queue_wait)
@@ -281,12 +357,28 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
             cost = payload.get("cost_usd")
             cost_f = float(cost) if isinstance(cost, (int, float)) else 0.0
             summary["total_cost_usd"] += cost_f
+            if issue:
+                issue_cost_usd[issue] = issue_cost_usd.get(issue, 0.0) + cost_f
             tokens = payload.get("token_usage") or {}
             tokens_in = 0
             tokens_out = 0
             if isinstance(tokens, dict):
-                tokens_in = int(tokens.get("input", tokens.get("input_tokens", 0)) or 0)
-                tokens_out = int(tokens.get("output", tokens.get("output_tokens", 0)) or 0)
+                # Backends report usage keys in different shapes (input /
+                # input_tokens / inputTokens) — normalize here so historical
+                # files written before the canonical form still aggregate.
+                tokens_in = int(
+                    tokens.get(
+                        "input", tokens.get("input_tokens", tokens.get("inputTokens", 0))
+                    )
+                    or 0
+                )
+                tokens_out = int(
+                    tokens.get(
+                        "output",
+                        tokens.get("output_tokens", tokens.get("outputTokens", 0)),
+                    )
+                    or 0
+                )
             summary["tokens_input"] += tokens_in
             summary["tokens_output"] += tokens_out
             backend = backend_bucket(ev.get("backend") or payload.get("backend"))
@@ -316,6 +408,7 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
     turns["avg_s"] = (
         turns["total_s"] / turns["turn_events"] if turns["turn_events"] else 0.0
     )
+    summary["turn_duration"] = _duration_stats(turn_durations)
     verification = summary["verification"]
     if verification["attempts"]:
         verification["interception_rate"] = (
@@ -338,6 +431,82 @@ def aggregate_day(day: str | None = None) -> dict[str, Any]:
         unattended["rate"] = (
             len(issue_closed - issue_human) / len(issue_seen)
         )
+    # 口径修正: an issue whose LAST agent session of the day still ended
+    # in an automatic failure is likely sitting in the retry queue (it
+    # may close tomorrow) — report the unattended rate over settled
+    # issues (last session succeeded or was human-stopped) as well.
+    settled = {i for i in issue_seen if issue_settled_last.get(i)}
+    unattended["issues_settled"] = len(settled)
+    unattended["issues_in_progress"] = len(issue_seen - settled)
+    if settled:
+        unattended["rate_settled"] = (
+            len((issue_closed - issue_human) & settled) / len(settled)
+        )
+
+    # 闭环效率: first agent session end → first success per issue.
+    closed_times = [
+        issue_success_ts[i] - issue_first_ts[i]
+        for i in issue_success_ts
+        if i in issue_first_ts and issue_success_ts[i] >= issue_first_ts[i]
+    ]
+    summary["closed_loop_time"] = _duration_stats(closed_times)
+    cost = summary["cost"]
+    closed_total = sum(issue_cost_usd.get(i, 0.0) for i in issue_closed)
+    cost["closed_issues"] = len(issue_closed)
+    cost["closed_total_usd"] = closed_total
+    cost["closed_avg_usd"] = (
+        closed_total / len(issue_closed) if issue_closed else None
+    )
+    cost["top_issues"] = [
+        {"issue": k, "cost_usd": round(v, 4)}
+        for k, v in sorted(issue_cost_usd.items(), key=lambda kv: -kv[1])[:5]
+        if v > 0
+    ]
+
+    # 重试自愈: issues that ate ≥1 automatic failure and still closed.
+    healed = [i for i in issue_closed if issue_retryable_fails.get(i, 0) > 0]
+    retry = summary["retry"]
+    retry["retryable_failures"] = sum(issue_retryable_fails.values())
+    retry["issues_self_healed"] = len(healed)
+    retry["avg_retries_to_success"] = (
+        sum(issue_retryable_fails[i] for i in healed) / len(healed)
+        if healed
+        else None
+    )
+
+    # 干预分析: what preceded each human takeover?
+    intervention = summary["intervention"]
+    intervention["human_sessions"] = len(human_session_ids)
+    prior_counts = [errors_by_session.get(s, 0) for s in human_session_ids]
+    intervention["with_prior_errors"] = sum(1 for c in prior_counts if c > 0)
+    intervention["avg_prior_errors"] = (
+        sum(prior_counts) / len(prior_counts) if prior_counts else None
+    )
+    prior_reasons: Counter = Counter()
+    for s in human_session_ids:
+        prior_reasons.update(error_reasons_by_session.get(s, {}))
+    intervention["prior_error_reasons"] = prior_reasons
+
+    # 并发度: sweep-line over agent session intervals.
+    sweep: list[tuple[float, int]] = []
+    for start, end in session_intervals:
+        if end > start:
+            sweep.append((start, 1))
+            sweep.append((end, -1))
+    sweep.sort()
+    concurrency = summary["concurrency"]
+    if sweep:
+        running = 0
+        prev_ts = sweep[0][0]
+        integral = 0.0
+        for point_ts, delta in sweep:
+            integral += running * (point_ts - prev_ts)
+            running += delta
+            concurrency["max"] = max(concurrency["max"], running)
+            prev_ts = point_ts
+        span = sweep[-1][0] - sweep[0][0]
+        concurrency["avg"] = integral / span if span > 0 else float(concurrency["max"])
+    summary["hourly"] = hourly
     return summary
 
 
@@ -390,8 +559,78 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
             f"| 闭环率 | {closed_rate * 100:.1f}% |",
             f"| 无人干预闭环率 | {rate * 100:.1f}% |",
             f"| 人工干预会话数 | {unattended.get('sessions_human', 0)} |",
-            "",
         ]
+        if unattended.get("issues_settled"):
+            rate_settled = unattended.get("rate_settled")
+            rate_settled_text = (
+                f"{rate_settled * 100:.1f}%" if rate_settled is not None else "-"
+            )
+            lines += [
+                f"| 进行中 issue 数（当日仍以自动失败收尾） | {unattended.get('issues_in_progress', 0)} |",
+                f"| 无人干预闭环率（排除进行中 issue） | {rate_settled_text} |",
+            ]
+        lines.append("")
+
+    closed_loop_time = summary.get("closed_loop_time") or {}
+    cost = summary.get("cost") or {}
+    retry = summary.get("retry") or {}
+    has_efficiency = (
+        closed_loop_time.get("count")
+        or cost.get("closed_issues")
+        or retry.get("retryable_failures")
+    )
+    if has_efficiency:
+        lines += [
+            "## 闭环效率",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
+        ]
+        if closed_loop_time.get("count"):
+            lines.append(
+                f"| 闭环耗时 avg / 中位 / p95 | {_fmt(closed_loop_time, 'avg_s')} / {_fmt(closed_loop_time, 'p50_s')} / {_fmt(closed_loop_time, 'p95_s')} |"
+            )
+        if cost.get("closed_issues"):
+            closed_avg = cost.get("closed_avg_usd")
+            closed_avg_text = (
+                f"${closed_avg:.4f}" if closed_avg is not None else "-"
+            )
+            lines.append(
+                f"| 闭环 issue 成本 avg / 合计 | {closed_avg_text} / ${cost.get('closed_total_usd', 0.0):.4f} |"
+            )
+            top_issues = cost.get("top_issues") or []
+            if top_issues:
+                top_text = ", ".join(
+                    f"#{item['issue']}: ${item['cost_usd']:.4f}" for item in top_issues
+                )
+                lines.append(f"| 成本 Top {len(top_issues)} issue | {top_text} |")
+        if retry.get("retryable_failures"):
+            avg_retries = retry.get("avg_retries_to_success")
+            avg_retries_text = f"{avg_retries:.1f}" if avg_retries is not None else "-"
+            lines.append(
+                f"| 自动失败次数 / 自愈 issue 数 / 平均重试到成功 | {retry.get('retryable_failures', 0)} / {retry.get('issues_self_healed', 0)} / {avg_retries_text} |"
+            )
+        lines.append("")
+
+    intervention = summary.get("intervention") or {}
+    if intervention.get("human_sessions"):
+        avg_prior = intervention.get("avg_prior_errors")
+        avg_prior_text = f"{avg_prior:.1f}" if avg_prior is not None else "-"
+        lines += [
+            "## 人工干预",
+            "",
+            "| 指标 | 值 |",
+            "|------|-----|",
+            f"| 干预会话数 | {intervention.get('human_sessions', 0)} |",
+            f"| 有前置错误的干预会话 | {intervention.get('with_prior_errors', 0)} |",
+            f"| 平均前置错误数 | {avg_prior_text} |",
+        ]
+        prior_reasons = intervention.get("prior_error_reasons") or {}
+        if prior_reasons:
+            top_reasons = sorted(prior_reasons.items(), key=lambda kv: -kv[1])[:3]
+            reasons_text = ", ".join(f"{reason}×{count}" for reason, count in top_reasons)
+            lines.append(f"| 前置错误 Top 3 | {reasons_text} |")
+        lines.append("")
 
     duration = summary.get("session_duration") or {}
     if duration.get("count"):
@@ -412,8 +651,22 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
             f"| 首 turn 延迟 avg | {_fmt(latency, 'first_turn_avg_s')} |",
             f"| turns 总数 / turn 事件 / turn 均耗时 | {turns.get('total', 0)} / {turns.get('turn_events', 0)} / {_fmt(turns, 'avg_s')} |",
             f"| 暂停总时长 / 429 退避总时长 | {summary.get('paused_s', 0.0):.1f}s / {summary.get('backoff_429_s', 0.0):.1f}s |",
-            "",
         ]
+        concurrency = summary.get("concurrency") or {}
+        if concurrency.get("max"):
+            avg_conc = concurrency.get("avg")
+            avg_conc_text = f"{avg_conc:.1f}" if avg_conc is not None else "-"
+            lines.append(f"| 并发度 max / avg | {concurrency.get('max', 0)} / {avg_conc_text} |")
+        turn_duration = summary.get("turn_duration") or {}
+        if turn_duration.get("count"):
+            lines.append(
+                f"| turn 耗时 avg / Q1 / 中位 / Q3 | {_fmt(turn_duration, 'avg_s')} / {_fmt(turn_duration, 'p25_s')} / {_fmt(turn_duration, 'p50_s')} / {_fmt(turn_duration, 'p75_s')} |"
+            )
+        turns_total = (summary.get("turns") or {}).get("total", 0)
+        tokens_in_total = summary.get("tokens_input", 0)
+        if turns_total and tokens_in_total:
+            lines.append(f"| tokens (in) / turn | {tokens_in_total // turns_total} |")
+        lines.append("")
 
     by_backend = summary.get("by_backend") or {}
     if by_backend:
@@ -464,16 +717,35 @@ def render_summary_markdown(summary: dict[str, Any], *, env_label: str = "") -> 
         lines += [
             "## 工具调用 Top 10",
             "",
-            "| 工具 | 调用 | 失败 | 总耗时 |",
-            "|------|------|------|--------|",
+            "| 工具 | 调用 | 失败 | 失败率 | 总耗时 | 均耗时 |",
+            "|------|------|------|--------|--------|--------|",
         ]
         top = sorted(tools.items(), key=lambda kv: -kv[1].get("calls", 0))[:10]
         for name, stat in top:
+            calls = stat.get("calls", 0)
+            failures = stat.get("failures", 0)
+            duration_ms = stat.get("duration_ms", 0.0)
+            failure_rate = f"{failures / calls * 100:.1f}%" if calls else "-"
+            avg_ms = f"{duration_ms / calls:.0f}ms" if calls else "-"
             lines.append(
-                f"| {name} | {stat.get('calls', 0)} "
-                f"| {stat.get('failures', 0)} "
-                f"| {stat.get('duration_ms', 0.0):.0f}ms |"
+                f"| {name} | {calls} "
+                f"| {failures} "
+                f"| {failure_rate} "
+                f"| {duration_ms:.0f}ms "
+                f"| {avg_ms} |"
             )
+        lines.append("")
+
+    hourly = summary.get("hourly") or {}
+    if hourly:
+        lines += [
+            "## 时段分布",
+            "",
+            "| 时段 | 事件数 |",
+            "|------|--------|",
+        ]
+        for hour in sorted(hourly):
+            lines.append(f"| {hour:02d}:00-{hour:02d}:59 | {hourly[hour]} |")
         lines.append("")
 
     by_model = summary.get("by_model") or {}

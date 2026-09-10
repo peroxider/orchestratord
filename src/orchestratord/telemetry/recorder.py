@@ -60,10 +60,6 @@ def record_usage(**kw: Any) -> None:
     append_event(_event("usage", **kw))
 
 
-def record_tool_summary(**kw: Any) -> None:
-    append_event(_event("tool_summary", **kw))
-
-
 def record_verification(**kw: Any) -> None:
     """One verification-gate attempt (outcome: passed*/blocked/error)."""
     append_event(_event("verification", **kw))
@@ -89,7 +85,6 @@ def get_recorder():
         record_error = staticmethod(record_error)
         record_turn = staticmethod(record_turn)
         record_usage = staticmethod(record_usage)
-        record_tool_summary = staticmethod(record_tool_summary)
         record_verification = staticmethod(record_verification)
         record_crash = staticmethod(record_crash)
 

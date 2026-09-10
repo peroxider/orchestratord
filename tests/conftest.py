@@ -26,6 +26,13 @@ Provides three cross-test isolation guarantees and one opt-in helper:
 4. ``isolated_tmp_repo`` (opt-in) — initializes a deterministic git repo
    on ``tmp_path`` for orchestrator snapshot tests and stability-gate
    transcript tests.
+
+5. Telemetry home isolation — every test runs with ``ORCHESTRATORD_HOME``
+   pointed at a per-test tmp dir so any accidental telemetry write (the
+   BackendRunner/orchestrator emit telemetry best-effort on every run)
+   lands in tmp instead of polluting the developer's real
+   ``~/.orchestratord`` event store (storage.py resolves the base dir
+   lazily per call, so no module reload is needed).
 """
 
 from __future__ import annotations
@@ -202,6 +209,24 @@ def isolated_tmp_repo(tmp_path):
     _git("config", "user.email", "test@test", cwd=tmp_path)
     _git("config", "user.name", "Test", cwd=tmp_path)
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _isolate_telemetry_home(tmp_path, monkeypatch):
+    """Point ``ORCHESTRATORD_HOME`` at a per-test tmp dir.
+
+    Autouse for the same defense-in-depth reason as ``_isolate_mcp_keyring``:
+    tests that merely exercise the orchestrator/BackendRunner paths trigger
+    best-effort telemetry writes (``record_session_end`` etc.) and previously
+    polluted the real ``~/.orchestratord`` event store with synthetic
+    sessions (seen as ``run-test`` / ``test-issue`` entries in production
+    daily reports). storage.py resolves the base dir lazily per call, so a
+    plain env override is enough — no module reload. The explicit
+    ``telemetry_home`` fixtures in the telemetry tests keep working (their
+    ``importlib.reload`` is now redundant but harmless).
+    """
+    monkeypatch.setenv("ORCHESTRATORD_HOME", str(tmp_path / "orchestratord-home"))
+    yield
 
 
 @pytest.fixture(autouse=True)

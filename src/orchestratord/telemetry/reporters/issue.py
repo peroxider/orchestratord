@@ -135,6 +135,40 @@ def _update_issue(*, owner: str, repo: str, api_key: str, issue_id: int, body: s
     return not (isinstance(result, dict) and result.get("_http_error"))
 
 
+def _trend_section(day: str, *, window: int = 7) -> str:
+    """Render a compact last-N-days trend table from local event files.
+
+    Days without a local events file are skipped; the reported day itself
+    is the last row. Pure local aggregation — no network calls.
+    """
+    from ..aggregator import aggregate_day
+
+    base = time.mktime(time.strptime(day, "%Y-%m-%d"))
+    rows: list[str] = []
+    for offset in range(window - 1, -1, -1):
+        d = time.strftime("%Y-%m-%d", time.localtime(base - 86400.0 * offset))
+        summary = aggregate_day(d)
+        if not summary.get("events"):
+            continue
+        ended = summary.get("sessions_ended") or 0
+        ok = summary.get("sessions_succeeded") or 0
+        rate = (summary.get("unattended") or {}).get("rate")
+        rate_text = f"{rate * 100:.0f}%" if rate is not None else "-"
+        cost = summary.get("total_cost_usd") or 0.0
+        rows.append(f"| {d} | {ended} | {ok}/{ended} | {rate_text} | {cost:.2f} |")
+    if not rows:
+        return ""
+    return "\n".join(
+        [
+            "## 近 7 天趋势",
+            "",
+            "| 日期 | 会话结束 | 成功/结束 | 无人干预闭环率 | 成本 USD |",
+            "|------|----------|-----------|----------------|----------|",
+            *rows,
+        ]
+    )
+
+
 def report_day(
     *,
     owner: str,
@@ -157,7 +191,11 @@ def report_day(
         return False, f"{day} already reported (cursor)"
 
     summary = summary or aggregate_day(day)
-    rendered = rendered or render_summary_markdown(summary)
+    if rendered is None:
+        rendered = render_summary_markdown(summary)
+        trend = _trend_section(day)
+        if trend:
+            rendered = f"{rendered}\n\n{trend}"
     if not owner or not repo or not api_key:
         return False, "missing owner/repo/api_key"
 
