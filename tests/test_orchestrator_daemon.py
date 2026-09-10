@@ -56,12 +56,12 @@ class TestReadOnlyChatFollowup(unittest.IsolatedAsyncioTestCase):
     def test_chat_followup_does_not_require_pending_pr_feedback(self) -> None:
         record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="chat")
 
-        self.assertFalse(Orchestrator._uses_review_feedback_followup(record))
+        self.assertFalse(IssuePrInterpretation._uses_review_feedback_followup(record))
 
     def test_command_followup_uses_pending_pr_feedback(self) -> None:
         record = SimpleNamespace(intent=Intent.FOLLOWUP, intent_source="cli")
 
-        self.assertTrue(Orchestrator._uses_review_feedback_followup(record))
+        self.assertTrue(IssuePrInterpretation._uses_review_feedback_followup(record))
 
     async def test_completed_read_only_followup_returns_to_review(self) -> None:
         """A conversational follow-up is valid even without a new commit."""
@@ -314,7 +314,7 @@ class TestProcessRebaseIntent(unittest.IsolatedAsyncioTestCase):
                 workspace_clean=True,
             )
             with patch(
-                "orchestratord.orchestrator.rebase_for_pr",
+                "orchestratord.applications.issue_pr.interpret.rebase_for_pr",
                 return_value=clean_result,
             ) as mocked:
                 result = await orch._process_rebase_intent(_make_issue())
@@ -340,7 +340,7 @@ class TestProcessRebaseIntent(unittest.IsolatedAsyncioTestCase):
                 workspace_clean=False,
             )
             with patch(
-                "orchestratord.orchestrator.rebase_for_pr",
+                "orchestratord.applications.issue_pr.interpret.rebase_for_pr",
                 return_value=conflict_result,
             ):
                 result = await orch._process_rebase_intent(_make_issue())

@@ -240,6 +240,31 @@ def test_mechanism_domain_has_no_business_imports() -> None:
     assert not problems, "\n\n".join(problems)
 
 
+def test_composition_root_has_no_top_level_business_imports() -> None:
+    """B4（DESIGN §3.2）：组合根 ``orchestrator.py`` 顶层不得 import 业务域。
+
+    业务对象（GitSyncService/IssueRegistry/具体 Application）一律以函数级
+    import 或 TYPE_CHECKING 引入；顶层仅保留机制域与共享基础设施，使组合根
+    只做装配、不内嵌业务逻辑。锁住「别名收尾」阶段已达成的不变量。
+    """
+    path = SRC_ROOT / "orchestrator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    problems: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            top = _resolve_from_top(node)
+            if top in BUSINESS_TOP_LEVEL:
+                problems.append(f"orchestrator.py:{node.lineno} imports '{top}'")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                top = _resolve_absolute_top(alias.name)
+                if top in BUSINESS_TOP_LEVEL:
+                    problems.append(f"orchestrator.py:{node.lineno} imports '{top}'")
+    assert not problems, (
+        "组合根顶层出现业务域 import（B4）：\n" + "\n".join(problems)
+    )
+
+
 def test_mechanism_domain_does_not_read_session_business_fields() -> None:
     """P3（DESIGN §4.3）：RunSession 业务字段存储已迁 ``business`` dict，
     机制域必须零直接读取（同名 property 仅业务/装配侧使用）。豁免走与

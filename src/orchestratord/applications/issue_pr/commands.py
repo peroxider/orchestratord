@@ -166,6 +166,73 @@ class IssuePrCommands:
             len(feedback_items),
         )
 
+    def _reset_issue_for_retry(
+        self,
+        issue_id: str,
+        feedback: str,
+        *,
+        intent: Intent = Intent.RETRY,
+        reset_retry_count: bool = False,
+        command: str | None = None,
+    ) -> bool:
+        """Reset review-gated state and queue feedback without requiring a running session."""
+        if not issue_id:
+            return False
+
+        record = self._registry._records.get(issue_id)
+        is_known = bool(
+            record
+            or issue_id in self._state.running
+            or issue_id in self._state.pending_review
+            or issue_id in self._state.completed
+            or issue_id in self._state.claimed
+        )
+        if not is_known:
+            logger.debug("Retry control for unknown issue %s", issue_id)
+            return False
+
+        if feedback:
+            question = f"[Human Review Rejected] {feedback}"
+            self._clarification_queue.inject_feedback(issue_id, question)
+
+        self._state.pending_review.discard(issue_id)
+        self._state.completed.discard(issue_id)
+        self._state.claimed.discard(issue_id)
+        failed = getattr(self._state, "failed", None)
+        if failed is not None:
+            failed.discard(issue_id)
+        retry_attempts = getattr(self._state, "retry_attempts", None)
+        if retry_attempts is not None:
+            retry_attempts.pop(issue_id, None)
+        retry_queue = getattr(self._state, "retry_queue", None)
+        if retry_queue is not None:
+            self._state.retry_queue = [
+                retry for retry in retry_queue if self._retry_dedup_key(retry) != issue_id
+            ]
+        if record:
+            was_pending_review = record.status is IssueStatus.PENDING_REVIEW
+            record.status = IssueStatus.PENDING
+            record.intent = intent
+            record.intent_source = "cli"
+            if reset_retry_count:
+                record.retry_count = 0
+            if command is not None:
+                record.last_command = command
+            elif feedback:
+                record.last_command = "/issue review --reject"
+            if was_pending_review:
+                record.attempt_count += 1
+            record.touch()
+            self._registry._save()
+
+        logger.info(
+            "Issue %s queued for retry (attempt %d)",
+            issue_id,
+            record.attempt_count if record else 1,
+        )
+        self._emit_im_event(issue_id, "intent.retry", EventLevel.INFO, "retry requested")
+        return True
+
     async def _handle_retry_control(self, issue_id: str, reason: str) -> None:
         """Apply a durable retry request and make the tracker eligible for polling."""
         if not self._reset_issue_for_retry(

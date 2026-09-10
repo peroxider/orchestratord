@@ -115,6 +115,40 @@ class IssueToPrLifecycle:
         self._interpretation.host = host
         self._commands.host = host
 
+    @staticmethod
+    def build_git_sync(tracker: TrackerAdapter, workflow: WorkflowConfig) -> GitSyncService:
+        """Assemble the GitSyncService from tracker + workflow config.
+
+        Construction moved out of the composition root so business wiring
+        (branch prefix, gitignore, fork/upstream URLs, PR template) lives
+        in the application boundary (B4, DESIGN §3.2).
+        """
+        from orchestratord.git.sync import GitSyncService
+
+        return GitSyncService(
+            tracker,
+            workflow.tracker.branch_prefix,
+            workflow.workspace.gitignore_patterns,
+            workflow.agent,
+            workflow.hooks,
+            git_username=workflow.workspace.git_username,
+            git_email=workflow.workspace.git_email,
+            upstream_clone_url=workflow.workspace.upstream_clone_url,
+            fork_clone_url=workflow.workspace.repo_clone_url,
+            pr_template=workflow.pr_template,
+        )
+
+    @staticmethod
+    def build_registry(workspace_root: Path) -> IssueRegistry:
+        """Assemble the persistent issue→commit→PR registry.
+
+        The registry path is an application decision; the composition root
+        only supplies the workspace root (B4, DESIGN §3.2).
+        """
+        from orchestratord.issue_registry import IssueRegistry
+
+        return IssueRegistry(workspace_root / ".orchestratord_issue_registry.json")
+
     def work_provider(self) -> Any:
         """Return the provider assembled by the composition root."""
         return getattr(self._host, "_work_provider", None)

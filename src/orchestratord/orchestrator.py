@@ -17,19 +17,10 @@ from typing import TYPE_CHECKING, Any
 from .backend_runner import BackendRunner
 from .agent.task import AgentTask, AgentTaskResult
 from .agent.runner import AgentTaskRunner
-from .git.utils import (
-    get_default_branch,
-)
 from .session_state import AgentSession, RetryItem
 from .runner_utils import _apply_pause_session, _apply_resume_session
 from .config.schema import WorkflowConfig
 from .events import EventLevel
-from .git.sync import (
-    GitSyncService,
-    rebase_for_pr,
-)
-from .issue_registry.issue import Issue
-from .issue_registry import IssueRegistry, IssueStatus
 from .kernel.dispatch import (
     FAILURE_RETRY_BASE_MS,
     NON_RETRYABLE_END_REASONS,
@@ -53,15 +44,14 @@ from .kernel.work_provider import WorkProvider
 from .mode_selector import ModeSelector
 from . import modes as _modes
 from .modes.base import DEFAULT_MODE
-from .applications.issue_pr.provider import IssuePrWorkProvider
 from .status_dashboard import SessionStatus, StatusDashboard
-from .tracker import Intent, TrackerAdapter
 from .workspace import WorkspaceManager
 from .paths import AUDIT_LOG, ORCHESTRATORD_BASE
 
 if TYPE_CHECKING:
     from .applications.issue_pr.lifecycle import IssueToPrLifecycle
-    from .tracker import CommandIntent
+    from .applications.issue_pr.provider import IssuePrWorkProvider
+    from .tracker import CommandIntent, TrackerAdapter
     from orchestratord.spi.backend import AgentBackend
 
 logger = logging.getLogger(__name__)
@@ -112,6 +102,9 @@ _ISSUE_APPLICATION_METHODS = frozenset(
         "_handle_review_approve_control",
         "_handle_retry_control",
         "_handle_followup_control",
+        "_broadcast_clarification_status",
+        "_recovery_status_sets",
+        "_reset_issue_for_retry",
     }
 )
 
@@ -322,18 +315,9 @@ class Orchestrator:
         # channel even if ``im_event_deliver`` is wired).
         self.im_channel_adapter: Any = None
         self._validate_workspace_strategy()
-        self.git_sync = GitSyncService(
-            tracker,
-            workflow.tracker.branch_prefix,
-            workflow.workspace.gitignore_patterns,
-            workflow.agent,
-            workflow.hooks,
-            git_username=workflow.workspace.git_username,
-            git_email=workflow.workspace.git_email,
-            upstream_clone_url=workflow.workspace.upstream_clone_url,
-            fork_clone_url=workflow.workspace.repo_clone_url,
-            pr_template=workflow.pr_template,
-        )
+        from orchestratord.applications.issue_pr.lifecycle import IssueToPrLifecycle
+
+        self.git_sync = IssueToPrLifecycle.build_git_sync(tracker, workflow)
         self._state = OrchestratorState(
             poll_interval_ms=workflow.polling.interval_ms,
             max_concurrent_agents=workflow.agent.max_concurrent_agents,
@@ -353,8 +337,7 @@ class Orchestrator:
         workspace_root = Path(workspace.config.root)
         self._workspace_root = workspace_root
         # Persistent issue→commit→PR mapping (persists across restarts)
-        registry_path = workspace_root / ".orchestratord_issue_registry.json"
-        self._registry = IssueRegistry(registry_path)
+        self._registry = IssueToPrLifecycle.build_registry(workspace_root)
 
         # Crash telemetry: read the PREVIOUS daemon's metadata before this
         # process overwrites it. Leftover metadata with a stale pid means
@@ -483,6 +466,8 @@ class Orchestrator:
             work_provider._host = self
             self._work_provider: WorkProvider = work_provider
         else:
+            from .applications.issue_pr.provider import IssuePrWorkProvider
+
             self._work_provider: WorkProvider = IssuePrWorkProvider(self)
         # P4 Application seam (DESIGN §4.2): the issue→PR business
         # lifecycle (launch assembly, session decoration, result
@@ -553,11 +538,6 @@ class Orchestrator:
             if target is not None and hasattr(target, name):
                 return getattr(target, name)
         raise AttributeError(name)
-
-    @property
-    def _rebase_for_pr(self) -> Any:
-        """Compatibility seam for application-owned rebase execution."""
-        return rebase_for_pr
 
     def _build_session_sink(self, task_id: str) -> Any:
         """Build a fresh :class:`CompositeProgressSink` for one session.
@@ -927,22 +907,21 @@ class Orchestrator:
         closes completed issues, but restoring the set keeps the
         candidate-issue poll loop consistent without consulting the
         tracker API.
+
+        The status→set mapping is supplied by the application
+        (``_recovery_status_sets``) so the composition root stays
+        status-agnostic.
         """
-        from .issue_registry.models import IssueStatus
-
-        for record in self._registry.records_by_status(IssueStatus.PENDING_REVIEW):
-            self._state.pending_review.add(record.issue_id)
-            logger.info(
-                "Recovered pending_review state for issue_id=%s on startup",
-                record.issue_id,
-            )
-
-        for record in self._registry.records_by_status(IssueStatus.COMPLETED):
-            self._state.completed.add(record.issue_id)
-            logger.info(
-                "Recovered completed state for issue_id=%s on startup",
-                record.issue_id,
-            )
+        for set_name, statuses in self._recovery_status_sets().items():
+            target = getattr(self._state, set_name)
+            for status in statuses:
+                for record in self._registry.records_by_status(status):
+                    target.add(record.issue_id)
+                    logger.info(
+                        "Recovered %s state for issue_id=%s on startup",
+                        set_name,
+                        record.issue_id,
+                    )
 
     async def _metadata_heartbeat_loop(self) -> None:
         """机制段已迁 kernel/telemetry.py（DESIGN §5）；保留薄转发。"""
@@ -1101,7 +1080,7 @@ class Orchestrator:
 
 
 
-    async def _launch_issue(self, issue: Issue) -> None:
+    async def _launch_issue(self, issue: Any) -> None:
         """Launch one issue: 业务装配在应用侧（3-seam 保序委托，C2b），
         本壳只做机制段——AgentSession/pause 回调、viz journal、running
         map、task 创建。"""
@@ -1192,7 +1171,7 @@ class Orchestrator:
 
 
     def _update_run_diagnostics(self, session: AgentSession) -> None:
-        issue_id = session.issue.id or ""
+        issue_id = session.subject.id or ""
         record = self._registry.update_run_diagnostics(
             issue_id,
             run_id=getattr(session, "run_id", None),
@@ -1224,118 +1203,6 @@ class Orchestrator:
                     getattr(session, "status", None),
                 )
 
-    async def _run_issue_with_workflow(
-        self,
-        session: AgentSession,
-        progress_sink: Any,
-    ) -> None:
-        """使用声明式工作流引擎处理 issue。
-
-        通过 WorkflowOrchestrator 按 workflow.yaml 定义的 DAG 阶段
-        执行 issue，每个阶段由 AgentRunner 驱动的合成 Issue 执行。
-        """
-        workflow_orch = self._workflow_orchestrator
-        if workflow_orch is None:
-            logger.error("_run_issue_with_workflow called but no workflow orchestrator")
-            session.status = "failed"
-            return
-
-        logger.info(
-            "Running workflow for issue %s: %s",
-            session.issue.identifier,
-            session.issue.title,
-        )
-
-        # 确保 workspace 在 issue 分支上（非主分支）。
-        # 保留的工作区可能还在 main 或上一次运行的分支上，
-        # 必须在 workflow 执行前切换到正确的 issue 分支。
-        try:
-            work_branch = self.git_sync._ensure_work_branch(
-                str(session.workspace.path),
-                session.issue,
-                session.base_branch or get_default_branch(str(session.workspace.path)),
-            )
-            logger.info(
-                "Workflow workspace on branch: %s (issue=%s)",
-                work_branch,
-                session.issue.identifier,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to ensure work branch for workflow issue %s: %s",
-                session.issue.id,
-                exc,
-            )
-
-        # 将编排器的 ProgressSink 注入工作流引擎，
-        # 使阶段进度实时反映到 StatusDashboard
-        workflow_orch.set_progress_sink(progress_sink)
-        workflow_orch._stage_runner._progress_reporter = progress_sink
-
-        try:
-            # run_for_issue 已删除（机制域不得内嵌业务转换，DESIGN §3.2）：
-            # Issue→AgentTask 的业务映射留在业务侧完成后走通用入口。
-            from .issue_registry.task_mapping import issue_to_agent_task
-
-            result = await workflow_orch.run_for_task(
-                issue_to_agent_task(
-                    session.issue,
-                    workspace_path=str(session.workspace.path),
-                )
-            )
-        except Exception as exc:
-            logger.exception("Workflow execution failed for issue %s", session.issue.id)
-            session.status = "failed"
-            session.output_text = str(exc)
-            return
-
-        # 将阶段输出存储到 session，供 git_sync 写入 PR body
-        session.workflow_stage_outputs = {}
-        for stage_id, stage_result in result.stage_results.items():
-            if stage_result.outputs:
-                session.workflow_stage_outputs[stage_id] = {
-                    "phase": getattr(workflow_orch.schema.get_stage(stage_id), "phase", ""),
-                    "name": getattr(
-                        workflow_orch.schema.get_stage(stage_id), "name", f"Stage {stage_id}"
-                    ),
-                    "output": stage_result.outputs[0] if stage_result.outputs else "",
-                }
-
-        if result.success:
-            session.status = "completed"
-            session.output_text = (
-                f"Workflow '{result.workflow_name}' completed: "
-                f"{result.completed_stages}/{result.total_stages} stages, "
-                f"cost=${result.total_cost_usd:.4f}, "
-                f"duration={result.total_duration_seconds:.1f}s"
-            )
-        else:
-            session.status = "failed"
-            session.output_text = (
-                f"Workflow '{result.workflow_name}' failed at stage "
-                f"{result.completed_stages}/{result.total_stages}: {result.error}"
-            )
-
-        # 工作流引擎在 per-stage session 上设置 _snapshot_backend，
-        # 外层 session 不会被设置，run report 的 Backend 字段会显示 n/a。
-        # 从 agent_runner 回填，确保 report 能正确展示后端名称。
-        _backend = getattr(self.agent_runner, "backend", None)
-        if _backend is not None:
-            session._snapshot_backend = getattr(_backend, "name", None) or ""
-            from .cost.estimator import resolve_model_alias
-
-            _agent_config = getattr(self.agent_runner, "agent_config", None)
-            session._snapshot_model = resolve_model_alias(
-                getattr(_agent_config, "model", None) or "",
-                getattr(_agent_config, "model_aliases", None) or {},
-            )
-            session._snapshot_provider = (
-                getattr(self.agent_runner.agent_config, "provider", None)
-                or getattr(_backend, "name", "")
-            )
-
-        self._update_run_diagnostics(session)
-
     def _resolve_session_runner(self, session: AgentSession) -> Any:
         """Resolve the requested runner without silently changing semantics."""
         collab_mode = getattr(session, "collaboration_mode", None) or DEFAULT_MODE
@@ -1344,7 +1211,7 @@ class Orchestrator:
                 return _modes.get(collab_mode)
             except KeyError as exc:
                 raise RuntimeError(
-                    f"Issue {session.issue.id} requested collaboration mode "
+                    f"Issue {session.subject.id} requested collaboration mode "
                     f"{collab_mode!r}, but that mode is not enabled in workflow.md"
                 ) from exc
         return self.stage_runners.get(session.run_kind, self.agent_runner)
@@ -1432,7 +1299,7 @@ class Orchestrator:
         Terminal outcomes (retry exhausted / non-retryable end reason)
         return ``False`` so the caller still closes the issue.
         """
-        issue_id = session.issue.id or ""
+        issue_id = session.subject.id or ""
 
         # Operator-initiated stops must never be defeated by the
         # auto-retry loop (stop → retry → stop burning API calls until
@@ -1486,7 +1353,7 @@ class Orchestrator:
             dedup_key=issue_id,
             attempt=attempt,
             delay_seconds=delay_ms / 1000.0,
-            identifier=session.issue.identifier or "",
+            identifier=session.subject.identifier or "",
             error=f"agent failed: {session.status}",
         )
         self._state.retry_queue.append(retry)
@@ -1528,37 +1395,7 @@ class Orchestrator:
         )
         return True
 
-    def _broadcast_clarification_status(self) -> None:
-        """收集所有 issue 的澄清状态，推送到 dashboard。"""
-        if self.status_dashboard is None:
-            return
-        from .status_dashboard import ClarificationEntry
-
-        now = time.time()
-        max_rounds = getattr(
-            getattr(self.workflow, "clarifier", None),
-            "max_rounds",
-            2,
-        )
-        entries: list[ClarificationEntry] = []
-        for issue_id, record in self._registry._records.items():
-            status = record.clarification_status
-            if status in ("awaiting_author", "awaiting_local", "manual_required", "resolved"):
-                elapsed = now - (record.updated_at or now)
-                entries.append(
-                    ClarificationEntry(
-                        issue_id=issue_id,
-                        status=status or "",
-                        open_questions=list(record.open_questions),
-                        round_num=record.clarification_round,
-                        max_rounds=max_rounds,
-                        elapsed_seconds=elapsed,
-                        author_login=record.author_login,
-                    )
-                )
-        self.status_dashboard.on_clarification_update(entries)
-
-    def _compute_workspace_focus_for_clarifier(self, issue: "Issue") -> list[dict]:
+    def _compute_workspace_focus_for_clarifier(self, issue: Any) -> list[dict]:
         """计算 workspace focus 作为澄清上下文富化。
 
         仅在 follow-up 分支已建时调用。新 issue 场景（分支未建）返回 []。
@@ -2096,77 +1933,6 @@ class Orchestrator:
             await ipc.unregister(session_id)
         await ipc.close()
 
-    def _reset_issue_for_retry(
-        self,
-        issue_id: str,
-        feedback: str,
-        *,
-        intent: Intent = Intent.RETRY,
-        reset_retry_count: bool = False,
-        command: str | None = None,
-    ) -> bool:
-        """Reset review-gated state and queue feedback without requiring a running session."""
-        if not issue_id:
-            return False
-
-        record = self._registry._records.get(issue_id)
-        is_known = bool(
-            record
-            or issue_id in self._state.running
-            or issue_id in self._state.pending_review
-            or issue_id in self._state.completed
-            or issue_id in self._state.claimed
-        )
-        if not is_known:
-            logger.debug("Retry control for unknown issue %s", issue_id)
-            return False
-
-        if feedback:
-            question = f"[Human Review Rejected] {feedback}"
-            self._clarification_queue.inject_feedback(issue_id, question)
-
-        self._state.pending_review.discard(issue_id)
-        self._state.completed.discard(issue_id)
-        self._state.claimed.discard(issue_id)
-        failed = getattr(self._state, "failed", None)
-        if failed is not None:
-            failed.discard(issue_id)
-        retry_attempts = getattr(self._state, "retry_attempts", None)
-        if retry_attempts is not None:
-            retry_attempts.pop(issue_id, None)
-        retry_queue = getattr(self._state, "retry_queue", None)
-        if retry_queue is not None:
-            self._state.retry_queue = [
-                retry for retry in retry_queue if self._retry_dedup_key(retry) != issue_id
-            ]
-        if record:
-            was_pending_review = record.status is IssueStatus.PENDING_REVIEW
-            record.status = IssueStatus.PENDING
-            record.intent = intent
-            record.intent_source = "cli"
-            if reset_retry_count:
-                record.retry_count = 0
-            if command is not None:
-                record.last_command = command
-            elif feedback:
-                record.last_command = "/issue review --reject"
-            if was_pending_review:
-                record.attempt_count += 1
-            record.touch()
-            self._registry._save()
-
-        logger.info(
-            "Issue %s queued for retry (attempt %d)",
-            issue_id,
-            record.attempt_count if record else 1,
-        )
-        self._emit_im_event(issue_id, "intent.retry", EventLevel.INFO, "retry requested")
-        return True
-
-
-
-
-
     def _cancel_pending_retry(self, issue_id: str) -> bool:
         """Cancel any pending auto-retry for ``issue_id``.
 
@@ -2323,12 +2089,15 @@ class Orchestrator:
 
 
 # Class-level compatibility for callers that used the former static helper.
-# The implementation is kept as an assignment so the business operation's
-# named definition remains in the application boundary.
+# Delegates to the application-boundary definition so the business operation
+# keeps a single source of truth (and this module avoids a top-level business
+# import of ``Intent``).
+def _uses_review_feedback_followup_shim(record: Any) -> bool:
+    from .applications.issue_pr.interpret import IssuePrInterpretation
+
+    return IssuePrInterpretation._uses_review_feedback_followup(record)
+
+
 Orchestrator._uses_review_feedback_followup = staticmethod(
-    lambda record: bool(
-        record is not None
-        and record.intent is Intent.FOLLOWUP
-        and record.intent_source != "chat"
-    )
+    _uses_review_feedback_followup_shim
 )

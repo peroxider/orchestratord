@@ -20,6 +20,7 @@ from orchestratord.kernel.approval import (
     resolve_approval_policy,
 )
 from orchestratord.config.schema import SandboxConfig
+from orchestratord.applications.issue_pr.workflow import run_issue_with_workflow
 from orchestratord.orchestrator import Orchestrator
 from orchestratord.report_writer import RunReport, _render_markdown, write
 from orchestratord.session_state import RunSession, RunSubject
@@ -178,7 +179,7 @@ class TestWorkflowPathBackfillsSnapshotBackend(unittest.TestCase):
         mock_workflow_orch.run_for_task = _mock_run_for_task
 
         async def _run():
-            await Orchestrator._run_issue_with_workflow(
+            await run_issue_with_workflow(
                 mock_self, session, MagicMock()
             )
 
