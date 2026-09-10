@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
@@ -143,6 +144,8 @@ class PeerClient:
         self._events: asyncio.Queue[PeerFrame | None] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
         self._topics: set[str] = set()
+        # NG8: background self-serve token rotation (see rotate_token).
+        self._rotate_task: asyncio.Task[None] | None = None
 
     # -- lifecycle --
 
@@ -238,6 +241,13 @@ class PeerClient:
             except asyncio.CancelledError:
                 pass
             self._reader = None
+        if self._rotate_task is not None:
+            self._rotate_task.cancel()
+            try:
+                await self._rotate_task
+            except asyncio.CancelledError:
+                pass
+            self._rotate_task = None
         if self._transport is not None:
             await self._transport.close()
             self._transport = None
@@ -298,6 +308,91 @@ class PeerClient:
     @property
     def topics(self) -> set[str]:
         return set(self._topics)
+
+    # -- NG8: token self-rotation --
+
+    async def rotate_token(self) -> str:
+        """Swap this client's token via ``POST /api/peer/self/rotate-token``.
+
+        The remote daemon issues a fresh bearer token; the old one
+        grace-expires server-side (``token_grace_seconds``), so
+        in-flight streams keep authenticating while the swap lands.
+        The returned plaintext should be persisted by the embedding
+        daemon before restart — it is shown over the wire exactly once.
+
+        Requires ``base_url`` discovery (the HTTP channel the rotation
+        endpoint rides); a transport-only client raises
+        :class:`PeerClientError`.
+        """
+        if self._base_url is None or self._http is None:
+            raise PeerClientError(
+                "rotate_token requires base_url discovery "
+                "(the rotation endpoint is HTTP, not a frame type)"
+            )
+        resp = await self._http.post(
+            f"{self._base_url.rstrip('/')}/api/peer/self/rotate-token",
+            headers={
+                "Authorization": f"Bearer {self._token}",
+                "X-Peer-Orchestrator-Id": self._orch_id,
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        new_token = body.get("token")
+        if not new_token:
+            raise PeerClientError("rotation response missing token")
+        self._token = new_token
+        return str(new_token)
+
+    def start_auto_token_rotation(
+        self, interval_seconds: float | None = None
+    ) -> bool:
+        """Start the background NG8 rotation loop.
+
+        Interval defaults to ``ORCHESTRATORD_PEER_TOKEN_ROTATE_SECONDS``
+        (``0``/unset = disabled → returns False). A failed rotation is
+        logged and retried next interval — the old token stays valid
+        until grace expires, and the next interval retry runs against a
+        still-live token as long as failures don't outlast the grace
+        window.
+        """
+        if interval_seconds is None:
+            try:
+                interval_seconds = float(
+                    os.environ.get(
+                        "ORCHESTRATORD_PEER_TOKEN_ROTATE_SECONDS", "0"
+                    )
+                )
+            except ValueError:
+                interval_seconds = 0.0
+        if interval_seconds <= 0:
+            return False
+        if self._rotate_task is not None:
+            return True
+        self._rotate_task = asyncio.create_task(
+            self._rotation_loop(interval_seconds),
+            name="peer-token-rotation",
+        )
+        return True
+
+    async def _rotation_loop(self, interval: float) -> None:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self.rotate_token()
+                logger.info(
+                    "NG8: rotated peer token for %s (old one in grace)",
+                    self._orch_id,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning(
+                    "NG8: peer token rotation failed for %s; "
+                    "retrying next interval",
+                    self._orch_id,
+                    exc_info=True,
+                )
 
     async def events(self) -> AsyncIterator[PeerFrame]:
         """Yield EVENT frames as they arrive (ends on close)."""

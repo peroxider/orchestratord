@@ -9,6 +9,7 @@ The §5 handshake maps onto these endpoints:
 5. ``GET  /api/peer/peers``                              — operator list (workspace-scoped)
 6. ``DELETE /api/peer/peers/{orch_id}``                  — operator remove (AC8)
 7. ``POST /api/peer/peers/{orch_id}/rotate-token``       — operator rotate (D15/NG8 grace)
+   ``POST /api/peer/self/rotate-token``                 — peer self-rotate (NG8 auto)
 8. ``POST /api/peer/peers/{orch_id}/invoke``             — peer INVOKE (AC6, D18/D19)
 9. ``POST /api/peer/peers/{orch_id}/sessions``           — cross-daemon session (D17)
 10. ``GET  /api/peer/peers/{orch_id}/events``            — SSE stream (AC7)
@@ -29,7 +30,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -53,6 +54,7 @@ from orchestratord.peer.registry import (
     get_peer,
     list_peers,
     remove_peer,
+    rotate_peer_token,
     set_peer_status,
     upsert_peer,
 )
@@ -288,27 +290,43 @@ async def post_rotate_peer_token(
     from orchestratord.config.schema import PeerConfig
 
     grace_seconds = PeerConfig.from_env().token_grace_seconds
-    old_expires_at: datetime | None = None
-    if peer.token_id is not None:
-        old_token = await repos.session.get(orm.AuthToken, peer.token_id)
-        if old_token is not None:
-            old_expires_at = datetime.now(UTC) + timedelta(
-                seconds=grace_seconds
-            )
-            old_token.expires_at = old_expires_at
-    plaintext, token_hash = issue_api_token()
-    token_row = orm.AuthToken(
-        id=uuid.uuid4(),
-        workspace_id=peer.workspace_id,
-        name=f"peer:{peer.orch_id}",
-        token_hash=token_hash,
-        scopes=["peer.*"],
-        expires_at=None,
-        created_at=datetime.now(UTC),
+    plaintext, old_expires_at = await rotate_peer_token(
+        repos.session, peer, grace_seconds=grace_seconds
     )
-    await repos.auth_tokens.add(token_row)
-    peer.token_id = token_row.id
-    await repos.session.flush()
+    return {
+        "status": "rotated",
+        "orch_id": peer.orch_id,
+        "token": plaintext,
+        "grace_seconds": grace_seconds,
+        "old_token_expires_at": (
+            old_expires_at.isoformat() if old_expires_at else None
+        ),
+    }
+
+
+@router.post("/api/peer/self/rotate-token")
+async def post_self_rotate_token(
+    peer: Any = Depends(require_peer_auth),
+    repos: Repositories = Depends(get_repositories),
+) -> dict:
+    """Peer-initiated token rotation (NG8 自动轮换收尾).
+
+    The remote daemon calls this with its CURRENT bearer token and gets
+    a fresh one back; the old token grace-expires exactly like the
+    operator endpoint, so in-flight streams drain. This solves the
+    plaintext-distribution problem of server-scheduled rotation: the
+    peer fetches its own new secret over the already-authenticated
+    channel instead of the server having to push a one-time plaintext
+    out of band. The caller can only ever rotate its own token — the
+    peer row comes from ``require_peer_auth``, not from a path
+    parameter.
+    """
+    from orchestratord.config.schema import PeerConfig
+
+    grace_seconds = PeerConfig.from_env().token_grace_seconds
+    plaintext, old_expires_at = await rotate_peer_token(
+        repos.session, peer, grace_seconds=grace_seconds
+    )
     return {
         "status": "rotated",
         "orch_id": peer.orch_id,

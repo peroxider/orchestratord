@@ -676,6 +676,46 @@ async def test_rotate_unknown_peer_returns_404(client, db) -> None:
     assert resp.status_code == 404
 
 
+async def test_self_rotate_returns_new_secret_and_keeps_grace(
+    client, db
+) -> None:
+    """NG8 自动轮换收尾: the peer itself rotates its token over the
+    authenticated channel — new secret returned once, old token stays
+    valid during grace, no path parameter to abuse."""
+    ws, _session, old_token = await _accepted_peer(client, db)
+    resp = await client.post(
+        "/api/peer/self/rotate-token",
+        headers=_peer_headers(old_token),
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "rotated"
+    assert body["orch_id"] == "orch-A1"
+    new_token = body["token"]
+    assert new_token and new_token != old_token
+    assert body["old_token_expires_at"] is not None
+
+    async def send(tok: str, msg_id: str):
+        return await client.post(
+            "/api/peer/peers/orch-A1/invoke",
+            headers=_peer_headers(tok),
+            json={
+                "method": "GET /api/workspaces/{workspace_id}/sessions",
+                "body": {"workspace_id": str(ws.id)},
+                "msg_id": msg_id,
+            },
+        )
+
+    assert (await send(new_token, "self-new")).status_code == 200
+    assert (await send(old_token, "self-old-grace")).status_code == 200
+
+
+async def test_self_rotate_without_token_is_401(client) -> None:
+    """The self-serve endpoint requires peer auth (no operator path)."""
+    resp = await client.post("/api/peer/self/rotate-token")
+    assert resp.status_code == 401
+
+
 # ---------------------------------------------------------------------------
 # PR-B1: peer_client_version → client_kind (Phase B v2 vs Phase 1 v1_sunset)
 # ---------------------------------------------------------------------------

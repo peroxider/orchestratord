@@ -13,14 +13,16 @@ peer data access inside the peer package (D5).
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from orchestratord.db.models.audit_auth import AuthToken
 from orchestratord.db.models.peer import Peer
+from orchestratord.domain.auth_token import issue_api_token
 
 STATUS_PENDING = "pending"
 STATUS_ACCEPTED = "accepted"
@@ -178,3 +180,48 @@ async def remove_peer(
         )
     )
     return result.rowcount > 0
+
+
+async def rotate_peer_token(
+    session: AsyncSession, peer: Peer, *, grace_seconds: float
+) -> tuple[str, datetime | None]:
+    """Issue a fresh bearer token for an accepted peer and grace-expire
+    the old one (D15/NG8).
+
+    Returns ``(plaintext, old_expires_at)`` — the plaintext is shown
+    exactly once (accept-style); only its SHA-256 hash is persisted.
+    The old token keeps authenticating until ``old_expires_at``
+    (``now + grace_seconds``; ``None`` when the peer had no token yet)
+    via the standard ``expires_at`` check in ``require_peer_auth``,
+    whose NG8 grace fallback resolves the rotated-out token by the
+    ``peer:{orch_id}`` naming convention.
+
+    Shared by the operator rotate endpoint, the self-service
+    ``/api/peer/self/rotate-token`` endpoint, and ``peer rotate`` CLI —
+    one rotation code path, one audit surface.
+    """
+    if peer.status != STATUS_ACCEPTED:
+        raise ValueError(f"peer {peer.orch_id} is not accepted")
+    old_expires_at: datetime | None = None
+    if peer.token_id is not None:
+        old_token = await session.get(AuthToken, peer.token_id)
+        if old_token is not None and grace_seconds >= 0:
+            old_expires_at = datetime.now(UTC) + timedelta(
+                seconds=grace_seconds
+            )
+            old_token.expires_at = old_expires_at
+    plaintext, token_hash = issue_api_token()
+    token_row = AuthToken(
+        id=uuid.uuid4(),
+        workspace_id=peer.workspace_id,
+        name=f"peer:{peer.orch_id}",
+        token_hash=token_hash,
+        scopes=["peer.*"],
+        expires_at=None,
+        created_at=datetime.now(UTC),
+    )
+    session.add(token_row)
+    await session.flush()
+    peer.token_id = token_row.id
+    await session.flush()
+    return plaintext, old_expires_at

@@ -81,6 +81,24 @@ def add_peer_parser(subparsers: argparse._SubParsersAction) -> None:
     rm.add_argument("--orch-id", required=True, help="Remote orch_id")
     rm.add_argument("--workspace-id", required=True, help="Workspace UUID")
 
+    rot = peer_sub.add_parser(
+        "rotate",
+        help="Rotate an accepted peer's token (D15/NG8 grace)",
+    )
+    rot.add_argument("--orch-id", required=True, help="Remote orch_id")
+    rot.add_argument(
+        "--workspace-id", required=True, help="Workspace UUID"
+    )
+    rot.add_argument(
+        "--grace-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Old-token grace window override (default: "
+            "ORCHESTRATORD_PEER_TOKEN_GRACE_SECONDS, 300s)"
+        ),
+    )
+
     leave = peer_sub.add_parser("leave", help="Leave a peer group")
     leave.add_argument("--group-id", required=True)
     leave.add_argument(
@@ -130,6 +148,14 @@ def run(args: argparse.Namespace) -> int:
         return asyncio.run(_run_reject(UUID(args.peer_id)))
     if args.peer_subcommand == "remove":
         return asyncio.run(_run_remove(UUID(args.workspace_id), args.orch_id))
+    if args.peer_subcommand == "rotate":
+        return asyncio.run(
+            _run_rotate(
+                UUID(args.workspace_id),
+                args.orch_id,
+                getattr(args, "grace_seconds", None),
+            )
+        )
     if args.peer_subcommand == "leave":
         return asyncio.run(
             _run_leave(args.group_id, args.member or ensure_orch_id())
@@ -221,6 +247,45 @@ async def _run_remove(workspace_id: UUID, orch_id: str) -> int:
         print(f"peer not found: {orch_id}", file=sys.stderr)
         return 1
     print(f"removed {orch_id}")
+    return 0
+
+
+async def _run_rotate(
+    workspace_id: UUID, orch_id: str, grace_seconds: float | None
+) -> int:
+    """Rotate an accepted peer's token (D15/NG8); plaintext shown once."""
+    from orchestratord.config.schema import PeerConfig
+    from orchestratord.db.engine import build_session_factory
+    from orchestratord.peer.registry import get_peer, rotate_peer_token
+
+    if grace_seconds is None:
+        grace_seconds = PeerConfig.from_env().token_grace_seconds
+    async with build_session_factory()() as session:
+        peer = await get_peer(session, workspace_id, orch_id)
+        if peer is None or peer.status != "accepted":
+            print(
+                f"accepted peer not found: {orch_id}", file=sys.stderr
+            )
+            return 1
+        try:
+            plaintext, old_expires_at = await rotate_peer_token(
+                session, peer, grace_seconds=grace_seconds
+            )
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
+        await session.commit()
+    print(f"rotated token for {orch_id}")
+    print(f"grace_seconds: {grace_seconds}")
+    print(
+        "old token expires at: "
+        + (
+            old_expires_at.isoformat()
+            if old_expires_at is not None
+            else "(was unbound)"
+        )
+    )
+    print(f"token (shown once): {plaintext}")
     return 0
 
 
