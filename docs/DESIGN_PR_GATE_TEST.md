@@ -240,6 +240,14 @@ class GateExemption:
     expires: str             # 绝对日期，如 "2026-12-31"；过期即 FAIL
     platform: str | None = None  # 平台限定，如 "win32"；None = 全平台
 
+# 当前登记（2026-09-10）：
+# 1. G3.graceful_sigterm_exit_code  platform="win32" —— 无 SIGTERM 的断言放宽（§5.4）
+# 2. G4b.issue_pr_chain             platform="win32" —— fake codex shim 依赖
+#    POSIX shebang/chmod，win32 原生 PATH 不可执行；移植 shim 后撤销
+# 3. G0.ruff                        —— venv 未装 dev extras 时显式 SKIP，装上即转正
+# 4. G2.migrations / G3.startup /
+#    G4.functional / G4b.issue_pr_chain —— PG 不可达的开发机显式 SKIP(registered)；
+#    CI/nightly（PG service container）自动转正，防腐烂靠过期日 + nightly 对拍
 GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
     GateExemption(
         check_id="G3.graceful_sigterm_exit_code",
@@ -249,19 +257,20 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
         expires="2027-09-09",   # 年度复核：若引入 POSIX 子系统/WSL 直跑方案则撤销
         platform="win32",
     ),
-    GateExemption(
-        check_id="G4b.issue_pr_chain",
-        reason="P2 待实施：issue→PR 业务链路需 fake git remote + 确定性 stub "
-               "回包 fixtures（§5.5.1）",
-        env_gone_condition="P2 落地后撤销本条目",
-        expires="2026-10-31",
-    ),
+    # ……（其余条目见 tests/gate/gate_support.py，唯一事实源）
 )
 ```
 
-> 历史条目 `G2.migrations`（迁移 0009/0010 在分区表 events 上
-> CONCURRENTLY 必败）已于 2026-09-10 修复后撤销——豁免条目的生命周期
-> 即如此运转：登记 → 修复 → 撤销。
+> PG 端点不写死：`ORCHESTRATORD_GATE_PG_HOST/PORT/USER/PASSWORD/ADMIN_DB`、
+> `ORCHESTRATORD_GATE_DB` 环境变量可覆盖，默认值为本仓库主开发环境现值
+> （`multica@127.0.0.1:5432`）。其他开发者指到自己的 PG 即可全量转正 PASS。
+> 其余环境前提：git ≥ 2.28（G4b fixture 依赖 `git init -b`）、POSIX shell
+> （G4b 的 fake codex shim 经 PATH 执行；win32 走平台豁免条目）。
+
+> 历史条目均已按生命周期撤销：`G2.migrations`（迁移 0009/0010 在分区表
+> events 上 CONCURRENTLY 必败）于 2026-09-10 修复后撤销；`G4b.issue_pr_chain`
+> （链路 fixtures 待实施）于 2026-09-10 G4b 落地（§5.5.1，`test_g4b_issue_pr.py`）
+> 后撤销——登记 → 修复/落地 → 撤销。
 
 规则与 `test_architecture.py` 完全同构：未登记的失败 FAIL，登记了但环境实际可用、或已过期、或在**非限定平台**上被引用 → 同样 FAIL。新检查上线时若现有代码无法满足，须在此登记并给出消除期限，而不是调低断言。
 
@@ -291,19 +300,20 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
 2. **门禁基线文件更新是否独立 commit？——是。** 基线（openapi paths、CLI 子命令清单、迁移表集合）的任何变更必须独立成 commit、不与功能变更混合；runner 检测到基线漂移而无独立基线 commit 时报告 `baseline-drift-uncommitted`（§6 基线锁定行）。
 3. **Windows 进程清理差异是否豁免登记？——登记。** `G3.graceful_sigterm_exit_code` 以 `platform="win32"` 条件豁免入表（§9），断言放宽为 psutil 递归终止 + 无存活子进程 + 日志无未处理异常；WSL2/Linux 路径不受影响，豁免被非限定平台引用即 FAIL。
 
-## 13. 落地实测（2026-09-09，WSL2 / 8 核 / PG 本机）
+## 13. 落地实测（2026-09-09 首轮；2026-09-10 全绿轮，WSL2 / 8 核 / PG 本机）
 
-`python tests/gate/gate_runner.py` 全量通过轮的实测分层耗时：
+`python tests/gate/gate_runner.py` 全量通过轮的实测分层耗时（2026-09-10，
+全绿：PASS 72 / FAIL 0 / SKIP 0）：
 
 | Layer | 内容 | PASS/FAIL/SKIP | 耗时 |
 |---|---|---|---|
-| G0 | compileall + 全模块 import + ruff(E9) | 3/0/0 | 11.1s |
-| G1 | --version + 16 子命令 --help + 2 只读真实执行 | 20/0/0 | 100.4s |
-| G2 | 迁移对拍（G2.migrations 豁免 → SKIP×3） | 0/0/3 | 20.6s |
-| G3 | daemon start/serve/stop 三变体 | 3/0/0 | 47.5s |
-| G4 | CRUD 往返 + echo 协议环（G4b 登记豁免 SKIP） | 2/0/1 | 15.3s |
-| G5 | 守卫收编（4 文件） | 39/0/5 | 6.2s |
-| **合计** | | | **≈3.7 min** |
+| G0 | compileall + 全模块 import + ruff(E9) | 3/0/0 | 13.6s |
+| G1 | --version + 17 子命令 --help + 2 只读真实执行 | 21/0/0 | 147.1s |
+| G2 | 迁移对拍 | 3/0/0 | 54.5s |
+| G3 | daemon start/serve/stop 三变体 | 3/0/0 | 81.4s |
+| G4 | CRUD 往返 + echo 协议环 + G4b issue→PR 链路 | 3/0/0 | 20.9s |
+| G5 | 守卫收编（3 文件） | 39/0/0 | 30.9s |
+| **合计** | | | **≈6.2 min** |
 
 远低于 ≤15 min 预算；G1 占近半耗时（每次 `--help` 真实子进程 ~5s），后续若需压缩可合并为单进程批量执行（牺牲部分隔离性）。
 
@@ -313,3 +323,6 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
 2. **ruff 存量债 963 条**（§5.1）：仓库从未强制 lint，G0 收窄为 E9-only 并留季度收紧路线。
 3. **G3 stop 变体的僵尸进程伪影（产品侧已修复 2026-09-10）**：daemon 是 pytest 子进程，退出后成僵尸；`server stop`（独立进程）的 `_is_pid_alive` 用 signal 0 探测，僵尸仍报存活 → 误判超时 rc=1。真实用户场景 daemon 被 init 收割无此问题，测试侧以后台收割线程模拟 reap（`test_g3_startup.py`）。daemon 实测 SIGTERM 后 0.4s 优雅退出。产品修复：`_is_pid_alive` 在 Linux 上读 `/proc/<pid>/stat` 把 Z 状态判为已死亡（非 Linux 回退 signal 0 语义）。
 4. **uvicorn ≥0.52 信号语义**（§5.4）：serve 变体退出码判据据实放宽为 {0, -15}。
+5. **G4b 首跑即捕获两处重构回归（均已修复 2026-09-10）**：① `Orchestrator._launch_issue(self, issue)` 被误加 `@staticmethod`，daemon 启动 dispatch 即崩（"missing 1 required positional argument: 'issue'"）；② `IssuePrInterpretation._uses_review_feedback_followup` 定义缺 `self` 又无 `@staticmethod`，链路推进到 followup 分支即崩——该链路在重构后从未被端到端执行过，进程内单测的 mock 边界恰好绕开了这两处。G4b 同步暴露两条环境断言：空 bare origin 无 HEAD 导致 launch 阶段 `git rev-parse HEAD` 失败（fixture 需种子提交），以及 `expected_cli_subcommands.txt` 需随新增 `gateway` 子命令同步登记。
+6. **可选依赖的顶层 import 断裂（已修复 2026-09-10）**：合并进来的 `channels/wechat_ilink.py` 在模块顶层 `from cryptography.fernet import ...`，而 `cryptography` 仅是 `gateway-wechat` extra——G0 全模块 import 扫描立即拦截。修复：改为 `WeChatIlinkAuthStore` 方法内延迟导入（与 pyproject 中 redis 的 lazy-import 约定一致）。
+7. **daemon 退出泄漏未关闭的 asyncio loop（已修复 2026-09-10）**：G3 stop 变体日志扫描稳定拦截守护进程退出时的 `Exception ignored in BaseEventLoop.__del__`。探针定位：`/api/health` → `get_dashboard_state()` 单例 → `DashboardState.__init__` 急切构建 `ChatGateway()`（自带线程 + `new_event_loop`），API 兼容层无 owner 在退出时 stop——CLI dashboard 有 `atexit.register(chat_gateway.stop)`，单例没有。修复：`api/state.py` 为单例登记同样的 atexit 清理；`ChatGateway.stop()` 在 join 后显式 `loop.close()`（stopped-but-unclosed 的 loop 被 GC 时 `__del__` 再 close 也可能打印异常）。该缺陷由日志扫描 fail-closed 判据捕获——真实生产 daemon 退出时同样在 stderr 打印垃圾 traceback。

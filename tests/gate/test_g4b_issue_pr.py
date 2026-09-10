@@ -18,6 +18,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 import gate_support as g
@@ -135,8 +136,13 @@ def g4b_chain(request, tmp_path_factory):
     g.registered_skip(
         request,
         "G4b.issue_pr_chain",
-        env_ok=g.pg_reachable(),
-        env_gone="Postgres unreachable at 127.0.0.1:5432",
+        # win32：shebang shim 无法经 PATH 执行（平台豁免，gate_support §9）。
+        env_ok=g.pg_reachable() and sys.platform != "win32",
+        env_gone=(
+            "Postgres unreachable"
+            if g.pg_reachable()
+            else f"POSIX-only shim on {sys.platform}"
+        ),
     )
 
     tmp = tmp_path_factory.mktemp("g4bchain")

@@ -84,8 +84,8 @@ def _parse_junit(junit: Path) -> list[dict]:
 def _layer_of(case: dict) -> str:
     # junitxml 的 file 属性可能缺失；classname/id 形如
     # "tests.gate.test_g0_static.TestG0::test_x"，从 id 解析层号。
-    if re.search(r"test_g\d_", case["id"]):
-        return "G" + re.search(r"test_g(\d)_", case["id"]).group(1)
+    if re.search(r"test_g\d", case["id"]):
+        return "G" + re.search(r"test_g(\d)", case["id"]).group(1)
     return "G5"
 
 

@@ -22,9 +22,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONSOLE_SCRIPT = Path(sys.executable).parent / "orchestratord"
 
-GATE_DB = "orchestratord_gate"
-PG_ADMIN_DSN = "postgresql://multica:multica@127.0.0.1:5432/multica"
-GATE_DSN = f"postgresql+asyncpg://multica:multica@127.0.0.1:5432/{GATE_DB}"
+GATE_DB = os.environ.get("ORCHESTRATORD_GATE_DB", "orchestratord_gate")
+
+# PG 端点经环境变量配置——门禁要跑在其他开发者/CI 的机器上（DESIGN §5.4），
+# 不能写死 multica@127.0.0.1:5432。默认值即本仓库主开发环境的现值。
+PG_HOST = os.environ.get("ORCHESTRATORD_GATE_PG_HOST", "127.0.0.1")
+PG_PORT = os.environ.get("ORCHESTRATORD_GATE_PG_PORT", "5432")
+PG_USER = os.environ.get("ORCHESTRATORD_GATE_PG_USER", "multica")
+PG_PASSWORD = os.environ.get("ORCHESTRATORD_GATE_PG_PASSWORD", "multica")
+PG_ADMIN_DB = os.environ.get("ORCHESTRATORD_GATE_PG_ADMIN_DB", "multica")
+
+
+def pg_admin_dsn() -> str:
+    return f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_ADMIN_DB}"
+
+
+def pg_dsn(dbname: str) -> str:
+    return f"postgresql+asyncpg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{dbname}"
+
+
+PG_ADMIN_DSN = pg_admin_dsn()
+GATE_DSN = pg_dsn(GATE_DB)
 
 HEALTH_BUDGET_S = 30
 SHUTDOWN_BUDGET_S = 15
@@ -47,6 +65,15 @@ class GateExemption:
     platform: str | None = None  # 平台限定；None = 全平台
 
 
+#: 环境缺失类豁免（PG / ruff 未就绪的开发机）：CI 与 nightly 提供完整环境
+#: 后自动转正为 PASS；本地缺失时显式 SKIP(registered) 而非 FAIL（DESIGN §8）。
+#: expires 为年度复核日——若届时门禁环境仍未收敛（如内置临时 PG），重新评估。
+_PG_ENV_REASON = (
+    "Postgres 门禁库不可达（开发者本机/CI 差异）；提供可达 PG（或经 "
+    "ORCHESTRATORD_GATE_PG_* 指向现有实例）后自动转正"
+)
+_PG_ENV_GONE = "Postgres reachable（端点经 ORCHESTRATORD_GATE_PG_* 配置）"
+
 GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
     GateExemption(
         check_id="G3.graceful_sigterm_exit_code",
@@ -58,11 +85,57 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
         expires="2027-09-09",
         platform="win32",
     ),
+    GateExemption(
+        # shim 为 shebang 脚本 + chmod 0o755，Windows 原生 PATH 无法执行；
+        # 移植（python -c 包装或 .bat 桥）前按 §5.4 平台差异登记。
+        check_id="G4b.issue_pr_chain",
+        reason=(
+            "fake codex shim 依赖 POSIX shebang/chmod，win32 原生不可执行"
+            "（DESIGN §5.4 平台差异）；移植 shim 后撤销"
+        ),
+        env_gone_condition="不适用——平台能力差异，非环境缺失",
+        expires="2027-09-09",
+        platform="win32",
+    ),
+    GateExemption(
+        check_id="G0.ruff",
+        reason="ruff 未安装于当前 venv（未装 dev extras）；安装后自动转正",
+        env_gone_condition="venv 内 ruff 可执行",
+        expires="2027-09-09",
+    ),
+    GateExemption(
+        check_id="G2.migrations",
+        reason=_PG_ENV_REASON,
+        env_gone_condition=_PG_ENV_GONE,
+        expires="2027-09-09",
+    ),
+    GateExemption(
+        check_id="G3.startup",
+        reason=_PG_ENV_REASON,
+        env_gone_condition=_PG_ENV_GONE,
+        expires="2027-09-09",
+    ),
+    GateExemption(
+        check_id="G4.functional",
+        reason=_PG_ENV_REASON,
+        env_gone_condition=_PG_ENV_GONE,
+        expires="2027-09-09",
+    ),
+    GateExemption(
+        check_id="G4b.issue_pr_chain",
+        reason=_PG_ENV_REASON,
+        env_gone_condition=_PG_ENV_GONE,
+        expires="2027-09-09",
+    ),
 )
 
 
+def exemptions_for(check_id: str) -> tuple[GateExemption, ...]:
+    return tuple(e for e in GATE_EXEMPTIONS if e.check_id == check_id)
+
+
 def exemption_for(check_id: str) -> GateExemption | None:
-    return next((e for e in GATE_EXEMPTIONS if e.check_id == check_id), None)
+    return next(iter(exemptions_for(check_id)), None)
 
 
 def _expiry(e: GateExemption) -> date:
@@ -75,22 +148,29 @@ def registered_skip(
     """DESIGN §3/§9 fail-closed skip: 环境缺失必须登记豁免才能 SKIP。
 
     env_ok=True  → 正常执行（豁免被无视）。
-    env_ok=False → 未登记或已过期即 FAIL；已登记且未过期 → SKIP(registered)。
+    env_ok=False → 无登记 FAIL；登记全不适用于当前平台 FAIL；登记过期 FAIL；
+                   有未过期的适用登记（platform 限定匹配或全平台）→ SKIP(registered)。
     环境敏感豁免的防腐烂由过期日期 + nightly 全量对拍兜底（DESIGN §9）。
     """
     if env_ok:
         return
-    e = exemption_for(check_id)
-    if e is None:
+    entries = exemptions_for(check_id)
+    if not entries:
         pytest.fail(
             f"{check_id}: 环境缺失（{env_gone}）且无豁免登记 — fail-closed（DESIGN §9）"
         )
-    if date.today() > _expiry(e):
-        pytest.fail(f"{check_id}: 豁免已过期（{e.expires}）——应修复环境或撤销豁免")
-    if e.platform is not None and e.platform != sys.platform:
+    applicable = [e for e in entries if e.platform is None or e.platform == sys.platform]
+    if not applicable:
         pytest.fail(
-            f"{check_id}: 豁免限定平台 {e.platform} 却被 {sys.platform} 引用"
+            f"{check_id}: 豁免仅限定平台 "
+            f"{[e.platform for e in entries]}，却被 {sys.platform} 引用"
         )
+    for e in applicable:
+        if date.today() > _expiry(e):
+            pytest.fail(f"{check_id}: 豁免已过期（{e.expires}）——应修复环境或撤销豁免")
+    # 平台限定条目优先于全平台条目（原因更精确）。
+    applicable.sort(key=lambda e: e.platform is None)
+    e = applicable[0]
     pytest.skip(f"SKIP(registered) {check_id}: {env_gone} — {e.reason}")
 
 

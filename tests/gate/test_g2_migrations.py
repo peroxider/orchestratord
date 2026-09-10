@@ -19,8 +19,9 @@ pytestmark = pytest.mark.gate  # PR merge gate (DESIGN_PR_GATE_TEST.md §4)
 
 MIG_DB = "gate_mig"
 ORM_DB = "gate_orm"
-MIG_DSN = f"postgresql+asyncpg://multica:multica@127.0.0.1:5432/{MIG_DB}"
-ORM_DSN = f"postgresql+asyncpg://multica:multica@127.0.0.1:5432/{ORM_DB}"
+# 端点随 gate_support 的 ORCHESTRATORD_GATE_PG_* 解析，不写死本机凭据。
+MIG_DSN = g.pg_dsn(MIG_DB)
+ORM_DSN = g.pg_dsn(ORM_DB)
 
 #: 迁移侧独有的记账表，不参与对拍。
 LEDGER_TABLES = {"orchestratord_schema_migrations"}
