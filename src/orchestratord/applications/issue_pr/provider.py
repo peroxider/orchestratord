@@ -64,10 +64,25 @@ class _IssueDispatchHost(Protocol):
 class IssuePrWorkProvider:
     """kernel ``WorkProvider`` 协议的 issue→PR 实现（结构化满足）。"""
 
-    def __init__(self, host: _IssueDispatchHost | None = None) -> None:
+    def __init__(
+        self,
+        host: _IssueDispatchHost | None = None,
+        application: Any | None = None,
+    ) -> None:
         # C2c 两段式装配（DESIGN §4.2/G2）：组合根可先以无宿主形态构造
         # （宿主彼时尚未存在），由 Orchestrator.__init__ 回绑 ``_host``。
         self._host = host
+        self._application = application
+
+    def bind_application(self, application: Any) -> None:
+        """Bind the business facade after the composition root is complete."""
+        self._application = application
+
+    def _business(self) -> Any:
+        application = self._application
+        if application is None and self._host is not None:
+            application = getattr(self._host, "_issue_app", None)
+        return getattr(application, "_interpretation", None) or application or self._host
 
     async def poll(self) -> list[WorkItem]:
         """拉取并派发本轮可执行的 issue 工作项（业务链见 ``_dispatch_candidates``）。"""
@@ -147,7 +162,7 @@ class IssuePrWorkProvider:
             # happen BEFORE the completed/pending_review skip so
             # operators can trigger RETRY / FOLLOWUP on completed
             # issues via labels, comments, or CLI.
-            intent, command_intent_obj, intent_source = await self._host._resolve_intent(issue)
+            intent, command_intent_obj, intent_source = await self._business()._resolve_intent(issue)
 
             if issue.id in self._host._state.completed or issue.id in self._host._state.pending_review:
                 if intent not in (Intent.RETRY, Intent.FOLLOWUP):
@@ -169,9 +184,9 @@ class IssuePrWorkProvider:
             if (
                 command_intent_obj is not None
                 and intent in (Intent.RETRY, Intent.FOLLOWUP)
-                and not self._host._is_command_author_eligible(issue, command_author)
+                and not self._business()._is_command_author_eligible(issue, command_author)
             ):
-                await self._host._reject_unauthorized_command(issue, command_intent_obj)
+                await self._business()._reject_unauthorized_command(issue, command_intent_obj)
                 continue
 
             # Rate limit on RETRY intent. If the issue
@@ -179,7 +194,7 @@ class IssuePrWorkProvider:
             # (even with `--force`; only the label-based retry
             # honors force in the daemon path).
             if intent is Intent.RETRY:
-                if not self._host._check_retry_rate_limit(issue, force=False):
+                if not self._business()._check_retry_rate_limit(issue, force=False):
                     continue
 
             # When a comment command is honored, post
@@ -187,7 +202,7 @@ class IssuePrWorkProvider:
             # intent was received, and record the command on the
             # registry for audit.
             if command is not None:
-                await self._host._post_command_acknowledgement(issue, command)
+                await self._business()._post_command_acknowledgement(issue, command)
                 record = self._host._registry.get(issue.id or "")
                 if record is not None:
                     record.last_command = f"/agent {command.value}"
@@ -240,7 +255,7 @@ class IssuePrWorkProvider:
                     command=(f"/agent {command.value}" if command is not None else None),
                 )
                 self._host._registry.mark_abandoned(issue.id or "")
-                await self._host._sync_tracker_issue_state(issue.id or "", "abandoned")
+                await self._business()._sync_tracker_issue_state(issue.id or "", "abandoned")
                 self._host._state.completed.add(issue.id or "")
                 continue
 
@@ -282,13 +297,13 @@ class IssuePrWorkProvider:
                     command=(f"/agent {command.value}" if command is not None else None),
                 )
                 followup_record = self._host._registry.get(issue.id or "")
-                if self._host._uses_review_feedback_followup(followup_record):
+                if self._business()._uses_review_feedback_followup(followup_record):
                     # Command follow-up handles pending PR review feedback
                     # instead of rerunning the entire issue. Dashboard chat
                     # keeps its agent_followup path because the operator's
                     # text is the work to perform.
                     followup_handled = (
-                        await self._host._launch_followup_with_pending_reviews(issue)
+                        await self._business()._launch_followup_with_pending_reviews(issue)
                     )
                     if followup_handled:
                         continue
@@ -316,9 +331,9 @@ class IssuePrWorkProvider:
                     source=(intent_source or ("command" if command is not None else "label")),
                     command=(f"/agent {command.value}" if command is not None else None),
                 )
-                if not self._host._check_rebase_rate_limit(issue, force=False):
+                if not self._business()._check_rebase_rate_limit(issue, force=False):
                     continue
-                await self._host._process_rebase_intent(issue)
+                await self._business()._process_rebase_intent(issue)
                 # CLI is one-shot; clear so the next poll doesn't
                 # re-trigger. Audit + last_command are preserved.
                 if intent_source == "cli":
@@ -334,7 +349,7 @@ class IssuePrWorkProvider:
             ):
                 logger.info("Issue %s already handled (registry), skipping", issue.id)
                 continue
-            if not await self._host._dependencies_satisfied(issue):
+            if not await self._business()._dependencies_satisfied(issue):
                 continue
             if self._host._clarification_gate is not None:
                 try:

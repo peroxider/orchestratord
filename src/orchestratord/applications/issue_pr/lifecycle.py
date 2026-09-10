@@ -99,13 +99,7 @@ class _IssueLifecycleHost(Protocol):
 
 
 class IssueToPrLifecycle:
-    """issue→PR 业务生命周期（kernel ``Application`` 协议的 interim 实现）。
-
-    协议成员覆盖进度：prepare_run → ``prepare_launch``（interim 直参）、
-    interpret_result → ``interpret``（interim 直参）、``control_commands``
-    已按协议成形；``work_provider`` / ``prompt_profiles`` /
-    ``on_kernel_event`` 随 C2c 装配与 dispatch-loop 切片接入。
-    """
+    """Issue→PR application lifecycle attached to the generic Kernel."""
 
     name = "issue_pr"
 
@@ -130,26 +124,24 @@ class IssueToPrLifecycle:
         """Issue→PR prompt profiles are registered by the prompt module."""
         return {}
 
-    async def prepare_run(self, item: Any, ctx: RunContext) -> PreparedRun:
+    async def prepare_run(self, item: Any, ctx: RunContext) -> PreparedRun | None:
         """Full-signature Application seam.
 
-        The legacy daemon still uses the three-seam launch path because an
-        issue workspace must be created before a generic AgentTask exists.
-        This adapter keeps that ordering explicit while exposing the final
-        protocol to the Kernel and to new embedders.
+        The issue workspace and registry gates are application decisions;
+        this adapter exposes them through the full Kernel protocol.
         """
         issue = item.business.get("issue") if item is not None else None
         if issue is None:
             raise ValueError("issue_pr prepare_run requires WorkItem.business['issue']")
         prepared = await self.prepare_launch(issue)
         if prepared is None:
-            return PreparedRun(business={"gated": True})
+            return None
         return prepared
 
     async def interpret_result(
         self, item: Any, result: Any, ctx: RunContext
     ) -> Outcome:
-        """Adapt a generic AgentTaskResult into the existing issue interpreter."""
+        """Turn a runner result into the application-owned Outcome."""
         issue = item.business.get("issue") if item is not None else None
         if issue is None:
             return Outcome.dispose("missing_issue")
@@ -195,10 +187,10 @@ class IssueToPrLifecycle:
             await self._host._clarification_resolver.poll_clarification_answers()
         if phase not in ("after_retry", "all"):
             return
-        await self._host._process_escalated_issues()
-        await self._host._process_review_feedback()
-        await self._host._process_pending_rebase_conflicts()
-        await self._host._process_pr_conflict_scan()
+        await self._interpretation._process_escalated_issues()
+        await self._interpretation._process_review_feedback()
+        await self._interpretation._process_pending_rebase_conflicts()
+        await self._interpretation._process_pr_conflict_scan()
 
     async def prepare_launch(self, issue: Issue) -> PreparedRun | None:
         """执行前业务装配（协议 prepare_run 的 interim 直参形态）。
@@ -210,7 +202,7 @@ class IssueToPrLifecycle:
         claimed.discard / completed.add 已随迁）；非 None 时宿主续建
         AgentSession 并按 3-seam 保序委托推进。
         """
-        if not await self._host._dependencies_satisfied(issue):
+        if not await self._interpretation._dependencies_satisfied(issue):
             self._host._state.claimed.discard(issue.id)
             return None
 
@@ -219,7 +211,7 @@ class IssueToPrLifecycle:
         # the local record so the new run starts from a clean slate.
         # This must happen BEFORE workspace creation so the new run
         # does not try to push a follow-up commit to a closed PR.
-        await self._host._prepare_intent_reset(issue)
+        await self._interpretation._prepare_intent_reset(issue)
 
         workspace_strategy = self._host.workflow.workspace.strategy
         branch_name = getattr(issue, "branch_name", None)
@@ -489,8 +481,8 @@ class IssueToPrLifecycle:
         # conversation turns remain agent_followup runs so operator text is not
         # discarded merely because there is no pending PR review.
         followup_record = self._host._registry.get(issue.id or "")
-        if self._host._uses_review_feedback_followup(followup_record):
-            followup_handled = await self._host._launch_followup_with_pending_reviews(issue)
+        if self._interpretation._uses_review_feedback_followup(followup_record):
+            followup_handled = await self._interpretation._launch_followup_with_pending_reviews(issue)
             if not followup_handled:
                 logger.info(
                     "Issue %s follow-up: no pending review feedback to process — skip",
@@ -500,7 +492,7 @@ class IssueToPrLifecycle:
         # If the registry intent is FOLLOWUP, wire the
         # session so the agent + git_sync know to reuse the existing
         # branch / PR rather than create a new run.
-        self._host._prepare_intent_session(session)
+        self._interpretation._prepare_intent_session(session)
         if session.run_kind == "review_followup":
             session.stage_id = "review_followup"
         # Retry context: propagate previous_run_ids from the registry
@@ -582,7 +574,7 @@ class IssueToPrLifecycle:
             )
             self._host._state.completed.add(session.issue.id or "")
             self._host._registry.mark_completed(session.issue.id or "")
-            await self._host._sync_tracker_issue_state(session.issue.id or "", "completed")
+            await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "completed")
             outcome = Outcome.dispose("completed")
         elif session.status == "verification_failed":
             self._host.status_dashboard.on_session_failed(
@@ -605,7 +597,7 @@ class IssueToPrLifecycle:
             # (GitCode cannot reopen a closed issue).
             retry_scheduled = await self._host._schedule_retry(session)
             if not retry_scheduled:
-                await self._host._sync_tracker_issue_state(
+                await self._interpretation._sync_tracker_issue_state(
                     session.issue.id or "", "verification_failed"
                 )
             outcome = (
@@ -629,7 +621,7 @@ class IssueToPrLifecycle:
             )
             retry_scheduled = await self._host._schedule_retry(session)
             if not retry_scheduled:
-                await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+                await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             outcome = (
                 Outcome.retry(reason="agent_timeout")
                 if retry_scheduled
@@ -652,7 +644,7 @@ class IssueToPrLifecycle:
                 delay_base_ms=self._host.workflow.agent.max_turns_retry_delay_ms,
             )
             if not retry_scheduled:
-                await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+                await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             outcome = (
                 Outcome.retry(reason="max_turns_exceeded")
                 if retry_scheduled
@@ -691,7 +683,7 @@ class IssueToPrLifecycle:
                 delay_base_ms=backoff_s,
             )
             if not retry_scheduled:
-                await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+                await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             outcome = (
                 Outcome.retry(reason="rate_limit_circuit_open")
                 if retry_scheduled
@@ -725,7 +717,7 @@ class IssueToPrLifecycle:
                 getattr(session, "session_end_summary", "") or str(session.status),
             )
             self._host._registry.mark_failed(session.issue.id or "")
-            await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+            await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             # No retry — same agent will likely repeat the
             # same loop on retry without human intervention.
             # The cron tick will mark the issue abandoned on
@@ -748,7 +740,7 @@ class IssueToPrLifecycle:
                 "cancelled by operator",
             )
             self._host._registry.mark_failed(session.issue.id or "")
-            await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+            await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             # Do NOT schedule retry — operator explicitly cancelled.
             outcome = Outcome.dispose("cancelled")
         elif session.status == "released":
@@ -820,7 +812,7 @@ class IssueToPrLifecycle:
             # ``_schedule_retry`` abandoned path closes it.
             retry_scheduled = await self._host._schedule_retry(session)
             if not retry_scheduled:
-                await self._host._sync_tracker_issue_state(session.issue.id or "", "failed")
+                await self._interpretation._sync_tracker_issue_state(session.issue.id or "", "failed")
             outcome = (
                 Outcome.retry(reason=str(session.status))
                 if retry_scheduled
@@ -834,21 +826,16 @@ class IssueToPrLifecycle:
             session.issue.id not in self._host._state.pending_review
             and session.status != "released"
         ):
-            await self._host._update_issue_summary(session)
+            await self._interpretation._update_issue_summary(session)
 
         return outcome
 
     def control_commands(self) -> dict[str, CommandHandler]:
-        """业务控制命令注册表（协议原形，DESIGN §4.2）。
+        """Return the application-owned operator command registry.
 
-        覆盖宿主 ``_process_control_commands`` 第二派发点（pre-image
-        :4536-4556）的六个业务命令：review_followup / rebase /
-        review_approve / review_retry / retry / followup。handler 为
-        宿主方法的适配闭包（签名各异 → 统一 ``(issue_id, extra)``），
-        返回值决定控制文件是否删除（followup 可返回 False 保留）。
-        pause / resume / stop / takeover / gateway_* 为机制命令，留宿主
-        ``_apply_control_command`` / ``_handle_gateway_control``（§4.2
-        明文；其 sync-context retry 分支随 dispatch-loop 切片迁入）。
+        The six issue-specific commands use one normalized
+        ``(dedup_key, extra)`` handler signature. Kernel commands such as
+        pause/resume/stop and gateway control remain mechanism-owned.
         """
         commands = self._commands
 

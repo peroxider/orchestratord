@@ -86,7 +86,9 @@ class Application(Protocol):
     def work_provider(self) -> WorkProvider: ...
 
     # ── 执行前（业务装配）──
-    async def prepare_run(self, item: WorkItem, ctx: RunContext) -> PreparedRun: ...
+    async def prepare_run(
+        self, item: WorkItem, ctx: RunContext
+    ) -> PreparedRun | None: ...
 
     # ── 执行后（业务解释）──
     async def interpret_result(
