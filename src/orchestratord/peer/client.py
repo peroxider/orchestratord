@@ -17,11 +17,13 @@ real ``httpx`` client when a ``base_url`` is given.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -37,6 +39,7 @@ from orchestratord.peer.handshake import (
 )
 from orchestratord.peer.nonce_store import NonceStore
 from orchestratord.peer.protocol import PeerFrame, PeerFrameType
+from orchestratord.peer.trace import TRACE_HEADER, resolve_trace_id
 from orchestratord.peer.transports import select_transport_factory
 
 logger = logging.getLogger(__name__)
@@ -132,6 +135,9 @@ class PeerClient:
                     connect=connect_timeout,
                     read=hello_timeout,
                     write=connect_timeout,
+                    # httpx.Timeout requires all four or a default; the
+                    # pool wait mirrors the hello timeout (D23).
+                    pool=hello_timeout,
                 )
             )
         else:
@@ -144,6 +150,8 @@ class PeerClient:
         self._events: asyncio.Queue[PeerFrame | None] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
         self._topics: set[str] = set()
+        # PR-B9: lazy SSE EVENT consumer (see _ensure_sse).
+        self._sse_task: asyncio.Task[None] | None = None
         # NG8: background self-serve token rotation (see rotate_token).
         self._rotate_task: asyncio.Task[None] | None = None
 
@@ -231,9 +239,17 @@ class PeerClient:
                 orch_id=self._orch_id, in_flight=in_flight
             )
             try:
-                await self._transport.send_frame(goodbye)
+                # PR-B9: GOODBYE terminates its own batch.
+                await self._transport.send_frame(goodbye, end_of_batch=True)
             except Exception:  # noqa: BLE001, S110 — GOODBYE is best-effort
                 pass
+        if self._sse_task is not None:
+            self._sse_task.cancel()
+            try:
+                await self._sse_task
+            except asyncio.CancelledError:
+                pass
+            self._sse_task = None
         if self._reader is not None:
             self._reader.cancel()
             try:
@@ -277,18 +293,23 @@ class PeerClient:
         transport.
         """
         rid = request_id or str(uuid.uuid4())
+        merged = dict(headers or {})
+        # Trace correlation: explicit header → ambient contextvar →
+        # fresh id. The server echoes it back in the RESULT headers.
+        merged[TRACE_HEADER] = resolve_trace_id(merged.get(TRACE_HEADER))
         frame = PeerFrame.invoke(
             orch_id=self._orch_id,
             request_id=rid,
             method=method,
             body=body,
-            headers=headers,
+            headers=merged,
             ordering=ordering,
         )
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[PeerFrame] = loop.create_future()
         self._pending[rid] = fut
-        await self._send_or_fail(frame)
+        # PR-B9: one INVOKE is one batch — flush it as one POST.
+        await self._send_or_fail(frame, end_of_batch=True)
         try:
             return await asyncio.wait_for(fut, timeout=self._request_timeout)
         except TimeoutError as exc:
@@ -304,6 +325,7 @@ class PeerClient:
         transport = await self._require_transport()
         await send_subscriptions(transport, topics)
         self._topics |= set(topics)
+        self._ensure_sse()
 
     @property
     def topics(self) -> set[str]:
@@ -476,9 +498,108 @@ class PeerClient:
             self._warned_legacy_protocol = True
         self._transport_factory = new_factory
 
-    async def _send_or_fail(self, frame: PeerFrame) -> None:
+    # -- PR-B9: SSE EVENT consumption --
+
+    def _ensure_sse(self) -> None:
+        """Lazily start the SSE EVENT consumer after the first SUBSCRIBE.
+
+        Unsolicited EVENT push rides ``GET /api/peer/peers/{orch_id}/
+        events`` (the batch-POST binding cannot push), so once the
+        remote knows our topics we open the SSE stream. A no-op for
+        clients without a frame URL (in-memory transports, legacy rest
+        sessions — EVENT frames arrive on the frame pipe there).
+        """
+        if self._sse_task is not None or not self._frame_url:
+            return
+        self._sse_task = asyncio.create_task(
+            self._sse_loop(), name="peer-client-sse"
+        )
+
+    def _sse_url(self) -> str:
+        """SSE endpoint URL derived from the frame URL's origin."""
+        parts = urlsplit(self._frame_url or "")
+        return (
+            f"{parts.scheme}://{parts.netloc}"
+            f"/api/peer/peers/{self._orch_id}/events"
+        )
+
+    def _sse_line_to_frame(self, line: str) -> PeerFrame | None:
+        """Convert one SSE ``data:`` line into an EVENT frame.
+
+        The peer SSE endpoint emits broker dicts ``{"topic", "payload"}``
+        as JSON (not PeerFrame JSONL), so a PeerFrame decode is tried
+        first and the broker shape is converted as a fallback.
+        """
+        frame = parse_sse_data_line(line)
+        if frame is not None:
+            return frame
+        if not line.startswith("data:"):
+            return None
+        payload = line[len("data:") :].strip()
+        if not payload:
+            return None
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            return None
+        if not isinstance(event, dict) or not isinstance(
+            event.get("topic"), str
+        ):
+            return None
+        return PeerFrame.event(
+            orch_id=self._orch_id,
+            topic=event["topic"],
+            payload=event.get("payload"),
+        )
+
+    async def _sse_loop(self) -> None:
+        """Consume the SSE EVENT stream into the shared ``_events`` queue.
+
+        Runs until cancelled by ``close()`` (GOODBYE is sent first, so
+        the remote stops publishing to us) or until the stream fails —
+        a failure is logged and ends the task; pending frame-pipe
+        traffic keeps the session alive.
+        """
+        url = self._sse_url()
+        headers = {
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {self._token}",
+            "X-Peer-Orchestrator-Id": self._orch_id,
+        }
+        from orchestratord.peer.transports.https_frame import peer_tls_verify
+
+        # read=None: an SSE stream may stay idle indefinitely.
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=self._connect_timeout,
+                read=None,
+                write=self._connect_timeout,
+                pool=self._connect_timeout,
+            ),
+            verify=peer_tls_verify(),
+        )
+        try:
+            async with client.stream("GET", url, headers=headers) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    frame = self._sse_line_to_frame(line)
+                    if frame is not None:
+                        await self._events.put(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — degraded event channel only
+            logger.warning(
+                "peer %s SSE event stream ended abnormally", self._orch_id,
+                exc_info=True,
+            )
+        finally:
+            await client.aclose()
+
+    async def _send_or_fail(
+        self, frame: PeerFrame, *, end_of_batch: bool = False
+    ) -> None:
         transport = await self._require_transport()
-        await transport.send_frame(frame)
+        await transport.send_frame(frame, end_of_batch=end_of_batch)
 
     async def _require_transport(self) -> FrameTransport:
         if self._transport is None:

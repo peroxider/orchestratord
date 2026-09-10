@@ -47,9 +47,11 @@ def app(tmp_path, monkeypatch):
     # that would otherwise leak across tests).
     from orchestratord.api.deps import reset_peer_rate_bucket
     from orchestratord.api.realtime import reset_broker
+    from orchestratord.peer import topic_registry
 
     reset_broker()
     reset_peer_rate_bucket()  # PR-B5: D25 bucket must not leak env overrides
+    topic_registry.reset_peer_topics()  # PR-B9: per-peer SSE subscriptions
     for conn in list(peer_connections.live_inbound()):
         peer_connections.unregister_inbound(conn)
     yield create_app()
@@ -310,7 +312,8 @@ def test_inbound_registry_releases_on_close(client, tmp_path) -> None:
 
 
 async def _seed_session_in(
-    engine, workspace_id: "uuid.UUID"
+    engine, workspace_id: "uuid.UUID",
+    *, agent_id: "uuid.UUID | None" = None, status: str = "running",
 ) -> "orm.Session":
     """Seed a Session row in the peer-frame SQLite test DB."""
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -318,16 +321,72 @@ async def _seed_session_in(
         id=uuid.uuid4(),
         workspace_id=workspace_id,
         issue_id=None,
-        agent_id=None,
+        agent_id=agent_id,
         run_id=None,
         mode="single",
-        status="running",
+        status=status,
         created_at=datetime.now(UTC),
     )
     async with factory() as session:
         session.add(s)
         await session.commit()
     return s
+
+
+async def _seed_approval_request_event(
+    engine, workspace_id: "uuid.UUID", session_id: "uuid.UUID",
+    *, request_id: str = "apr-1",
+) -> "orm.Event":
+    """Seed an APPROVAL_REQUEST event so ``_pending_request`` finds it."""
+    from orchestratord.spi.events import EventKind
+
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    event = orm.Event(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        sequence=1,
+        kind=EventKind.APPROVAL_REQUEST.value,
+        payload={"request_id": request_id},
+        run_id=None,
+        issue_id=None,
+        workspace_id=workspace_id,
+        created_at=datetime.now(UTC),
+    )
+    async with factory() as session:
+        session.add(event)
+        await session.commit()
+    return event
+
+
+class _FakeSpiSession:
+    """Records approve() calls for assertion."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def approve(self, request_id: str, decision) -> None:
+        self.calls.append((request_id, decision.value))
+
+
+class _FakeLive:
+    def __init__(self, *, approval_hooks: bool) -> None:
+        from types import SimpleNamespace
+
+        self.capabilities = SimpleNamespace(approval_hooks=approval_hooks)
+        self.spi_session = _FakeSpiSession()
+
+
+class _FakeRegistry:
+    def __init__(self, live) -> None:
+        self._live = live
+
+    async def get(self, session_id: str):
+        return self._live
+
+
+class _FakeRunner:
+    def __init__(self, live) -> None:
+        self.registry = _FakeRegistry(live)
 
 
 async def _seed_agent_in(
@@ -484,7 +543,7 @@ def test_invoke_routes_sessions_message_post_persists_and_audits(
     # is NOT routed on frame in PR-B3).
     assert result.status == 200
     assert result.body["message_id"]
-    assert result.body["seq"] >= 1
+    assert result.body["seq"] == 0  # first message in a fresh session
     assert result.msg_id == "msg-1"
     assert result.request_id == "req-msg-1"
 
@@ -575,49 +634,194 @@ def test_invoke_routes_inbox_read_returns_inbox(client, tmp_path) -> None:
     assert any(i["id"] == str(seeded.id) for i in result.body)
 
 
-def test_invoke_sessions_approve_returns_501_not_bridge_pending(
+def test_invoke_sessions_approve_records_decision_and_executes_live_spi(
     client, tmp_path
 ) -> None:
-    """PR-B3: ``POST /api/sessions/{session_id}/approve`` returns 501
-    + "cross-process bridge pending" because the cross-daemon bridge
-    is not implemented on this build. The wire semantics (status
-    code passthrough) are exercised even though no real handler runs.
-    """
+    """PR-B9 (Gap B1): a frame approve on a session live in THIS daemon
+    records the Approval row and executes the live SPI approve — the
+    full REST operator chain, minus the outward peer-forward."""
+    from orchestratord.api import runtime
+    from orchestratord.spi.approval import ApprovalDecision
+
     try:
-        peer, plaintext = asyncio.run(
-            _build_accepted_peer(tmp_path)
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
         )
     except Exception:
         pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
 
+    seeded = asyncio.run(_seed_session_in(engine, peer.workspace_id))
+    asyncio.run(
+        _seed_approval_request_event(
+            engine, peer.workspace_id, seeded.id, request_id="apr-1"
+        )
+    )
+    live = _FakeLive(approval_hooks=True)
+    runtime.set_backend_runner(_FakeRunner(live))
+    try:
+        result = _drive_invoke(
+            client,
+            peer,
+            plaintext,
+            request_id="req-approve-1",
+            msg_id="msg-approve-1",
+            method="POST /api/sessions/{session_id}/approve",
+            body={
+                "session_id": str(seeded.id),
+                "request_id": "apr-1",
+            },
+        )
+    finally:
+        runtime.reset_backend_runner()
+    assert result.status == 200
+    assert result.body["decision"] == "approved"
+    assert result.body["request_id"] == "apr-1"
+    assert live.spi_session.calls == [("apr-1", ApprovalDecision.ALLOW.value)]
+
+    async def _check_approval_row() -> None:
+        import sqlalchemy
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            rows = (await session.execute(
+                sqlalchemy.select(orm.Approval)
+            )).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].session_id == seeded.id
+        assert rows[0].request_id == "apr-1"
+        assert rows[0].decision == "approved"
+
+    asyncio.run(_check_approval_row())
+
+
+def test_invoke_sessions_approve_409_when_session_not_live(
+    client, tmp_path
+) -> None:
+    """PR-B9 拍板：frame 路径不做多跳外发 — 会话不 live 在本 daemon
+    时返 409（REST 会静默落到 _forward_to_peer），且不落 Approval 行。"""
+    try:
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
+        )
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
+
+    seeded = asyncio.run(_seed_session_in(engine, peer.workspace_id))
+    asyncio.run(
+        _seed_approval_request_event(
+            engine, peer.workspace_id, seeded.id, request_id="apr-1"
+        )
+    )
     result = _drive_invoke(
         client,
         peer,
         plaintext,
-        request_id="req-approve-1",
-        msg_id="msg-approve-1",
+        request_id="req-approve-2",
+        msg_id="msg-approve-2",
         method="POST /api/sessions/{session_id}/approve",
-        body={"decision": "approve"},
+        body={"session_id": str(seeded.id), "request_id": "apr-1"},
     )
-    assert result.status == 501
-    assert "cross-process bridge pending" in result.body["error"]
-    assert (
-        result.body["method"] == "POST /api/sessions/{session_id}/approve"
-    )
+    assert result.status == 409
+    assert "not live on this daemon" in result.body["error"]
+
+    async def _no_approval_rows() -> None:
+        import sqlalchemy
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            rows = (await session.execute(
+                sqlalchemy.select(orm.Approval)
+            )).scalars().all()
+        assert rows == []
+
+    asyncio.run(_no_approval_rows())
 
 
-def test_invoke_agents_message_returns_501_not_bridge_pending(
+def test_invoke_sessions_approve_409_when_no_approval_hooks(
     client, tmp_path
 ) -> None:
-    """PR-B3: ``POST /api/agents/{agent_id}/message`` returns 501 for
-    the same reason as sessions.approve."""
+    """PR-B9: live session whose backend lacks approval_hooks → 409,
+    mirroring the REST _forward_approval semantics."""
+    from orchestratord.api import runtime
+
     try:
-        peer, plaintext = asyncio.run(
-            _build_accepted_peer(tmp_path)
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
         )
     except Exception:
         pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
 
+    seeded = asyncio.run(_seed_session_in(engine, peer.workspace_id))
+    asyncio.run(
+        _seed_approval_request_event(
+            engine, peer.workspace_id, seeded.id, request_id="apr-1"
+        )
+    )
+    runtime.set_backend_runner(_FakeRunner(_FakeLive(approval_hooks=False)))
+    try:
+        result = _drive_invoke(
+            client,
+            peer,
+            plaintext,
+            request_id="req-approve-3",
+            msg_id="msg-approve-3",
+            method="POST /api/sessions/{session_id}/approve",
+            body={"session_id": str(seeded.id), "request_id": "apr-1"},
+        )
+    finally:
+        runtime.reset_backend_runner()
+    assert result.status == 409
+    assert "approval_hooks=False" in result.body["error"]
+
+
+def test_invoke_sessions_approve_404_when_no_pending_request(
+    client, tmp_path
+) -> None:
+    """PR-B9: approving an unknown request_id → 404, same as REST."""
+    try:
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
+        )
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
+
+    seeded = asyncio.run(_seed_session_in(engine, peer.workspace_id))
+    result = _drive_invoke(
+        client,
+        peer,
+        plaintext,
+        request_id="req-approve-4",
+        msg_id="msg-approve-4",
+        method="POST /api/sessions/{session_id}/approve",
+        body={"session_id": str(seeded.id), "request_id": "missing-req"},
+    )
+    assert result.status == 404
+    assert "no pending approval request" in result.body["error"]
+
+
+def test_invoke_agents_message_delivers_to_running_session(
+    client, tmp_path
+) -> None:
+    """PR-B9 (Gap B2): ``agents.message`` delivers to the agent's active
+    (running) session and reuses the shared persist+audit chain."""
+    try:
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
+        )
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
+
+    agent = asyncio.run(
+        _seed_agent_in(engine, peer.workspace_id, name="worker-1")
+    )
+    seeded = asyncio.run(
+        _seed_session_in(engine, peer.workspace_id, agent_id=agent.id)
+    )
     result = _drive_invoke(
         client,
         peer,
@@ -625,11 +829,64 @@ def test_invoke_agents_message_returns_501_not_bridge_pending(
         request_id="req-am-1",
         msg_id="msg-am-1",
         method="POST /api/agents/{agent_id}/message",
-        body={"text": "hi"},
+        body={"agent_id": str(agent.id), "content": "hi from peer"},
     )
-    assert result.status == 501
-    assert "cross-process bridge pending" in result.body["error"]
-    assert result.body["method"] == "POST /api/agents/{agent_id}/message"
+    assert result.status == 200
+    assert result.body["message_id"]
+    assert result.body["seq"] == 0  # first message in a fresh session
+
+    async def _check_rows() -> None:
+        import sqlalchemy
+
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with factory() as session:
+            message = (await session.execute(
+                sqlalchemy.select(orm.Message).where(
+                    orm.Message.id == uuid.UUID(result.body["message_id"])
+                )
+            )).scalar_one()
+            audits = (await session.execute(
+                sqlalchemy.select(orm.AuditLogEntry).where(
+                    orm.AuditLogEntry.invited_by_peer_call_id == "msg-am-1"
+                )
+            )).scalars().all()
+        assert str(message.session_id) == str(seeded.id)
+        assert message.author_label == peer.orch_id
+        assert len(audits) == 1
+        assert audits[0].payload_jsonb["method"] == (
+            "POST /api/agents/{agent_id}/message"
+        )
+
+    asyncio.run(_check_rows())
+
+
+def test_invoke_agents_message_404_when_no_running_session(
+    client, tmp_path
+) -> None:
+    """PR-B9: an agent without a running session → 404, not a silent
+    accept."""
+    try:
+        peer, plaintext, engine = asyncio.run(
+            _build_accepted_peer(tmp_path, keep_engine=True)
+        )
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+    assert engine is not None
+
+    agent = asyncio.run(
+        _seed_agent_in(engine, peer.workspace_id, name="idle-1")
+    )
+    result = _drive_invoke(
+        client,
+        peer,
+        plaintext,
+        request_id="req-am-2",
+        msg_id="msg-am-2",
+        method="POST /api/agents/{agent_id}/message",
+        body={"agent_id": str(agent.id), "content": "hi"},
+    )
+    assert result.status == 404
+    assert "no active session for agent" in result.body["error"]
 
 
 def test_invoke_cross_workspace_request_returns_403(client, tmp_path) -> None:
@@ -951,7 +1208,7 @@ def test_invoke_ordering_gap_flags_out_of_order_on_frame_path(
     assert audit_second.payload_jsonb["out_of_order"] is True
 
 
-# -- PR-B4: AC7/D22 EVENT cross-daemon relay on frame path --
+# -- PR-B9: SUBSCRIBE/UNSUBSCRIBE → topic registry + SSE EVENT delivery --
 
 
 def _build_sub_frame(orch_id: str, topic: str) -> "PeerFrame":
@@ -967,257 +1224,198 @@ def _build_unsub_frame(orch_id: str, topic: str) -> "PeerFrame":
     )
 
 
-async def _read_until_type(resp, frame_type, *, timeout: float = 5.0):
-    """Async-generate frames from ``resp`` until one matches ``frame_type``.
-
-    Returns the matched frame. Raises :class:`asyncio.TimeoutError` if
-    no matching frame arrives within ``timeout`` seconds.
-    """
-    deadline = asyncio.get_event_loop().time() + timeout
-    async for line in resp.aiter_lines():
-        if not line:
-            continue
-        frame = PeerFrame.decode(line)
-        if frame.type is frame_type:
-            return frame
-        if asyncio.get_event_loop().time() > deadline:
-            raise asyncio.TimeoutError(frame_type)
-    raise asyncio.TimeoutError(frame_type)
+def _build_revoke_frame(orch_id: str) -> "PeerFrame":
+    return PeerFrame(type=PeerFrameType.REVOKE, orch_id=orch_id)
 
 
-async def test_subscribe_publishes_event_to_inbound_stream(
-    app, tmp_path
-) -> None:
-    """PR-B4 AC7/D22: a SUBSCRIBE frame wires the inbound stream into
-    the local RealtimeBroker; publishing via ``broker.publish(...)``
-    pushes an EVENT frame onto the outbound chunked-JSONL stream."""
-    try:
-        from orchestratord.api.realtime import get_broker
-        from orchestratord.peer.hmac_sig import sign
-    except ImportError:
-        pytest.skip("peer realtime / hmac_sig not available")
-    try:
-        peer, plaintext = await _build_accepted_peer(tmp_path)
-    except Exception:
-        pytest.skip("peer row setup requires sqlite aiosqlite support")
-
+async def _build_batch_headers(tmp_path):
+    """Accepted peer + auth headers for frame batches."""
+    peer, plaintext, _engine = await _build_accepted_peer(tmp_path)
     headers = {
         "Content-Type": "application/x-ndjson",
         "Authorization": f"Bearer {plaintext}",
         "X-Peer-Orchestrator-Id": peer.orch_id,
     }
+    return peer, plaintext, headers
+
+
+async def _post_frame_batch(ac, headers, frames) -> list[PeerFrame]:
+    """Run one batch-POST (frames → body EOF) and decode the replay."""
+    body = b"".join(_frame_jsonl(f) for f in frames)
+    resp = await ac.post("/peer/v1/stream", content=body, headers=headers)
+    assert resp.status_code == 200
+    return [
+        PeerFrame.decode(line)
+        for line in resp.text.splitlines()
+        if line.strip()
+    ]
+
+
+async def test_subscribe_registry_lifecycle(app, tmp_path) -> None:
+    """PR-B9: a SUBSCRIBE frame in one batch registers the topic in the
+    per-peer registry; UNSUBSCRIBE drops it and an SSE request with no
+    explicit topics + empty registry is a 422; GOODBYE clears it.
+
+    Live SSE EVENT delivery is exercised by the peer_integration
+    real-socket tests (httpx.ASGITransport buffers the whole app call
+    and cannot drive a long-lived stream incrementally).
+    """
+    from httpx import ASGITransport
+    import httpx
+
+    from orchestratord.peer import topic_registry
+
+    peer, plaintext, headers = await _build_batch_headers(tmp_path)
     topic = "peer.test.event"
 
-    hello = _hello_frame(peer.orch_id)
-    sign(hello, plaintext)
-    sub = _build_sub_frame(peer.orch_id, topic)
-    body_iter = _frame_body_iter_with_eventually_goodbye(
-        [hello, sub], peer, plaintext
-    )
-
-    transport = None
+    transport = ASGITransport(app=app)
     try:
-        from httpx import ASGITransport
-        import httpx
-
-        transport = ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as ac:
-            req = ac.build_request(
-                "POST", "/peer/v1/stream", content=body_iter, headers=headers,
+            hello = _hello_frame(peer.orch_id)
+            sign(hello, plaintext)
+            frames = await _post_frame_batch(
+                ac, headers,
+                [hello, _build_sub_frame(peer.orch_id, topic)],
             )
-            resp = await ac.send(req, stream=True)
-            assert resp.status_code == 200
+            assert frames[0].type is PeerFrameType.WELCOME
+            assert topic_registry.get_peer_topics(peer.orch_id) == {topic}
 
-            # 1. Drain WELCOME.
-            welcome = await _read_until_type(resp, PeerFrameType.WELCOME)
-            assert welcome.orch_id
-
-            # 2. Server has now processed SUBSCRIBE and updated broker
-            # topics. Publish via the broker from the same coroutine —
-            # the forwarder will deliver the EVENT to the outbound queue.
-            broker = get_broker()
-            await broker.publish(topic, {"data": "hello from test"})
-
-            # 3. Read EVENT frame.
-            event = await _read_until_type(
-                resp, PeerFrameType.EVENT, timeout=5.0
+            # UNSUBSCRIBE drops the topic; SSE with no topics → 422.
+            hello = _hello_frame(peer.orch_id)
+            sign(hello, plaintext)
+            await _post_frame_batch(
+                ac, headers,
+                [hello, _build_unsub_frame(peer.orch_id, topic)],
             )
-            assert event.topic == topic
-            assert event.payload == {"data": "hello from test"}
+            assert topic_registry.get_peer_topics(peer.orch_id) == set()
+            resp = await ac.get(
+                f"/api/peer/peers/{peer.orch_id}/events",
+                headers={
+                    "Authorization": f"Bearer {plaintext}",
+                    "X-Peer-Orchestrator-Id": peer.orch_id,
+                },
+            )
+            assert resp.status_code == 422
+
+            # GOODBYE batch clears any re-registered topics.
+            hello = _hello_frame(peer.orch_id)
+            sign(hello, plaintext)
+            await _post_frame_batch(
+                ac, headers,
+                [hello, _build_sub_frame(peer.orch_id, topic)],
+            )
+            hello = _hello_frame(peer.orch_id)
+            sign(hello, plaintext)
+            await _post_frame_batch(
+                ac, headers,
+                [hello, PeerFrame.goodbye(orch_id=peer.orch_id, in_flight=0)],
+            )
+            assert topic_registry.get_peer_topics(peer.orch_id) == set()
     finally:
-        if transport is not None:
-            await transport.aclose()
+        await transport.aclose()
 
 
-async def _frame_body_iter_with_eventually_goodbye(frames, peer, plaintext):
-    """Yield the given frames' JSONL bytes, then hold the stream open
-    until the test cancels us, then emit GOODBYE so the server drains
-    in-flight frames and closes cleanly."""
-    for f in frames:
-        yield _frame_jsonl(f)
-    try:
-        # Hold the stream open indefinitely; the test cancels this
-        # iterator when it's done reading frames.
-        while True:
-            await asyncio.sleep(0.05)
-            yield b"\n"  # empty lines are skipped (peer_frame.py:244-246)
-    except asyncio.CancelledError:
-        goodbye = PeerFrame.goodbye(orch_id=peer.orch_id, in_flight=0)
-        yield _frame_jsonl(goodbye)
-        raise
+async def test_unsubscribe_registry_then_sse_422(app, tmp_path) -> None:
+    """PR-B9: UNSUBSCRIBE drops the registry topic; a follow-up SSE
+    request with no explicit topics and an empty registry is a 422."""
+    from httpx import ASGITransport
+    import httpx
 
+    from orchestratord.peer import topic_registry
 
-async def test_unsubscribe_stops_event_delivery(app, tmp_path) -> None:
-    """PR-B4: UNSUBSCRIBE shrinks the broker topic set; events
-    published after UNSUBSCRIBE are no longer delivered to the
-    inbound stream."""
-    try:
-        from orchestratord.api.realtime import get_broker
-        from orchestratord.peer.hmac_sig import sign
-    except ImportError:
-        pytest.skip("peer realtime / hmac_sig not available")
-    try:
-        peer, plaintext = await _build_accepted_peer(tmp_path)
-    except Exception:
-        pytest.skip("peer row setup requires sqlite aiosqlite support")
-
-    headers = {
-        "Content-Type": "application/x-ndjson",
-        "Authorization": f"Bearer {plaintext}",
-        "X-Peer-Orchestrator-Id": peer.orch_id,
-    }
+    peer, plaintext, headers = await _build_batch_headers(tmp_path)
     topic = "peer.test.unsub"
 
     hello = _hello_frame(peer.orch_id)
     sign(hello, plaintext)
-    sub = _build_sub_frame(peer.orch_id, topic)
-    unsub = _build_unsub_frame(peer.orch_id, topic)
 
-    async def body_iter():
-        """Phase 1: HELLO + SUBSCRIBE, then idle briefly so the test
-        can publish + verify the first EVENT. Phase 2: yield
-        UNSUBSCRIBE and idle again so the test can verify no further
-        EVENTs land."""
-        yield _frame_jsonl(hello)
-        yield _frame_jsonl(sub)
-        await asyncio.sleep(1.0)  # phase 1 window
-        yield _frame_jsonl(unsub)
-        await asyncio.sleep(1.5)  # phase 2 window
-
+    transport = ASGITransport(app=app)
     try:
-        from httpx import ASGITransport
-        import httpx
-
-        transport = ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as ac:
-            req = ac.build_request(
-                "POST", "/peer/v1/stream", content=body_iter(), headers=headers,
+            await _post_frame_batch(
+                ac, headers,
+                [hello, _build_sub_frame(peer.orch_id, topic)],
             )
-            resp = await ac.send(req, stream=True)
-            assert resp.status_code == 200
+            assert topic_registry.get_peer_topics(peer.orch_id) == {topic}
 
-            welcome = await _read_until_type(resp, PeerFrameType.WELCOME)
-
-            broker = get_broker()
-
-            # Phase 1: publish + verify EVENT arrives (we're subscribed).
-            await broker.publish(topic, {"phase": "before-unsub"})
-            first_event = await _read_until_type(
-                resp, PeerFrameType.EVENT, timeout=3.0
+            await _post_frame_batch(
+                ac, headers,
+                [hello, _build_unsub_frame(peer.orch_id, topic)],
             )
-            assert first_event.payload == {"phase": "before-unsub"}
+            assert topic_registry.get_peer_topics(peer.orch_id) == set()
 
-            # Phase 2: body iter is sending UNSUBSCRIBE during the
-            # 1.0s sleep. Wait long enough for it to be processed, then
-            # publish again. The EVENT must NOT arrive.
-            await asyncio.sleep(1.5)
-            await broker.publish(topic, {"phase": "after-unsub"})
-
-            got_after = False
-            try:
-                evt = await _read_until_type(
-                    resp, PeerFrameType.EVENT, timeout=0.5
-                )
-                if evt.payload.get("phase") == "after-unsub":
-                    got_after = True
-            except asyncio.TimeoutError:
-                got_after = False
-            assert got_after is False, (
-                "EVENT delivered after UNSUBSCRIBE — broker topic "
-                "set still includes the test topic"
-            )
+            resp = await ac.get(f"/api/peer/peers/{peer.orch_id}/events")
+            assert resp.status_code == 422
     finally:
-        pass
+        await transport.aclose()
 
 
-async def test_event_forwarder_stops_when_connection_closes(
-    app, tmp_path
+@pytest.mark.parametrize("terminator", ["goodbye", "revoke"])
+async def test_terminator_batch_clears_topic_registry(
+    app, tmp_path, terminator
 ) -> None:
-    """PR-B4: when the inbound stream is closed (GOODBYE or
-    transport error), the broker subscription is removed via the
-    iterator's ``finally`` clause — no ghost subscribers linger.
+    """PR-B9: GOODBYE and REVOKE both end the session — the peer's SSE
+    topic registry is cleared so no ghost subscription survives."""
+    from httpx import ASGITransport
+    import httpx
 
-    We verify by counting subscribers before/after the connection.
-    """
-    try:
-        from orchestratord.api.realtime import get_broker
-        from orchestratord.peer.hmac_sig import sign
-    except ImportError:
-        pytest.skip("peer realtime / hmac_sig not available")
-    try:
-        peer, plaintext = await _build_accepted_peer(tmp_path)
-    except Exception:
-        pytest.skip("peer row setup requires sqlite aiosqlite support")
+    from orchestratord.peer import topic_registry
 
-    broker = get_broker()
-    sub_count_before = len(broker._subscribers)
+    peer, plaintext, headers = await _build_batch_headers(tmp_path)
+    topic = f"peer.test.{terminator}"
 
-    headers = {
-        "Content-Type": "application/x-ndjson",
-        "Authorization": f"Bearer {plaintext}",
-        "X-Peer-Orchestrator-Id": peer.orch_id,
-    }
     hello = _hello_frame(peer.orch_id)
     sign(hello, plaintext)
-    goodbye = PeerFrame.goodbye(orch_id=peer.orch_id, in_flight=0)
 
-    body_bytes = _frame_jsonl(hello) + _frame_jsonl(goodbye)
-
+    transport = ASGITransport(app=app)
     try:
-        from httpx import ASGITransport
-        import httpx
-
-        transport = ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as ac:
-            req = ac.build_request(
-                "POST", "/peer/v1/stream", content=body_bytes, headers=headers,
+            await _post_frame_batch(
+                ac, headers,
+                [hello, _build_sub_frame(peer.orch_id, topic)],
             )
-            resp = await ac.send(req, stream=True)
-            assert resp.status_code == 200
-            # Drain so the server-side reader exits naturally.
-            async for _ in resp.aiter_lines():
-                pass
-            await resp.aclose()
+            assert topic_registry.get_peer_topics(peer.orch_id) == {topic}
 
-        # Give the cleanup task a beat to run.
-        deadline = asyncio.get_event_loop().time() + 2.0
-        while asyncio.get_event_loop().time() < deadline:
-            if len(broker._subscribers) == sub_count_before:
-                break
-            await asyncio.sleep(0.05)
-
-        assert len(broker._subscribers) == sub_count_before, (
-            f"broker leaked subscribers: before={sub_count_before} "
-            f"after={len(broker._subscribers)}"
-        )
+            terminator_frame = (
+                PeerFrame.goodbye(orch_id=peer.orch_id, in_flight=0)
+                if terminator == "goodbye"
+                else _build_revoke_frame(peer.orch_id)
+            )
+            await _post_frame_batch(ac, headers, [hello, terminator_frame])
+            assert topic_registry.get_peer_topics(peer.orch_id) == set()
     finally:
-        pass
+        await transport.aclose()
+
+
+async def test_sse_rejects_other_peers_orch_id(app, tmp_path) -> None:
+    """PR-B9 hardening: a peer may only stream its own registry — the
+    path orch_id must match the authenticated peer (403 otherwise)."""
+    from httpx import ASGITransport
+    import httpx
+
+    peer, plaintext, headers = await _build_batch_headers(tmp_path)
+
+    transport = ASGITransport(app=app)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as ac:
+            resp = await ac.get(
+                "/api/peer/peers/orch-NOT-ME/events",
+                headers={
+                    "Authorization": f"Bearer {plaintext}",
+                    "X-Peer-Orchestrator-Id": peer.orch_id,
+                },
+            )
+            assert resp.status_code == 403
+    finally:
+        await transport.aclose()
 
 
 # -- PR-B5: D25 per-INVOKE-frame rate limit on the frame path --

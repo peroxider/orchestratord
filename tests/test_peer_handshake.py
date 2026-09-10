@@ -49,7 +49,9 @@ class MemoryTransport:
         b._peer = a
         return a, b
 
-    async def send_frame(self, frame: PeerFrame) -> None:
+    async def send_frame(
+        self, frame: PeerFrame, *, end_of_batch: bool = False
+    ) -> None:
         if self.closed or self._peer is None:
             raise ConnectionError("transport is closed")
         self.sent.append(frame)
@@ -219,7 +221,9 @@ class _DeadTransport:
         self.fail_on = fail_on
         self.closed = False
 
-    async def send_frame(self, frame: PeerFrame) -> None:
+    async def send_frame(
+        self, frame: PeerFrame, *, end_of_batch: bool = False
+    ) -> None:
         if self.fail_on == "send":
             raise ConnectionError("socket gone before HELLO left")
         self.sent = True
@@ -465,6 +469,58 @@ def test_parse_sse_line_noise_returns_none(line: str) -> None:
 def test_parse_sse_line_bad_type_returns_none() -> None:
     # A JSON object with an unknown frame type must not raise.
     assert parse_sse_data_line('data: {"type": "bogus"}') is None
+
+
+# -- PR-B9: SSE broker-dict → EVENT conversion (client._sse_line_to_frame) --
+
+
+def _client_for_sse(tmp_path) -> PeerClient:
+    return _make_client(lambda: MemoryTransport(), tmp_path)
+
+
+def test_sse_line_broker_dict_converts_to_event(tmp_path) -> None:
+    """The peer SSE endpoint emits broker dicts ``{"topic", "payload"}``;
+    the client converts them into EVENT frames."""
+    client = _client_for_sse(tmp_path)
+    frame = client._sse_line_to_frame(
+        'data: {"topic": "peer.x", "payload": {"n": 1}}'
+    )
+    assert frame is not None
+    assert frame.type is PeerFrameType.EVENT
+    assert frame.topic == "peer.x"
+    assert frame.payload == {"n": 1}
+    assert frame.orch_id == client._orch_id
+
+
+def test_sse_line_frame_jsonl_still_parses(tmp_path) -> None:
+    """A PeerFrame JSONL data line keeps flowing through the frame
+    decoder unchanged."""
+    client = _client_for_sse(tmp_path)
+    wire = json.dumps(
+        PeerFrame.event(
+            orch_id="orch-B1", topic="peer.y", payload={"seq": 2}
+        ).to_dict(),
+        ensure_ascii=False,
+    )
+    frame = client._sse_line_to_frame(f"data: {wire}")
+    assert frame is not None
+    assert frame.type is PeerFrameType.EVENT
+    assert frame.payload == {"seq": 2}
+
+
+@pytest.mark.parametrize(
+    "line", ["", ": keep-alive", "event: ping", "data:", "data: [1,2]"]
+)
+def test_sse_line_noise_returns_none(tmp_path, line: str) -> None:
+    client = _client_for_sse(tmp_path)
+    assert client._sse_line_to_frame(line) is None
+
+
+def test_sse_task_not_started_without_frame_url(tmp_path) -> None:
+    """In-memory / legacy clients never open the SSE stream."""
+    client = _client_for_sse(tmp_path)
+    client._ensure_sse()
+    assert client._sse_task is None
 
 
 def test_peer_client_error_is_exception() -> None:

@@ -32,6 +32,11 @@ from orchestratord.db.models.peer import Peer
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import AuthToken, hash_api_token
 from orchestratord.peer.registry import get_peer, get_peer_by_token_id
+from orchestratord.peer.trace import (
+    new_trace_id,
+    set_current_trace_id,
+    trace_id_from_headers,
+)
 
 _AUTH_ENV = "ORCHESTRATORD_AUTH"
 
@@ -223,6 +228,14 @@ async def require_peer_auth(
     plaintext = header[len("Bearer ") :].strip()
     if not plaintext:
         raise HTTPException(status_code=401, detail="peer identity or token missing")
+    # Trace correlation: bind the caller's X-Trace-Id (or a fresh one)
+    # for this request's async context. Deliberately NOT reset here —
+    # FastAPI async dependencies share the request task's context with
+    # the endpoint, and the task-scoped copy dies with the request, so
+    # nothing leaks across requests.
+    set_current_trace_id(
+        trace_id_from_headers(request.headers) or new_trace_id()
+    )
     token = await repos.auth_tokens.by_token_hash(hash_api_token(plaintext))
     if token is None or _is_expired(token.expires_at):
         raise HTTPException(status_code=401, detail="invalid or expired peer token")

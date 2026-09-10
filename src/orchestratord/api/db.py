@@ -34,6 +34,19 @@ def _get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+def reset_session_factory() -> None:
+    """Drop the cached session factory.
+
+    The factory binds to ``ORCHESTRATORD_DATABASE_URL`` on first use and
+    is cached for the process lifetime. In-process integration harnesses
+    that rebuild the app against a different database (the PR-B9
+    two-daemon canary, probes) must clear the cache before
+    ``create_app()`` so requests don't land on a stale database.
+    """
+    global _session_factory
+    _session_factory = None
+
+
 async def get_repositories() -> AsyncIterator[Repositories]:
     """Yield a repository facade over one transaction-scoped session.
 

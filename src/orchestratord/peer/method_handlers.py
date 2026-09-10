@@ -25,15 +25,18 @@ requires re-checking the body's target ``workspace_id`` against the
 peer's authorized workspace (D14). Cross-workspace writes are
 explicitly forbidden.
 
-**Mutating cross-process methods** (sessions.approve, agents.message)
-return :data:`_NOT_BRIDGE_PENDING_BODY` (501 with "cross-process
-bridge pending") so the wire semantics (status code, ``__error__``
-translation) are tested end-to-end even before the real cross-daemon
-bridge lands (PR-B4).
+**Mutating methods** are real handlers since the cross-process bridge
+question was settled (PR-B9): ``sessions.approve`` replicates the REST
+operator chain (``_pending_request`` → ``_record_decision`` → live-SPI
+``approve`` → broker event) but never forwards outward — a session not
+live on *this* daemon is a 409, not a multi-hop relay.
+``agents.message`` delivers to the agent's active (``running``)
+session, latest by ``created_at`` when several exist.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -43,6 +46,8 @@ from fastapi import HTTPException
 
 from orchestratord.db import models as orm
 from orchestratord.db.repository import Repositories
+
+logger = logging.getLogger(__name__)
 
 
 def _require_workspace(body: dict[str, Any], peer_row: Any) -> UUID:
@@ -111,37 +116,25 @@ async def handle_sessions_read(
     ]
 
 
-async def handle_sessions_message_post(
+async def _persist_session_message(
     peer_row: Any,
+    session: orm.Session,
     body: dict[str, Any],
     repos: Repositories,
     *,
     msg_id: str = "",
     out_of_order: bool = False,
+    method: str = "POST /api/sessions/{session_id}/messages",
 ) -> dict[str, Any]:
-    """``POST /api/sessions/{session_id}/messages`` — persist a remote message.
+    """Shared persist+audit chain for the frame message-delivery handlers.
 
-    Mirrors :func:`orchestratord.api.routers.peer._peer_invoke_message`
-    (REST path) but frame-native — the inbound ``frame.body`` is the
-    full JSON payload, no Pydantic round-trip. Writes an :class:`AuditLogEntry`
-    row with ``invited_by_orch_id == peer_row.orch_id`` so the creating
-    daemon is traceable (§7 R7 / D17). The audit row's
-    ``payload_jsonb`` matches the REST shape
-    (``peer_call_id`` + ``method`` + ``out_of_order``, D19 / D17).
+    Writes an :class:`orm.Message` (repository auto-assigns the next
+    ``seq``) plus an :class:`orm.AuditLogEntry` row with
+    ``invited_by_orch_id == peer_row.orch_id`` so the creating daemon is
+    traceable (§7 R7 / D17). ``method`` stamps the audit payload so
+    approve-adjacent surfaces (agents.message) stay distinguishable in
+    the audit trail.
     """
-    try:
-        session_id = UUID(str(body.get("session_id", "")))
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(
-            status_code=422, detail="body.session_id must be a UUID"
-        ) from exc
-    session = await repos.session.get(orm.Session, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session not found")
-    if session.workspace_id != peer_row.workspace_id:
-        raise HTTPException(
-            status_code=403, detail="peer is not trusted in that workspace"
-        )
     message = orm.Message(
         id=uuid.uuid4(),
         session_id=session.id,
@@ -165,7 +158,7 @@ async def handle_sessions_message_post(
             target_id=str(session.id),
             payload_jsonb={
                 "peer_call_id": msg_id,
-                "method": "POST /api/sessions/{session_id}/messages",
+                "method": method,
                 "out_of_order": out_of_order,
             },
             invited_by_orch_id=peer_row.orch_id,
@@ -174,6 +167,39 @@ async def handle_sessions_message_post(
         )
     )
     return {"message_id": str(message.id), "seq": message.seq}
+
+
+async def handle_sessions_message_post(
+    peer_row: Any,
+    body: dict[str, Any],
+    repos: Repositories,
+    *,
+    msg_id: str = "",
+    out_of_order: bool = False,
+) -> dict[str, Any]:
+    """``POST /api/sessions/{session_id}/messages`` — persist a remote message.
+
+    Mirrors :func:`orchestratord.api.routers.peer._peer_invoke_message`
+    (REST path) but frame-native — the inbound ``frame.body`` is the
+    full JSON payload, no Pydantic round-trip.
+    """
+    try:
+        session_id = UUID(str(body.get("session_id", "")))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=422, detail="body.session_id must be a UUID"
+        ) from exc
+    session = await repos.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if session.workspace_id != peer_row.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="peer is not trusted in that workspace"
+        )
+    return await _persist_session_message(
+        peer_row, session, body, repos,
+        msg_id=msg_id, out_of_order=out_of_order,
+    )
 
 
 async def handle_agents_list(
@@ -222,26 +248,98 @@ async def handle_inbox_read(
     ]
 
 
-def _not_bridge_pending(method: str) -> dict[str, Any]:
-    """Bridge-pending stub body (501) for mutating cross-process methods.
+async def handle_sessions_approve(
+    peer_row: Any,
+    body: dict[str, Any],
+    repos: Repositories,
+    *,
+    msg_id: str = "",
+    out_of_order: bool = False,
+) -> dict[str, Any]:
+    """``POST /api/sessions/{session_id}/approve`` — approve a pending request.
 
-    The dict shape (``__error__`` + ``__status__``) is what
-    ``peer_frame._dispatch_invoke_frame`` recognizes as an error
-    envelope and surfaces to the client as a RESULT frame with the
-    right status code. Synchronous because there's nothing async to do
-    — the bridge just isn't there yet.
+    Replicates the REST operator chain
+    (``orchestratord.api.routers.sessions`` ``_pending_request`` →
+    ``_record_decision`` → live-SPI ``approve`` → broker event) for a
+    peer caller, with one deliberate divergence: the REST endpoint
+    falls back to ``_forward_to_peer`` when the session is not live
+    locally, but the frame path never forwards outward (PR-B9 拍板：仅
+    本地执行) — a session not live on this daemon is a **409**, checked
+    *before* the DB decision write so no undeliverable decision is
+    recorded.
     """
+    # Local imports: sessions.py pulls the whole sessions router surface;
+    # lazy import keeps the peer layer import-cycle-free.
+    from orchestratord.api.routers.sessions import (
+        _lookup_live,
+        _pending_request,
+        _record_decision,
+    )
+    from orchestratord.api.realtime import get_broker
+    from orchestratord.api.runtime import get_backend_runner
+    from orchestratord.spi.approval import ApprovalDecision
+
+    try:
+        session_id = UUID(str(body.get("session_id", "")))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=422, detail="body.session_id must be a UUID"
+        ) from exc
+    session = await repos.sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    if session.workspace_id != peer_row.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="peer is not trusted in that workspace"
+        )
+    request_id = str(body.get("request_id", "") or "")
+    if not request_id:
+        raise HTTPException(
+            status_code=422, detail="body.request_id is required"
+        )
+    if not await _pending_request(repos, session_id, request_id):
+        raise HTTPException(
+            status_code=404, detail="no pending approval request"
+        )
+    live = await _lookup_live(session_id, get_backend_runner())
+    if live is None:
+        raise HTTPException(
+            status_code=409,
+            detail="session is not live on this daemon",
+        )
+    if not live.capabilities.approval_hooks:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "backend does not support operator approval "
+                "(approval_hooks=False)"
+            ),
+        )
+    await _record_decision(repos, session_id, request_id, "approved")
+    await live.spi_session.approve(request_id, ApprovalDecision.ALLOW)
+    try:
+        await get_broker().publish(
+            f"session.{session_id}",
+            {
+                "event": "approval_resolved",
+                "request_id": request_id,
+                "decision": "approved",
+            },
+        )
+    except Exception:  # noqa: BLE001 — best-effort, DB row is source of truth
+        logger.debug(
+            "frame approve: broker publish failed for session %s",
+            session_id,
+            exc_info=True,
+        )
     return {
-        "__error__": (
-            f"method {method!r} requires the cross-process bridge "
-            "which is not implemented on this build; use the REST "
-            "peer.invoke path or wait for PR-B4"
-        ),
-        "__status__": 501,
+        "session_id": str(session_id),
+        "request_id": request_id,
+        "decision": "approved",
     }
 
 
-def handle_sessions_approve(
+async def handle_agents_message(
     peer_row: Any,
     body: dict[str, Any],
     repos: Repositories,
@@ -249,20 +347,41 @@ def handle_sessions_approve(
     msg_id: str = "",
     out_of_order: bool = False,
 ) -> dict[str, Any]:
-    """``POST /api/sessions/{session_id}/approve`` — bridge-pending stub."""
-    return _not_bridge_pending("POST /api/sessions/{session_id}/approve")
+    """``POST /api/agents/{agent_id}/message`` — deliver to the active session.
 
-
-def handle_agents_message(
-    peer_row: Any,
-    body: dict[str, Any],
-    repos: Repositories,
-    *,
-    msg_id: str = "",
-    out_of_order: bool = False,
-) -> dict[str, Any]:
-    """``POST /api/agents/{agent_id}/message`` — bridge-pending stub."""
-    return _not_bridge_pending("POST /api/agents/{agent_id}/message")
+    Semantics (PR-B9 拍板): find the agent's active session on *this*
+    daemon — ``repos.sessions.list(agent_id=...)`` filtered to
+    ``status == "running"`` — and delegate to the shared message
+    persist chain. When several running sessions exist the latest by
+    ``created_at`` wins (the schema permits multiple; the frame method
+    is not session-keyed so D19 ordering stays inert here, consistent
+    with ``_extract_session_id``).
+    """
+    try:
+        agent_id = UUID(str(body.get("agent_id", "")))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=422, detail="body.agent_id must be a UUID"
+        ) from exc
+    agent = await repos.agents.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    if agent.workspace_id != peer_row.workspace_id:
+        raise HTTPException(
+            status_code=403, detail="peer is not trusted in that workspace"
+        )
+    candidates = await repos.sessions.list(agent_id=agent_id)
+    running = [s for s in candidates if s.status == "running"]
+    if not running:
+        raise HTTPException(
+            status_code=404, detail="no active session for agent"
+        )
+    session = max(running, key=lambda s: s.created_at)
+    return await _persist_session_message(
+        peer_row, session, body, repos,
+        msg_id=msg_id, out_of_order=out_of_order,
+        method="POST /api/agents/{agent_id}/message",
+    )
 
 
 # Dispatch table: method-string → handler. ``PEER_FRAME_METHOD_HANDLERS``
@@ -290,7 +409,7 @@ __all__ = [
     "handle_agents_list",
     "handle_agents_message",
     "handle_inbox_read",
-    "_not_bridge_pending",
+    "_persist_session_message",
     "_require_workspace",
     "_extract_session_id",
 ]

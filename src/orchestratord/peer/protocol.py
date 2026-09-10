@@ -12,11 +12,20 @@ Phase 1 decisions landed here (DESIGN_PEER_FEDERATION.md §11.5):
   sequence number; empty means unordered.
 * **D24** — GOODBYE carries ``in_flight`` so the peer can drain before
   the sender exits.
+* **PR-B8** — large ``body``/``payload`` values may ship gzip-compressed
+  on the wire: :meth:`PeerFrame.encode` replaces them with a
+  base64(gzip(JSON)) string and stamps ``comp: "gzip+base64"``;
+  :meth:`PeerFrame.from_dict` transparently restores the plain dict.
+  The MAC input (:mod:`orchestratord.peer.hmac_sig`) is the *plain*
+  body, so compression is signature-invisible by construction.
 """
 
 from __future__ import annotations
 
+import base64
+import gzip
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,6 +33,25 @@ from enum import Enum
 from typing import Any
 
 PROTOCOL_VERSION = "peer/1"
+
+# PR-B8: wire marker for gzip+base64-compressed body/payload values.
+COMPRESS_GZIP_BASE64 = "gzip+base64"
+# Frames whose JSON-serialized body/payload is below this many bytes go
+# on the wire uncompressed (compression overhead beats the savings for
+# small JSON). Overridable via ORCHESTRATORD_PEER_FRAME_COMPRESS_BYTES
+# (0 disables compression entirely).
+DEFAULT_COMPRESS_MIN_BYTES = 4096
+
+
+def frame_compress_min_bytes() -> int:
+    """Compression threshold for the frame wire (PR-B8), read per call."""
+    raw = os.environ.get("ORCHESTRATORD_PEER_FRAME_COMPRESS_BYTES", "")
+    if not raw:
+        return DEFAULT_COMPRESS_MIN_BYTES
+    try:
+        return int(raw)
+    except ValueError:
+        return DEFAULT_COMPRESS_MIN_BYTES
 
 
 class PeerFrameType(str, Enum):
@@ -84,8 +112,34 @@ class PeerFrame:
             d["body"] = self.body
         return d
 
-    def encode(self) -> bytes:
-        return (json.dumps(self.to_dict(), ensure_ascii=False) + "\n").encode("utf-8")
+    def encode(self, *, min_bytes: int | None = None) -> bytes:
+        """Serialize to one JSONL line (PR-B8: optional body compression).
+
+        When *min_bytes* (default: the
+        ``ORCHESTRATORD_PEER_FRAME_COMPRESS_BYTES`` threshold) is > 0
+        and a ``body``/``payload`` dict serializes to at least that
+        many bytes, the value ships as a base64(gzip(JSON)) string and
+        the line carries ``comp: "gzip+base64"``. The in-memory frame
+        (and therefore the HMAC input) is untouched.
+        """
+        d = self.to_dict()
+        threshold = (
+            frame_compress_min_bytes() if min_bytes is None else min_bytes
+        )
+        if threshold > 0:
+            compressed = False
+            for key in ("body", "payload"):
+                value = d.get(key)
+                if not isinstance(value, dict):
+                    continue
+                plain = json.dumps(value, ensure_ascii=False).encode("utf-8")
+                if len(plain) < threshold:
+                    continue
+                d[key] = base64.b64encode(gzip.compress(plain)).decode("ascii")
+                compressed = True
+            if compressed:
+                d["comp"] = COMPRESS_GZIP_BASE64
+        return (json.dumps(d, ensure_ascii=False) + "\n").encode("utf-8")
 
     @classmethod
     def decode(cls, raw: bytes | str) -> PeerFrame:
@@ -127,6 +181,36 @@ class PeerFrame:
             raise ValueError(
                 f"frame 'frame_id' must be a non-empty string, got {raw_fid!r}"
             )
+        # PR-B8: restore gzip-compressed body/payload. Only the two dict
+        # slots may carry the marker; an unknown comp value is a protocol
+        # error rather than a silent body=None (which would break the
+        # MAC and the handlers downstream).
+        body = data.get("body") if isinstance(data.get("body"), dict) else None
+        payload = (
+            data.get("payload") if isinstance(data.get("payload"), dict) else None
+        )
+        comp = data.get("comp")
+        if comp is not None:
+            if comp != COMPRESS_GZIP_BASE64:
+                raise ValueError(f"unsupported frame comp {comp!r}")
+            for key in ("body", "payload"):
+                raw_value = data.get(key)
+                if not isinstance(raw_value, str):
+                    continue
+                try:
+                    restored = json.loads(
+                        gzip.decompress(base64.b64decode(raw_value))
+                    )
+                except (OSError, ValueError) as exc:
+                    raise ValueError(
+                        f"frame {key} failed decompression: {exc}"
+                    ) from exc
+                if not isinstance(restored, dict):
+                    raise ValueError(f"frame {key} must decode to an object")
+                if key == "body":
+                    body = restored
+                else:
+                    payload = restored
         return cls(
             type=ftype_enum,
             frame_id=frame_id,
@@ -138,10 +222,10 @@ class PeerFrame:
             ordering=data.get("ordering"),
             method=data.get("method"),
             headers=data.get("headers") if isinstance(data.get("headers"), dict) else None,
-            body=data.get("body") if isinstance(data.get("body"), dict) else None,
+            body=body,
             status=data.get("status"),
             topic=data.get("topic"),
-            payload=data.get("payload") if isinstance(data.get("payload"), dict) else None,
+            payload=payload,
             capabilities=list(data.get("capabilities") or []),
             in_flight=data.get("in_flight"),
             timestamp=timestamp,
@@ -179,12 +263,16 @@ class PeerFrame:
     @classmethod
     def result(cls, *, orch_id: str, request_id: str, status: int,
                body: dict[str, Any] | None = None,
-               msg_id: str | None = None) -> PeerFrame:
+               msg_id: str | None = None,
+               headers: dict[str, str] | None = None) -> PeerFrame:
         # RESULT echoes the INVOKE's msg_id (D18); callers that replay
         # a cached RESULT must pass the original msg_id through.
+        # ``headers`` carries trace correlation back to the caller
+        # (x-trace-id echo, peer/trace.py).
         return cls(type=PeerFrameType.RESULT, orch_id=orch_id,
                    request_id=request_id, status=status, body=body,
-                   msg_id=msg_id or str(uuid.uuid4()))
+                   msg_id=msg_id or str(uuid.uuid4()),
+                   headers=headers)
 
     @classmethod
     def event(cls, *, orch_id: str, topic: str,

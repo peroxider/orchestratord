@@ -1,69 +1,53 @@
-"""Inbound frame-stream endpoint for ``peer/1`` (DESIGN §6.1, PR-B2 + PR-B3).
+"""Inbound frame endpoint for ``peer/1`` — batch-POST binding (PR-B9).
 
 Mounted at ``POST /peer/v1/stream`` on the main FastAPI app
-(single-port design — see plan §A). The body is chunked JSONL, the
-response is chunked JSONL; authentication runs once on the request
-line via :func:`orchestratord.api.deps.require_peer_auth`, so per-frame
-HMAC is the only replay protection on the body itself.
+(single-port design — see plan §A). PR-B7 proved that bidirectional
+chunked POST is unusable on the locked uvicorn/starlette pair (the
+request body is cut off once the response starts — see
+``docs/TRANSPORT_EVALUATION_PR_B7.md`` §3), so PR-B9 re-binds the
+transport: **one HTTP request is one batch**. The client writes every
+frame of the logical request to the body EOF; the server reads the
+whole body (dispatching frames as they arrive) and then replays
+WELCOME / RESULT / PONG in one response. A session is a sequence of
+batches. Unsolicited EVENT push moved to the SSE endpoint
+``GET /api/peer/peers/{orch_id}/events``; its broker subscription is
+the per-peer topic registry (:mod:`orchestratord.peer.topic_registry`)
+that SUBSCRIBE/UNSUBSCRIBE frames below mutate.
 
-PR-B2 frame scope:
+Per-frame contract (PR-B2/PR-B3 semantics, now within one batch):
 
-* HELLO → verify HMAC + nonce, allocate session, emit WELCOME.
-* INVOKE → run through the existing :class:`PeerMessageDispatcher`
-  (D18 dedup / D19 ordering); emit a RESULT carrying ``request_id``
-  + ``msg_id`` + per-method ``status``.
-* SUBSCRIBE / UNSUBSCRIBE → update per-connection topic set.
-* PING → emit PONG.
-* GOODBYE → drain in-flight, then close.
-* REVOKE → immediate close (D15 token-revocation path).
+* HELLO → verify HMAC + nonce, emit WELCOME.
+* INVOKE → dispatched through :data:`PEER_FRAME_METHOD_HANDLERS`
+  (see :mod:`orchestratord.peer.method_handlers`) — all six advertised
+  methods are real handlers since PR-B9 (``sessions.approve`` executes
+  locally on the session-owner daemon and never multi-hop forwards;
+  unknown method names still get the PR-B2 stub echo). Runs through the
+  :class:`PeerMessageDispatcher` (D18 dedup / D19 ordering via
+  ``SESSION_ID_METHODS``); RESULT carries ``request_id`` + ``msg_id``
+  + per-method ``status``.
+* SUBSCRIBE / UNSUBSCRIBE → add/remove the topic in the per-peer
+  registry (``peer.`` prefix only).
+* PING → PONG.
+* GOODBYE → final batch; the peer's registry set is cleared (the
+  client re-subscribes after reconnecting).
+* REVOKE → final batch + registry cleared (D15 token revocation).
 
-PR-B3 method routing:
+PR-B5 D25 rate limiting is unchanged: one bucket acquire per INVOKE
+frame, an over-limit frame answered with ``status=429`` RESULT.
+PR-B8 outbound compression and the trace-id echo on RESULT are
+unchanged. The server never requires HELLO to precede other frames in
+a batch (no cross-frame session state is kept).
 
-* INVOKE is dispatched through :data:`PEER_FRAME_METHOD_HANDLERS`
-  (see :mod:`orchestratord.peer.method_handlers`) — 6 advertised
-  capabilities have local handlers; mutating cross-process methods
-  (sessions.approve, agents.message) return a 501 "cross-process
-  bridge pending" envelope until PR-B4 lands. Unknown method names
-  fall back to the PR-B2 stub echo (``{"status":"accepted"}``) for
-  backwards compatibility with Phase 1 clients.
-* **D19 ordering is inert on this path** — ``session_id=None`` is
-  passed to :class:`PeerMessageDispatcher.dispatch_message` because
-  the frame body does not carry a stable per-session key today.
-  PR-B3 leaves the gap documented; PR-B4 may pass ``session_id``
-  from the frame body when method implies one (e.g. the
-  ``POST /api/sessions/{session_id}/messages`` body carries one).
-  **PR-B4 wires it:** for methods in
-  :data:`orchestratord.peer.method_handlers.SESSION_ID_METHODS`
-  (``POST /api/sessions/{session_id}/messages`` and ``approve``) we
-  extract ``session_id`` from the frame body, pre-call
-  :meth:`PeerMessageDispatcher.check_ordering`, and thread the
-  ``out_of_order`` flag into the handler's audit-row payload via
-  ``dispatch_message(precomputed_out_of_order=...)`` — skipping the
-  internal re-check to avoid double-incrementing the per-session
-  chain.
-
-**PR-B4 AC7/D22 EVENT cross-daemon relay**: SUBSCRIBE / UNSUBSCRIBE
-frames now mutate the broker topic set via
-:meth:`RealtimeBroker.update_topics`, and a dedicated forwarder
-coroutine drains the broker iterator and emits outbound ``EVENT``
-frames on the same chunked stream. AC7's ``RealtimeBackend``
-abstraction (``LocalBackend`` / ``RedisBackend``) and the
-``PeerEventRelay`` Redis subscriber are reused unchanged — the frame
-path plugs into the same seam the WebSocket ``/ws`` route uses.
-
-EVENT frames from the client are not consumed by the server (AC7 / D22
-relay is the cross-daemon event channel; the frame stream is
-request/response for now).
-
-PR-B5 D25: authentication runs once per stream, so rate limiting is
-applied per INVOKE frame against the same shared
-:func:`orchestratord.api.deps.peer_rate_bucket` the REST path uses —
-an over-limit frame is answered with a ``status=429`` RESULT carrying
-``{"error", "retry_after"}`` and the stream stays open.
-
-Reader and writer loops are decoupled by :class:`asyncio.Queue` so a
-stalled peer never wedges the chunked POST (deadlock prevention — see
-plan §C).
+Reader and writer stay decoupled by :class:`asyncio.Queue`, but run
+in **sequential phases**: the body is read to EOF (frames dispatched
+into the outbound queue as they arrive), and only then does the
+response replay the queue. Reading the body while streaming the
+response is unsound on spec_version<2.4 ASGI servers — starlette's
+StreamingResponse runs a concurrent disconnect listener on the same
+receive channel — which is the true root cause of the PR-B7 transport
+failure. Inlining the read also means a stalled peer cannot wedge
+anything: a batch is bounded by the request body, and the response is
+a pure replay.
 """
 
 from __future__ import annotations
@@ -81,11 +65,23 @@ from starlette.background import BackgroundTask
 from orchestratord.api.deps import peer_rate_bucket, require_peer_auth
 from orchestratord.api.routers.peer import _get_dispatcher
 from orchestratord.peer import connections as peer_connections
-from orchestratord.peer.hmac_sig import PeerAuthError, verify
+from orchestratord.peer import topic_registry
+from orchestratord.peer.hmac_sig import PeerAuthError, sign, verify
 from orchestratord.peer.method_handlers import PEER_FRAME_METHOD_HANDLERS
 from orchestratord.peer.nonce_store import NonceStore
-from orchestratord.peer.protocol import PeerFrame, PeerFrameType
+from orchestratord.peer.protocol import (
+    PeerFrame,
+    PeerFrameType,
+    frame_compress_min_bytes,
+)
 from orchestratord.peer.server_connection import PeerServerConnection
+from orchestratord.peer.trace import (
+    TRACE_HEADER,
+    new_trace_id,
+    reset_current_trace_id,
+    set_current_trace_id,
+    trace_id_from_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -242,12 +238,14 @@ async def peer_frame_stream(
     peer_row: Any = Depends(require_peer_auth),
     authorization: str | None = Header(default=None),
 ) -> StreamingResponse:
-    """Long-lived chunked POST peer/1 frame transport (PR-B2 / DESIGN §4.1).
+    """Batch-POST peer/1 frame transport (PR-B9; supersedes PR-B2 chunked).
 
     The body is newline-delimited JSONL :class:`PeerFrame` objects; the
-    response is the same. Authentication runs once on the request line
-    via :func:`require_peer_auth` (bearer + ``X-Peer-Orchestrator-Id``),
-    so subsequent frames do not need to re-authenticate.
+    response replays the frames the server emits for the batch, then
+    ends when the body EOF reaches the reader. Authentication runs once
+    on the request line via :func:`require_peer_auth` (bearer +
+    ``X-Peer-Orchestrator-Id``), so subsequent frames do not need to
+    re-authenticate.
 
     Frame types handled: HELLO, INVOKE, SUBSCRIBE, UNSUBSCRIBE, PING,
     GOODBYE, REVOKE. See module docstring for the per-frame contract.
@@ -262,20 +260,10 @@ async def peer_frame_stream(
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[len("Bearer ") :].strip()
 
-    # PR-B4 AC7/D22 event relay: subscribe to the local RealtimeBroker
-    # so events published in this process (including ``peer.*``-prefixed
-    # topics that arrived via Redis from a remote daemon) flow back to
-    # the peer's outbound EVENT stream. ``broker.subscribe()`` returns
-    # an iterator whose ``finally`` clause unsubscribes when the
-    # forwarder task exits, so explicit cleanup is unnecessary. The
-    # initial topic set is empty; SUBSCRIBE frames update it in place
-    # via ``broker.update_topics`` — same pattern the WebSocket
-    # handler uses (``api/routers/realtime.py:128-150``).
-    from orchestratord.api.realtime import get_broker
-
-    broker = get_broker()
-    broker_sub_id, broker_frame_iter = await broker.subscribe(set())
-    subscriptions: set[str] = set()
+    # PR-B9: no broker subscription is opened here any more. EVENT push
+    # is served by the SSE endpoint (``GET /api/peer/peers/{orch_id}/
+    # events``), which reads the per-peer topic registry that the
+    # SUBSCRIBE/UNSUBSCRIBE branches below mutate.
 
     async def reader() -> None:
         """Decode + dispatch every inbound frame; exits on GOODBYE / REVOKE."""
@@ -317,6 +305,10 @@ async def peer_frame_stream(
                                 getattr(peer_row, "capabilities", []) or []
                             ),
                         )
+                        # D15: the per-peer token is symmetric — the
+                        # WELCOME is HMAC-signed with it so the client's
+                        # handshake can verify we hold the same key.
+                        sign(welcome, token)
                         await inbound.send_frame(welcome)
                     elif frame.type is PeerFrameType.INVOKE:
                         # PR-B5/D25: the stream path authenticates once on
@@ -344,36 +336,46 @@ async def peer_frame_stream(
                             )
                             continue
                         inbound.entered()
+                        # Trace correlation (PR 收尾): bind the INVOKE's
+                        # x-trace-id (or a fresh one) for this dispatch
+                        # context and echo it back on the RESULT.
+                        trace_id = (
+                            trace_id_from_headers(frame.headers)
+                            or new_trace_id()
+                        )
+                        trace_token = set_current_trace_id(trace_id)
                         try:
-                            result = await _dispatch_invoke_frame(
-                                frame, inbound, peer_row
-                            )
-                        except Exception:
-                            logger.exception(
-                                "peer /v1/stream: INVOKE dispatch failed "
-                                "for %s",
-                                inbound.remote_orch_id,
-                            )
-                            inbound.released()
-                            return
-                        try:
-                            await inbound.send_frame(result)
+                            try:
+                                result = await _dispatch_invoke_frame(
+                                    frame, inbound, peer_row
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "peer /v1/stream: INVOKE dispatch failed "
+                                    "for %s",
+                                    inbound.remote_orch_id,
+                                )
+                                inbound.released()
+                                return
+                            result.headers = {TRACE_HEADER: trace_id}
+                            try:
+                                await inbound.send_frame(result)
+                            finally:
+                                inbound.released()
                         finally:
-                            inbound.released()
+                            reset_current_trace_id(trace_token)
                     elif frame.type is PeerFrameType.SUBSCRIBE:
                         if frame.topic:
-                            subscriptions.add(frame.topic)
-                            # PR-B4: hand the updated topic set to the
-                            # broker so ``publish()`` starts fanning
-                            # frames to the forwarder iterator.
-                            await broker.update_topics(
-                                broker_sub_id, set(subscriptions)
+                            # PR-B9: the SSE endpoint is the broker
+                            # consumer now — record the topic in the
+                            # per-peer registry for it to pick up.
+                            topic_registry.add_peer_topic(
+                                peer_row.orch_id, frame.topic
                             )
                     elif frame.type is PeerFrameType.UNSUBSCRIBE:
                         if frame.topic:
-                            subscriptions.discard(frame.topic)
-                            await broker.update_topics(
-                                broker_sub_id, set(subscriptions)
+                            topic_registry.remove_peer_topic(
+                                peer_row.orch_id, frame.topic
                             )
                     elif frame.type is PeerFrameType.PING:
                         await inbound.send_frame(
@@ -386,12 +388,17 @@ async def peer_frame_stream(
                             inbound.remote_orch_id,
                             inbound.in_flight,
                         )
+                        # PR-B9: the session ends — drop the peer's SSE
+                        # topic set (the client re-subscribes on the
+                        # next session's handshake).
+                        topic_registry.clear_peer_topics(peer_row.orch_id)
                         return
                     elif frame.type is PeerFrameType.REVOKE:
                         logger.warning(
                             "peer /v1/stream: REVOKE from %s — closing",
                             inbound.remote_orch_id,
                         )
+                        topic_registry.clear_peer_topics(peer_row.orch_id)
                         return
                     # EVENT frames from the client are intentionally not
                     # consumed: AC7/D22 is one-way (server → client).
@@ -403,60 +410,34 @@ async def peer_frame_stream(
             )
 
     async def writer() -> Any:
-        """Yield each outbound frame as JSONL until the queue sentinel.
+        """Yield each queued frame as JSONL until the queue sentinel.
 
-        Frames here include both INVOKE → RESULT replies and EVENT
-        frames pushed by the broker forwarder — they share the same
-        outbound queue on :class:`PeerServerConnection` so the wire
-        ordering is preserved naturally.
+        Under the batch-POST binding the queue only ever holds
+        WELCOME / RESULT / PONG replies to frames in this batch —
+        unsolicited EVENT push left for the SSE endpoint (PR-B9).
         """
         while True:
             frame = await inbound.next_outbound()
             if frame is None:
                 return
-            yield frame.encode()
+            # PR-B8: compress large body/payload on the way out
+            # (threshold read once per stream).
+            yield frame.encode(min_bytes=frame_compress_min_bytes())
             await asyncio.sleep(0)
 
-    async def event_forwarder() -> None:
-        """Drain broker frames and emit them as outbound EVENT frames.
-
-        Closes naturally when ``broker_frame_iter`` is exhausted — which
-        happens when the forwarder task is cancelled (peer closed the
-        stream, REVOKE, GOODBYE). The iterator's ``finally`` removes the
-        broker subscription so no ghost subscriber lingers.
-        """
-        try:
-            async for broker_frame in broker_frame_iter:
-                await inbound.send_frame(
-                    PeerFrame.event(
-                        orch_id=getattr(peer_row, "orch_id", "unknown"),
-                        topic=str(broker_frame["topic"]),
-                        payload=broker_frame.get("payload"),
-                    )
-                )
-        except Exception:
-            logger.debug(
-                "peer /v1/stream event forwarder terminated for %s",
-                inbound.remote_orch_id,
-                exc_info=True,
-            )
-
-    reader_task = asyncio.create_task(reader(), name="peer-frame-reader")
-    forwarder_task = asyncio.create_task(
-        event_forwarder(), name="peer-frame-event-forwarder"
-    )
+    # PR-B9: the batch body is consumed to EOF *before* the response
+    # starts. Reading the body while streaming the response is broken
+    # on every spec_version<2.4 ASGI server — starlette's
+    # StreamingResponse runs a concurrent ``listen_for_disconnect``
+    # task against the same receive channel, so the two consumers race
+    # for the body chunks (the actual PR-B7 root cause, not just
+    # "body cut off after response start"). The reader therefore runs
+    # inline here; the response below is a pure replay of the outbound
+    # queue, ended by the sentinel ``aclose`` puts.
+    await reader()
+    await inbound.aclose()
 
     async def cleanup() -> None:
-        # PR-B4: cancel both tasks; the broker iterator's ``finally``
-        # handles the broker-side unsubscribe when ``forwarder_task``
-        # is cancelled.
-        for t in (reader_task, forwarder_task):
-            t.cancel()
-        for t in (reader_task, forwarder_task):
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
         await inbound.aclose()
         peer_connections.unregister_inbound(inbound)
 

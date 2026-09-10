@@ -28,6 +28,8 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from orchestratord.peer import topic_registry
+
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard for type checkers
     from orchestratord.peer.client import PeerClient
     from orchestratord.peer.server_connection import PeerServerConnection
@@ -129,5 +131,9 @@ async def shutdown_peer_connections(
                 exc_info=True,
             )
         count += 1
+
+    # PR-B9: SSE subscriptions live in the per-peer topic registry —
+    # nothing survives shutdown.
+    topic_registry.reset_peer_topics()
 
     return count

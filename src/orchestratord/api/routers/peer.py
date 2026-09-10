@@ -34,7 +34,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Literal
@@ -47,6 +47,8 @@ from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import issue_api_token
 from orchestratord.peer.card import _resolve_card_url, build_agent_card, ensure_orch_id
 from orchestratord.peer.dispatcher import PeerMessageDispatcher
+from orchestratord.peer import topic_registry
+from orchestratord.peer.trace import current_trace_id, new_trace_id
 from orchestratord.peer.registry import (
     CLIENT_KIND_V2,
     STATUS_ACCEPTED,
@@ -423,6 +425,7 @@ async def _peer_invoke_message(
                 "peer_call_id": body.msg_id,
                 "method": body.method,
                 "out_of_order": out_of_order,
+                "trace_id": current_trace_id(),
             },
             invited_by_orch_id=peer.orch_id,
             invited_by_peer_call_id=body.msg_id,
@@ -438,8 +441,15 @@ async def post_peer_invoke(
     body: _PeerInvoke,
     repos: Repositories = Depends(get_repositories),
     peer: object = Depends(require_peer_auth),
+    x_trace_id: str | None = Header(default=None, alias="X-Trace-Id"),
 ) -> dict:
-    """Handle an inbound peer INVOKE (AC6; D18 dedup + D19 ordering)."""
+    """Handle an inbound peer INVOKE (AC6; D18 dedup + D19 ordering).
+
+    ``X-Trace-Id`` is echoed back so the calling daemon can correlate
+    the two sides of the hop (trace contextvar is already bound by
+    ``require_peer_auth``).
+    """
+    trace_id = x_trace_id or current_trace_id() or new_trace_id()
     if body.method not in _PEER_INVOKE_METHODS:
         raise HTTPException(status_code=422, detail=f"unsupported method {body.method!r}")
     if body.method == "GET /api/workspaces/{workspace_id}/sessions":
@@ -447,7 +457,10 @@ async def post_peer_invoke(
         dispatcher = _get_dispatcher()
         cached = dispatcher.cached_result(orch_id, body.msg_id or "")
         if cached is not None:
-            return {"status": 200, "body": cached, "duplicate": True}
+            return JSONResponse(
+                content={"status": 200, "body": cached, "duplicate": True},
+                headers={"X-Trace-Id": trace_id},
+            )
         try:
             target_ws = UUID(str(body.body.get("workspace_id", "")))
         except ValueError as exc:
@@ -465,7 +478,10 @@ async def post_peer_invoke(
             {"id": str(s.id), "status": s.status, "mode": s.mode} for s in sessions
         ]
         dispatcher.remember_result(orch_id, body.msg_id or "", result)
-        return {"status": 200, "body": result, "duplicate": False}
+        return JSONResponse(
+            content={"status": 200, "body": result, "duplicate": False},
+            headers={"X-Trace-Id": trace_id},
+        )
 
     if body.session_id is None:
         raise HTTPException(status_code=422, detail="session_id is required")
@@ -497,6 +513,7 @@ async def post_peer_invoke(
             "out_of_order": out_of_order,
             "scheduled": outcome.scheduled,
         },
+        headers={"X-Trace-Id": trace_id},
     )
 
 
@@ -578,23 +595,48 @@ async def post_peer_session(
 async def get_peer_events(
     orch_id: str,
     topics: str = Query(
-        "", description="Comma-separated topic list; only peer.* topics are served"
+        "",
+        description=(
+            "Comma-separated topic list; only peer.* topics are served. "
+            "Omit to use the frame SUBSCRIBE registry for this peer (PR-B9)."
+        ),
     ),
     peer: object = Depends(require_peer_auth),
 ) -> StreamingResponse:
     """SSE stream of ``peer.*`` broker topics (AC7, R11 isolation).
 
-    Internal topics are refused — a remote peer can only ever observe
-    the ``peer.`` namespace, so workspace-internal events never leak
-    across the federation boundary.
+    PR-B9: under the batch-POST frame binding there is no long-lived
+    response stream to push EVENT frames onto, so the client's
+    SUBSCRIBE/UNSUBSCRIBE frames land in the per-peer topic registry
+    (:mod:`orchestratord.peer.topic_registry`) and this endpoint
+    consumes the registry as its broker subscription. An explicit
+    ``topics`` query still wins; when both are empty the request is a
+    422. Internal topics are refused — a remote peer can only ever
+    observe the ``peer.`` namespace, so workspace-internal events never
+    leak across the federation boundary.
     """
+    if orch_id != peer.orch_id:
+        # PR-B9: the registry is keyed by the *authenticated* peer's
+        # orch_id — a peer may only stream its own subscription set.
+        raise HTTPException(
+            status_code=403,
+            detail="peer may only stream its own event topics",
+        )
     wanted = {
         topic.strip()
         for topic in topics.split(",")
         if topic.strip().startswith("peer.")
     }
     if not wanted:
-        raise HTTPException(status_code=422, detail="no peer.* topics requested")
+        wanted = topic_registry.get_peer_topics(orch_id)
+    if not wanted:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "no peer.* topics requested and none registered via "
+                "frame SUBSCRIBE"
+            ),
+        )
 
     broker = get_broker()
     sub_id, frame_iter = await broker.subscribe(wanted)

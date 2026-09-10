@@ -33,9 +33,20 @@ class HandshakeError(Exception):
 
 
 class FrameTransport(Protocol):
-    """Minimal async frame pipe the handshake and client drive."""
+    """Minimal async frame pipe the handshake and client drive.
 
-    async def send_frame(self, frame: PeerFrame) -> None: ...
+    PR-B9 batch-POST binding: ``send_frame`` buffers the frame and
+    **callers must terminate every logical request with
+    ``end_of_batch=True``** on its final frame — that flag flushes the
+    buffered batch as one HTTP POST whose response carries the
+    server's replayed frames. Without the flag ``receive_frame`` blocks
+    forever (the batch never left the client). Transports that stream
+    both ways (in-memory test doubles) may ignore the flag.
+    """
+
+    async def send_frame(
+        self, frame: PeerFrame, *, end_of_batch: bool = False
+    ) -> None: ...
 
     async def receive_frame(self) -> PeerFrame: ...
 
@@ -71,7 +82,9 @@ async def perform_handshake(
     hello = PeerFrame.hello(orch_id=orch_id, capabilities=capabilities)
     sign(hello, token)
     try:
-        await transport.send_frame(hello)
+        # PR-B9: the HELLO is a complete batch on its own — the server
+        # reads it to EOF and replays WELCOME in the batch response.
+        await transport.send_frame(hello, end_of_batch=True)
         welcome = await asyncio.wait_for(
             transport.receive_frame(), timeout=hello_timeout
         )
@@ -105,7 +118,14 @@ async def send_subscriptions(
     transport: FrameTransport,
     topics: list[str] | set[str],
 ) -> None:
-    """Emit one SUBSCRIBE frame per topic (§5 subscribe step)."""
-    for topic in sorted(topics):
+    """Emit one SUBSCRIBE frame per topic (§5 subscribe step).
+
+    PR-B9: the final frame terminates the batch so the server registers
+    the whole topic set in its per-peer registry in one POST. With no
+    topics nothing is sent (and no batch is opened).
+    """
+    for i, topic in enumerate(sorted(topics)):
         frame = PeerFrame(type=PeerFrameType.SUBSCRIBE, topic=topic)
-        await transport.send_frame(frame)
+        await transport.send_frame(
+            frame, end_of_batch=i == len(topics) - 1
+        )

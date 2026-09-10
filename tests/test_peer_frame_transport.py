@@ -18,8 +18,11 @@ What this file covers:
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from orchestratord.peer.protocol import PeerFrame
 from orchestratord.peer.transports import HttpsFrameTransport, select_transport_factory
 
 TOKEN = "peer-secret-token"
@@ -165,3 +168,133 @@ async def test_receive_frame_without_connect_raises() -> None:
     )
     with pytest.raises(RuntimeError, match="not connected"):
         await transport.receive_frame()
+
+
+# -- PR-B9: batch-POST binding --
+
+
+def _make_mock_transport(
+    handler,
+) -> HttpsFrameTransport:
+    """HttpsFrameTransport wired to an ``httpx.MockTransport`` handler."""
+    import httpx
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return HttpsFrameTransport(
+        url="https://h/peer/v1/stream",
+        orch_id="orch-X",
+        token=TOKEN,
+        client=client,
+    )
+
+
+async def _drain_inflight(transport: HttpsFrameTransport) -> None:
+    while transport._inflight:
+        await asyncio.sleep(0)
+        for task in list(transport._inflight):
+            if task.done():
+                await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_batch_flushes_as_one_post() -> None:
+    """Frames buffered without ``end_of_batch`` ship as ONE POST when
+    the batch terminator arrives; the response JSONL replays frames
+    into ``receive_frame`` in order."""
+    import httpx
+
+    from orchestratord.peer.protocol import PeerFrame, PeerFrameType
+
+    requests: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.read())
+        reply = PeerFrame.pong(orch_id="orch-Y")
+        return httpx.Response(
+            200, content=reply.encode() + b"\n",
+        )
+
+    transport = _make_mock_transport(handler)
+    await transport._open()
+    try:
+        await transport.send_frame(PeerFrame.ping(orch_id="orch-X"))
+        await transport.send_frame(PeerFrame.ping(orch_id="orch-X"))
+        # No POST yet — the batch has not been terminated.
+        assert requests == []
+        await transport.send_frame(
+            PeerFrame.ping(orch_id="orch-X"), end_of_batch=True
+        )
+        await _drain_inflight(transport)
+        # Exactly one request carrying all three JSONL frames.
+        assert len(requests) == 1
+        body_lines = [ln for ln in requests[0].splitlines() if ln.strip()]
+        assert len(body_lines) == 3
+        assert PeerFrame.decode(body_lines[0]).type is PeerFrameType.PING
+        pong = await transport.receive_frame()
+        assert pong.type is PeerFrameType.PONG
+        assert pong.orch_id == "orch-Y"
+    finally:
+        await transport.close()
+
+
+async def test_two_batches_ship_as_two_posts() -> None:
+    """Each terminated batch is its own POST over the shared client."""
+    import httpx
+
+    from orchestratord.peer.protocol import PeerFrame
+
+    requests: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.read())
+        return httpx.Response(200, content=b"")
+
+    transport = _make_mock_transport(handler)
+    await transport._open()
+    try:
+        for _ in range(2):
+            await transport.send_frame(
+                PeerFrame.ping(orch_id="orch-X"), end_of_batch=True
+            )
+        await _drain_inflight(transport)
+        assert len(requests) == 2
+    finally:
+        await transport.close()
+
+
+async def test_failed_batch_surfaces_as_runtime_error() -> None:
+    """A failed batch POST drops the teardown sentinel; the next
+    ``receive_frame`` raises ``RuntimeError`` (session-teardown
+    signal, PR-B2 reader semantics)."""
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("peer unreachable")
+
+    transport = _make_mock_transport(handler)
+    await transport._open()
+    try:
+        await transport.send_frame(
+            PeerFrame.ping(orch_id="orch-X"), end_of_batch=True
+        )
+        with pytest.raises(RuntimeError, match="batch request failed"):
+            await transport.receive_frame()
+    finally:
+        await transport.close()
+
+
+async def test_close_drops_unterminated_batch_without_posting() -> None:
+    """A buffered batch never terminated by ``end_of_batch`` is dropped
+    on close — no request leaves the client."""
+    import httpx
+
+    requests: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.read())
+        return httpx.Response(200, content=b"")
+
+    transport = _make_mock_transport(handler)
+    await transport._open()
+    await transport.send_frame(PeerFrame.ping(orch_id="orch-X"))
+    await transport.close()
+    assert requests == []

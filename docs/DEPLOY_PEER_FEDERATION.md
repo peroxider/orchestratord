@@ -14,6 +14,15 @@
 * 服务端 D25 限流：REST 路径按请求、frame 路径按 INVOKE 帧，
   共享同一 per-peer token bucket（默认 100 rps / burst 200）。
 
+> ⚠ **frame transport 现状警告（PR-B7，2026-09）**：`POST /peer/v1/stream`
+> 的双向 chunked POST 语义在当前锁定的依赖组合（uvicorn 0.52.4 /
+> starlette 1.6.0，见 `uv.lock`）上**不可用**——服务端开始发送响应后
+> 请求体即被切断，frame 会话无法完成 WELCOME/RESULT 往返。
+> **peer 调用请走 REST 通道**（`/api/peer/peers/{orch}/invoke` +
+> SSE events 端点），Agent Card 的 `preferred_transport=frame` 暂不回改；
+> 修复方案（批式 POST 绑定）见 PR-B9 建议
+> `docs/TRANSPORT_EVALUATION_PR_B7.md` §5。
+
 ## 2. 证书生成与分发
 
 每个 daemon 生成自己的本地 mini-CA 并签发 server 证书：
