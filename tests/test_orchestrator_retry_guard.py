@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from orchestratord.issue_registry import IssueRegistry
+from orchestratord.issue_registry import IssueRegistry, IssueStatus
 from orchestratord.orchestrator import Orchestrator, OrchestratorState
 
 
@@ -780,3 +780,67 @@ def test_non_retryable_end_reasons_defined_once() -> None:
     )
     # The orchestrator must use the same object — not a private copy.
     assert orch_module.NON_RETRYABLE_END_REASONS is NON_RETRYABLE_END_REASONS
+
+# #33 [F16][P2] crash 恢复把 stale running 标失败并关单，应保持 open 可 retry。
+# ``_recover_stale_running_records`` 对 stale RUNNING 记录不走
+# ``_sync_tracker_issue_state("failed")`` 关单，改为持久化重试计划
+# （retry_count / next_retry_at），由 ``_recover_pending_retries``
+# 在同一启动序列中重建 retry queue —— 与普通失败路径的 retry gate 一致。
+# ---------------------------------------------------------------------------
+
+
+def _stale_running_fixture(tmp_path: Path) -> None:
+    """Pre-seed registry with a stale RUNNING record (crash simulation)."""
+    orch = _orchestrator(tmp_path)
+    record = orch._registry.get("1")
+    assert record is not None
+    record.status = IssueStatus.RUNNING
+    orch._registry._save()
+
+
+@pytest.mark.asyncio
+async def test_crash_recovery_keeps_issue_open_and_retryable(
+    tmp_path: Path,
+) -> None:
+    """A stale RUNNING record from a daemon crash must be recovered
+    non-destructively: the tracker issue stays open, the retry plan is
+    persisted, and the retry queue is rebuilt so the issue can be
+    re-launched on the next retry queue dispatch.
+    """
+    _stale_running_fixture(tmp_path)
+
+    # Simulate startup recovery: second daemon lifetime, fresh state.
+    orch = _orchestrator_from_disk(tmp_path)
+    tracker, calls = _tracker_recorder()
+    orch.tracker = tracker
+
+    await orch._recover_stale_running_records()
+    orch._recover_pending_retries()
+
+    # 1. Registry: failure reason recorded (mark_failed_with_reason)
+    record = orch._registry.get("1")
+    assert record is not None
+    assert record.status == IssueStatus.FAILED
+    assert record.verification_output == "Recovered stale running issue on orchestrator startup"
+    assert record.verification_status == "failed"
+
+    # 2. Tracker NOT closed — no "failed" state sync
+    assert ("1", "failed") not in calls, (
+        "crash recovery must not close the tracker issue"
+    )
+    assert calls == [], "no tracker state sync at all during recovery"
+
+    # 3. Retry plan persisted on the registry record
+    assert record.next_retry_at is not None, "retry plan must be persisted"
+    assert record.retry_count == 1, "retry_count must be set to 1"
+
+    # 4. Retry queue rebuilt by _recover_pending_retries
+    assert len(orch._state.retry_queue) == 1, (
+        "retry queue must contain the recovered plan"
+    )
+    recovered = orch._state.retry_queue[0]
+    assert recovered.issue_id == "1"
+    assert recovered.attempt == 1
+    # The retry is deferred (backoff delay still pending) — the
+    # existing test_startup_recovers_persisted_retry_plan covers the
+    # full launch-via-_process_retry_queue flow.
