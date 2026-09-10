@@ -112,25 +112,47 @@ def _slug_from_workspace(context: CommandContext, ws_str: str) -> str:
 
 
 def _is_pid_alive(context: CommandContext, pid: int) -> bool:
-    """Check whether a PID is alive, treating Linux zombies as stopped.
+    """Check whether a PID is still the orchestrator daemon.
 
-    Signal 0 reports zombies as alive, which can make ``server stop`` wait
-    until its timeout for a daemon that has already exited.  Linux exposes
-    the process state in ``/proc/<pid>/stat``; on other platforms we retain
-    the signal-0 semantics.
+    The zero-signal test (``os.kill(pid, 0)``) alone is not enough:
+      * a recycled PID can belong to an unrelated process, causing
+        ``server status`` to misreport RUNNING and ``server stop`` to
+        signal an innocent process — cross-check ``/proc/<pid>/cmdline``
+        for orchestratord markers;
+      * a Linux zombie reports alive to signal 0 but will never reap,
+        making ``server stop`` wait out its timeout for an already-dead
+        daemon — check the process state in ``/proc/<pid>/stat`` (a
+        zombie's cmdline is empty, so the cmdline check already rejects
+        it; the stat check is belt-and-braces for the residual edge).
+    On platforms without ``/proc`` the plain signal-0 semantics remain.
     """
     try:
         os.kill(pid, 0)
     except (OSError, ProcessLookupError):
         return False
     try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            # state is the field after the comm in parens; comm may contain
-            # spaces, so take everything after the last ')'.
-            state = f.read().rsplit(b")", 1)[1].split()[0]
-        return state != b"Z"
-    except (OSError, IndexError):
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        # /proc not available (macOS/Windows) — fall back to the plain
+        # signal-0 semantics; both hardening layers are Linux-only.
         return True
+    if not cmdline:
+        # Zombie / kernel thread with an empty cmdline — not our daemon.
+        return False
+    lowered = cmdline.decode("utf-8", errors="replace").lower()
+    if "orchestratord" not in lowered and "orchestrator.py" not in lowered:
+        # Recycled PID — an unrelated process owns it now.
+        return False
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_bytes()
+        # state is the field after the comm in parens; comm may contain
+        # spaces, so take everything after the last ')'.
+        state = stat.rsplit(b")", 1)[1].split()[0]
+    except (OSError, IndexError, ValueError):
+        # /proc/<pid>/stat unavailable or unreadable — no zombie info;
+        # default to alive rather than dropping a live daemon.
+        state = None
+    return state != b"Z"
 
 
 def _format_uptime(context: CommandContext, started_at: float) -> str:

@@ -159,6 +159,9 @@ async def test_retry_queue_launches_when_slot_frees(tmp_path: Path) -> None:
 
     async def _fake_launch(issue) -> None:
         launched.append(issue.id)
+        # Mirror the real _launch_issue which sets _state.running
+        from types import SimpleNamespace
+        orch._state.running[issue.id] = SimpleNamespace(issue=issue)
 
     orch._launch_issue = _fake_launch  # type: ignore[method-assign]
     orch.tracker = SimpleNamespace(
@@ -417,6 +420,9 @@ async def test_startup_recovers_persisted_retry_plan(tmp_path: Path) -> None:
 
     async def _fake_launch(issue) -> None:
         launched.append(issue.id)
+        # Mirror the real _launch_issue which sets _state.running
+        from types import SimpleNamespace
+        orch._state.running[issue.id] = SimpleNamespace(issue=issue)
 
     orch._launch_issue = _fake_launch  # type: ignore[method-assign]
     orch.tracker = SimpleNamespace(

@@ -824,8 +824,16 @@ def _write_gateway_control(workspace: Path, command: str, payload: dict) -> Path
 
 
 def _wait_gateway_control_result(
-    response_path: Path, timeout_seconds: float = 0.2
+    response_path: Path, timeout_seconds: float = 31.0
 ) -> dict | None:
+    """Wait for the orchestrator's gateway-control response file.
+
+    The orchestrator only picks up control files during its poll loop
+    (``poll_interval_ms``, default 30 s), so a sub-second wait could
+    never observe the success path — the CLI always fell through to the
+    "request submitted" timeout branch.  The default timeout is one poll
+    interval plus slack so a healthy daemon's result is actually seen.
+    """
     deadline = time.time() + max(0.0, timeout_seconds)
     while time.time() < deadline:
         if response_path.exists():
