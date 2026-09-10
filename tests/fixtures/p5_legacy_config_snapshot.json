@@ -39,6 +39,7 @@
     "max_turns": 42,
     "max_turns_retry_delay_ms": 500,
     "model": "m-main",
+    "model_aliases": {},
     "perf_should_continue_skip_turns": 3,
     "permission_mode": "bypassPermissions",
     "phases": [

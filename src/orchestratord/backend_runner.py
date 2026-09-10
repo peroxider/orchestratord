@@ -522,7 +522,11 @@ class BackendRunner:
         session._snapshot_provider = (
             self.agent_config.provider or self.backend.name
         )
-        session._snapshot_model = self.agent_config.model or ""
+        from .cost.estimator import resolve_model_alias
+
+        session._snapshot_model = resolve_model_alias(
+            self.agent_config.model or "", self.agent_config.model_aliases
+        )
 
         # Publish the run_id to the registry immediately so the dashboard
         # (and ChatGateway) can discover the active run before the session
@@ -1143,6 +1147,36 @@ class BackendRunner:
             )
             await db.commit()
 
+    def _resolve_cost(self, session: AgentSession) -> None:
+        """Re-estimate cost when the configured model was aliased.
+
+        The CLI prices its reported ``total_cost_usd`` with the *label*
+        model's rates — wrong whenever ``agent.model_aliases`` remaps the
+        label to the actually-served model. Re-estimate from accumulated
+        token usage × the actual model's pricing-table rates, refusing
+        the table ``default`` (an unknown actual model keeps the reported
+        figure rather than being silently priced at $3/$15).
+        """
+        config = getattr(self, "agent_config", None)
+        if config is None:
+            return
+        requested = config.model or ""
+        actual = getattr(session, "_snapshot_model", None) or ""
+        if not actual or actual == requested:
+            return
+        usage = getattr(session, "token_usage", None) or {}
+        tokens_in = int(usage.get("input", usage.get("input_tokens", 0)) or 0)
+        tokens_out = int(usage.get("output", usage.get("output_tokens", 0)) or 0)
+        if not tokens_in and not tokens_out:
+            return  # 无 token 可估，保留 CLI 报告成本，不归零
+        from .cost.estimator import estimate_cost_usd
+
+        estimated = estimate_cost_usd(
+            actual, tokens_in, tokens_out, allow_default=False
+        )
+        if estimated is not None:
+            session.cost_usd = estimated
+
     async def _record_usage(self, session: AgentSession) -> None:
         """Fold one finished run into ``usage_aggregates`` (§7.3).
 
@@ -1682,6 +1716,7 @@ class BackendRunner:
                             "SESSION_COMPLETE total_cost_usd not numeric: %r",
                             total_cost_usd,
                         )
+                self._resolve_cost(session)
                 # Record run-level usage into orchestratord telemetry
                 # (best-effort; local JSONL — independent of clawcodex).
                 try:
@@ -1880,6 +1915,7 @@ class BackendRunner:
                         "SESSION_COMPLETE total_cost_usd not numeric: %r",
                         total_cost_usd,
                     )
+            self._resolve_cost(session)
             try:
                 from orchestratord.telemetry import record_usage
 

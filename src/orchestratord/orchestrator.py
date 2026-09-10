@@ -1412,8 +1412,12 @@ class Orchestrator:
         _backend = getattr(self.agent_runner, "backend", None)
         if _backend is not None:
             session._snapshot_backend = getattr(_backend, "name", None) or ""
-            session._snapshot_model = (
-                getattr(self.agent_runner.agent_config, "model", None) or ""
+            from .cost.estimator import resolve_model_alias
+
+            _agent_config = getattr(self.agent_runner, "agent_config", None)
+            session._snapshot_model = resolve_model_alias(
+                getattr(_agent_config, "model", None) or "",
+                getattr(_agent_config, "model_aliases", None) or {},
             )
             session._snapshot_provider = (
                 getattr(self.agent_runner.agent_config, "provider", None)

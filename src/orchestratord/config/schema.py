@@ -742,6 +742,13 @@ class AgentConfig:
     # default (which may be a placeholder like ``gpt-5.4`` that does
     # not exist on the real API — see stagnation root-cause analysis).
     model: str | None = None
+    # Requested-model → actually-served-model aliases (longest-prefix
+    # match). For gateways that serve a different model than the label
+    # claims (e.g. ccb reporting haiku while actually serving
+    # glm-5.3-flash): when an alias matches, telemetry/run reports
+    # attribute usage to the actual model and cost is re-estimated from
+    # its pricing-table rates instead of the label's.
+    model_aliases: dict[str, str] = field(default_factory=dict)
     # API base URL override (e.g. https://api.minimaxi.com/anthropic for
     # minimax's Anthropic-compatible endpoint).  When None, the backend's
     # default is used.
@@ -1518,6 +1525,7 @@ class WorkflowConfig:
             max_tools_per_turn=int(agent_raw.get("max_tools_per_turn", 50)),
             # Root-cause fix: model name override.
             model=_resolve_env_value(agent_raw.get("model")) or None,
+            model_aliases=_normalize_model_map(agent_raw.get("model_aliases")),
             base_url=_resolve_env_value(agent_raw.get("base_url")) or None,
             api_key=_resolve_env_value(agent_raw.get("api_key")) or None,
             cordis=_resolve_env_value(agent_raw.get("cordis")) or None,
