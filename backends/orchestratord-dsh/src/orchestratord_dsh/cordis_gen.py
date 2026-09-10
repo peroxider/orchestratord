@@ -338,6 +338,18 @@ def permission_mode_to_approval_policy(permission_mode: str | None) -> str | Non
     return _PERMISSION_MODE_TO_APPROVAL.get(raw)
 
 
+def _dump_block(block: list[dict[str, Any]]) -> str:
+    """Dump one cordis plugin block as stable YAML text.
+
+    Extracted to eliminate the repeated ``yaml.safe_dump(...)`` keyword
+    set shared by :func:`build_approval_block` and
+    :func:`build_cordis_text` (ST5).
+    """
+    return yaml.safe_dump(
+        block, sort_keys=False, allow_unicode=True, default_flow_style=False
+    )
+
+
 def build_approval_block(policy: str) -> str:
     """The YAML text mounting the user-approval seam with an explicit
     ``policy``. Emitted as another top-level list item of the cordis
@@ -364,9 +376,7 @@ def build_approval_block(policy: str) -> str:
             },
         }
     )
-    return yaml.safe_dump(
-        block, sort_keys=False, allow_unicode=True, default_flow_style=False
-    )
+    return _dump_block(block)
 
 
 def build_cordis_text(
@@ -394,11 +404,7 @@ def build_cordis_text(
                 },
             }
         ]
-        blocks.append(
-            yaml.safe_dump(
-                block, sort_keys=False, allow_unicode=True, default_flow_style=False
-            )
-        )
+        blocks.append(_dump_block(block))
     if approval_policy:
         blocks.append(build_approval_block(approval_policy))
     marker_note = (

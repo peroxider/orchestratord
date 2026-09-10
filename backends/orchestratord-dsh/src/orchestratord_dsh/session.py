@@ -125,20 +125,9 @@ class DshSession:
         # registry's llm-pi-ai routes and inject each route's credential
         # as an environment variable (never into the config file).
         if providers and provider != "deepseek-official":
-            from orchestratord_dsh.cordis_gen import (
-                generate_cordis_file,
-                route_env_var_name,
-            )
+            from orchestratord_dsh.cordis_gen import route_env_var_name
 
-            cordis = str(
-                generate_cordis_file(
-                    providers,
-                    Path(self._spec.cwd) / ".reports",
-                    run_id=self._spec.run_id,
-                    environ=environ,
-                    approval_policy=approval_policy,
-                )
-            )
+            cordis = self._generate_cordis(providers, environ, approval_policy)
             key = resolve_route_credential(
                 (providers.get(provider) or {}).get("api_key"), environ
             )
@@ -151,17 +140,7 @@ class DshSession:
                 cordis,
             )
         elif needs_cordis:
-            from orchestratord_dsh.cordis_gen import generate_cordis_file
-
-            cordis = str(
-                generate_cordis_file(
-                    providers or None,
-                    Path(self._spec.cwd) / ".reports",
-                    run_id=self._spec.run_id,
-                    environ=environ,
-                    approval_policy=approval_policy,
-                )
-            )
+            cordis = self._generate_cordis(providers or None, environ, approval_policy)
             logger.info(
                 "dsh generated cordis: permission_mode=%s approval_policy=%s cordis=%s",
                 self._spec.permission_mode,
@@ -282,6 +261,30 @@ class DshSession:
             # still be wrong. Surface it as a session init error.
             raise RuntimeError(str(exc)) from exc
 
+    def _generate_cordis(
+        self,
+        providers: dict[str, Any] | None,
+        environ: dict[str, str],
+        approval_policy: str | None,
+    ) -> str:
+        """Generate a cordis config file and return its path.
+
+        Extracted to eliminate the four-parameter-group repetition
+        between the custom-provider-route and approval-policy-only
+        code paths (ST3).
+        """
+        from orchestratord_dsh.cordis_gen import generate_cordis_file
+
+        return str(
+            generate_cordis_file(
+                providers,
+                Path(self._spec.cwd) / ".reports",
+                run_id=self._spec.run_id,
+                environ=environ,
+                approval_policy=approval_policy,
+            )
+        )
+
     def _ensure_harness(self) -> Any:
         if self._harness is None:
             factory = self._harness_factory or self._default_harness_factory
@@ -323,15 +326,7 @@ class DshSession:
             except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
                 if self._closed:
                     return
-                error_message = f"{type(exc).__name__}: {exc}"
-                self._last_error_message = error_message
-                self._emit_threadsafe(
-                    EventKind.ERROR,
-                    {
-                        "code": "dsh_init_error",
-                        "message": error_message,
-                    },
-                )
+                self._emit_error("dsh_init_error", exc)
                 error_emitted = True
                 return
 
@@ -346,15 +341,7 @@ class DshSession:
             except Exception as exc:  # noqa: BLE001 - SPI boundary: any SDK failure must surface as an ERROR event
                 if self._closed:
                     return
-                error_message = f"{type(exc).__name__}: {exc}"
-                self._last_error_message = error_message
-                self._emit_threadsafe(
-                    EventKind.ERROR,
-                    {
-                        "code": "dsh_error",
-                        "message": error_message,
-                    },
-                )
+                self._emit_error("dsh_error", exc)
                 error_emitted = True
             else:
                 # Incremental events were forwarded by the notification
@@ -414,6 +401,22 @@ class DshSession:
             payload=payload,
         )
         self._enqueue_threadsafe(envelope)
+
+    def _emit_error(self, code: str, exc: BaseException) -> None:
+        """Emit an ERROR event envelope with the given code and exception.
+
+        Extracted to eliminate the duplicate error-envelope construction
+        in the harness-init and harness-run except blocks (ST4).
+        """
+        error_message = f"{type(exc).__name__}: {exc}"
+        self._last_error_message = error_message
+        self._emit_threadsafe(
+            EventKind.ERROR,
+            {
+                "code": code,
+                "message": error_message,
+            },
+        )
 
     def _enqueue_threadsafe(self, envelope: EventEnvelope) -> None:
         loop = self._loop
