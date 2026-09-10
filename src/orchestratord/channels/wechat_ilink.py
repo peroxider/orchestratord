@@ -36,7 +36,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from cryptography.fernet import Fernet, InvalidToken
+# cryptography is an optional extra (gateway-wechat); imported lazily inside
+# WeChatIlinkAuthStore so the module stays importable without it (G0 gate).
 
 from orchestratord.utils.file_lock import HAS_FLOCK, flock_exclusive, flock_unlock
 
@@ -151,6 +152,8 @@ class WeChatIlinkAuthStore:
         self._lock = threading.Lock()
 
     def _load_key(self) -> bytes:
+        from cryptography.fernet import Fernet
+
         env_val = os.environ.get(self._secret_env)
         if env_val:
             return env_val.encode("utf-8")
@@ -169,6 +172,8 @@ class WeChatIlinkAuthStore:
         return self._key_file.read_bytes()
 
     def save(self, record: WeChatAuthRecord) -> None:
+        from cryptography.fernet import Fernet
+
         fernet = Fernet(self._load_key())
         blob = fernet.encrypt(record.bot_token.encode("utf-8"))
         payload = {
@@ -202,6 +207,8 @@ class WeChatIlinkAuthStore:
         enc = data.get("bot_token_enc")
         if not enc:
             return None
+        from cryptography.fernet import Fernet, InvalidToken
+
         try:
             token = Fernet(self._load_key()).decrypt(enc.encode("utf-8")).decode("utf-8")
         except InvalidToken:
