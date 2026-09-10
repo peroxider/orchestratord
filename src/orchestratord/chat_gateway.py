@@ -300,6 +300,11 @@ class ChatGateway:
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._loop_thread is not None:
             self._loop_thread.join(timeout=2.0)
+        if self._loop is not None and not self._loop.is_closed():
+            # close() 显式关闭 self-pipe/selector；stopped-but-unclosed 的
+            # loop 在解释器退出被 GC 时 __del__ 再 close，可能打印
+            # "Exception ignored in BaseEventLoop.__del__"（G3 日志扫描 fail-closed）。
+            self._loop.close()
         self._loop = None
         self._loop_thread = None
 

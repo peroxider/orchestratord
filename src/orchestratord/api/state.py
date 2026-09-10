@@ -9,6 +9,7 @@ instead of forking a fresh copy per request.
 
 from __future__ import annotations
 
+import atexit
 import threading
 from typing import Any
 
@@ -27,4 +28,11 @@ def get_dashboard_state() -> Any:
             )
 
             _state = DashboardState(_resolve_workspace_root())
+            # DashboardState.__init__ eagerly builds a ChatGateway whose
+            # dedicated event-loop thread must be closed at interpreter
+            # exit; cli/dashboard.py registers the same cleanup for its own
+            # instance, but the API compat singleton had no owner doing it —
+            # leaking an unclosed loop whose __del__ prints a traceback at
+            # daemon exit (G3 log-scan fail-closed).
+            atexit.register(_state.chat_gateway.stop)
         return _state
