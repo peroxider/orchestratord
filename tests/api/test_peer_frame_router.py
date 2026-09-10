@@ -45,11 +45,15 @@ def app(tmp_path, monkeypatch):
     # PR-B4: drop the broker too so each test starts with a clean
     # subscriber set (the ``LocalBackend`` keeps per-subscriber queues
     # that would otherwise leak across tests).
+    from orchestratord.api.deps import reset_peer_rate_bucket
     from orchestratord.api.realtime import reset_broker
+
     reset_broker()
+    reset_peer_rate_bucket()  # PR-B5: D25 bucket must not leak env overrides
     for conn in list(peer_connections.live_inbound()):
         peer_connections.unregister_inbound(conn)
-    return create_app()
+    yield create_app()
+    reset_peer_rate_bucket()
 
 
 @pytest.fixture
@@ -993,7 +997,7 @@ async def test_subscribe_publishes_event_to_inbound_stream(
     except ImportError:
         pytest.skip("peer realtime / hmac_sig not available")
     try:
-        peer, plaintext = asyncio.run(_build_accepted_peer(tmp_path))
+        peer, plaintext = await _build_accepted_peer(tmp_path)
     except Exception:
         pytest.skip("peer row setup requires sqlite aiosqlite support")
 
@@ -1075,7 +1079,7 @@ async def test_unsubscribe_stops_event_delivery(app, tmp_path) -> None:
     except ImportError:
         pytest.skip("peer realtime / hmac_sig not available")
     try:
-        peer, plaintext = asyncio.run(_build_accepted_peer(tmp_path))
+        peer, plaintext = await _build_accepted_peer(tmp_path)
     except Exception:
         pytest.skip("peer row setup requires sqlite aiosqlite support")
 
@@ -1165,7 +1169,7 @@ async def test_event_forwarder_stops_when_connection_closes(
     except ImportError:
         pytest.skip("peer realtime / hmac_sig not available")
     try:
-        peer, plaintext = asyncio.run(_build_accepted_peer(tmp_path))
+        peer, plaintext = await _build_accepted_peer(tmp_path)
     except Exception:
         pytest.skip("peer row setup requires sqlite aiosqlite support")
 
@@ -1214,3 +1218,77 @@ async def test_event_forwarder_stops_when_connection_closes(
         )
     finally:
         pass
+
+
+# -- PR-B5: D25 per-INVOKE-frame rate limit on the frame path --
+
+
+def test_invoke_rate_limited_returns_429_result(
+    client, tmp_path, monkeypatch
+) -> None:
+    """PR-B5 D25: the stream authenticates once, so the bucket must be
+    acquired per INVOKE frame. An over-limit frame is answered with a
+    RESULT carrying ``status=429`` — the connection stays up (REST
+    parity: 429 + Retry-After)."""
+    from orchestratord.api.deps import reset_peer_rate_bucket
+
+    monkeypatch.setenv("ORCHESTRATORD_PEER_RATE_RPS", "0.001")
+    monkeypatch.setenv("ORCHESTRATORD_PEER_RATE_BURST", "1")
+    reset_peer_rate_bucket()
+    try:
+        peer, plaintext, _engine = asyncio.run(_build_accepted_peer(tmp_path))
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+
+    # Unknown method → PR-B2 stub echo (200), but the bucket is still
+    # consumed (acquisition happens before dispatch).
+    first = _drive_invoke(
+        client, peer, plaintext,
+        request_id="req-rl-1", msg_id="rl-1", method="UNKNOWN/probe",
+    )
+    assert first.status == 200
+
+    second = _drive_invoke(
+        client, peer, plaintext,
+        request_id="req-rl-2", msg_id="rl-2", method="UNKNOWN/probe",
+    )
+    assert second.status == 429
+    assert second.body["error"] == "peer rate limit exceeded"
+    assert second.body["retry_after"] >= 1
+    assert second.msg_id == "rl-2"
+    assert second.request_id == "req-rl-2"
+
+
+def test_rate_limit_recovers_after_bucket_reset(
+    client, tmp_path, monkeypatch
+) -> None:
+    """PR-B5 D25: after a 429, resetting the bucket (operator/test
+    seam) lets INVOKEs through again — proves the limit is bucket
+    state, not a wedged connection."""
+    from orchestratord.api.deps import reset_peer_rate_bucket
+
+    monkeypatch.setenv("ORCHESTRATORD_PEER_RATE_RPS", "0.001")
+    monkeypatch.setenv("ORCHESTRATORD_PEER_RATE_BURST", "1")
+    reset_peer_rate_bucket()
+    try:
+        peer, plaintext, _engine = asyncio.run(_build_accepted_peer(tmp_path))
+    except Exception:
+        pytest.skip("peer row setup requires sqlite aiosqlite support")
+
+    first = _drive_invoke(
+        client, peer, plaintext,
+        request_id="req-rl-a", msg_id="rl-a", method="UNKNOWN/probe",
+    )
+    assert first.status == 200
+    blocked = _drive_invoke(
+        client, peer, plaintext,
+        request_id="req-rl-b", msg_id="rl-b", method="UNKNOWN/probe",
+    )
+    assert blocked.status == 429
+
+    reset_peer_rate_bucket()
+    recovered = _drive_invoke(
+        client, peer, plaintext,
+        request_id="req-rl-c", msg_id="rl-c", method="UNKNOWN/probe",
+    )
+    assert recovered.status == 200

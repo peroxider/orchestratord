@@ -595,6 +595,88 @@ async def test_rate_limit_returns_429_with_retry_after(
 
 
 # ---------------------------------------------------------------------------
+# D15/NG8: token rotation with grace period
+# ---------------------------------------------------------------------------
+
+
+async def test_rotate_token_rebinds_and_grants_grace(client, db) -> None:
+    """D15/NG8: rotate issues a new token, rebinds the peer row, and
+    the OLD token keeps authenticating inside the grace window."""
+    ws, _session, old_token = await _accepted_peer(client, db)
+    resp = await client.post(
+        f"/api/peer/peers/orch-A1/rotate-token?workspace_id={ws.id}"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "rotated"
+    assert body["orch_id"] == "orch-A1"
+    new_token = body["token"]
+    assert new_token and new_token != old_token
+    assert body["grace_seconds"] == 300.0  # default config
+    assert body["old_token_expires_at"] is not None
+
+    # New token authenticates (invoke goes through require_peer_auth).
+    fresh = await client.post(
+        "/api/peer/peers/orch-A1/invoke",
+        headers=_peer_headers(new_token),
+        json={
+            "method": "GET /api/workspaces/{workspace_id}/sessions",
+            "body": {"workspace_id": str(ws.id)},
+            "msg_id": "rot-new-1",
+        },
+    )
+    assert fresh.status_code == 200, fresh.text
+
+    # Old token still works during the grace window.
+    old_ok = await client.post(
+        "/api/peer/peers/orch-A1/invoke",
+        headers=_peer_headers(old_token),
+        json={
+            "method": "GET /api/workspaces/{workspace_id}/sessions",
+            "body": {"workspace_id": str(ws.id)},
+            "msg_id": "rot-old-1",
+        },
+    )
+    assert old_ok.status_code == 200, old_ok.text
+
+
+async def test_rotate_old_token_dies_after_grace(
+    client, db, monkeypatch
+) -> None:
+    """D15/NG8: with grace=0 the old token expires immediately — the
+    next request 401s while the new token keeps working."""
+    monkeypatch.setenv("ORCHESTRATORD_PEER_TOKEN_GRACE_SECONDS", "0")
+    ws, _session, old_token = await _accepted_peer(client, db)
+    resp = await client.post(
+        f"/api/peer/peers/orch-A1/rotate-token?workspace_id={ws.id}"
+    )
+    assert resp.status_code == 200, resp.text
+    new_token = resp.json()["token"]
+
+    async def send(tok: str, msg_id: str):
+        return await client.post(
+            "/api/peer/peers/orch-A1/invoke",
+            headers=_peer_headers(tok),
+            json={
+                "method": "GET /api/workspaces/{workspace_id}/sessions",
+                "body": {"workspace_id": str(ws.id)},
+                "msg_id": msg_id,
+            },
+        )
+
+    assert (await send(old_token, "grace-dead")).status_code == 401
+    assert (await send(new_token, "grace-new")).status_code == 200
+
+
+async def test_rotate_unknown_peer_returns_404(client, db) -> None:
+    ws = await _seed_workspace(db)
+    resp = await client.post(
+        f"/api/peer/peers/orch-NOPE/rotate-token?workspace_id={ws.id}"
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # PR-B1: peer_client_version → client_kind (Phase B v2 vs Phase 1 v1_sunset)
 # ---------------------------------------------------------------------------
 

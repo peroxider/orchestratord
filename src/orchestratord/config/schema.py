@@ -1794,6 +1794,11 @@ class PeerConfig:
     rate_limit: PeerRateLimitConfig = field(default_factory=PeerRateLimitConfig)
     # D18: at-least-once dedup window keyed by (msg_id, orch_id).
     dedup_window_seconds: float = 30.0
+    # NG8/D15: when a peer's bearer token is rotated, the old token
+    # stays valid for this long (grace period) so in-flight remote
+    # connections don't break mid-rotation. 0 disables the grace — the
+    # old token dies the moment the new one is issued.
+    token_grace_seconds: float = 300.0
 
     @classmethod
     def from_env(cls) -> PeerConfig:
@@ -1844,6 +1849,10 @@ class PeerConfig:
             dedup_window_seconds=_f(
                 ("ORCHESTRATORD_PEER_DEDUP_WINDOW",),
                 cls.dedup_window_seconds,
+            ),
+            token_grace_seconds=_f(
+                ("ORCHESTRATORD_PEER_TOKEN_GRACE_SECONDS",),
+                cls.token_grace_seconds,
             ),
         )
 

@@ -31,7 +31,7 @@ from orchestratord.api.db import get_repositories
 from orchestratord.db.models.peer import Peer
 from orchestratord.db.repository import Repositories
 from orchestratord.domain.auth_token import AuthToken, hash_api_token
-from orchestratord.peer.registry import get_peer_by_token_id
+from orchestratord.peer.registry import get_peer, get_peer_by_token_id
 
 _AUTH_ENV = "ORCHESTRATORD_AUTH"
 
@@ -185,6 +185,16 @@ def _peer_rate_bucket() -> TokenBucket:
         return _PEER_RATE_BUCKET
 
 
+def peer_rate_bucket() -> TokenBucket:
+    """Public accessor for the shared D25 bucket.
+
+    The REST path checks inside :func:`require_peer_auth`; the frame
+    transport (``POST /peer/v1/stream``) authenticates once per stream
+    and acquires per-INVOKE-frame instead, so it needs this accessor.
+    """
+    return _peer_rate_bucket()
+
+
 def reset_peer_rate_bucket() -> None:
     """Drop the cached bucket (test seam after env changes)."""
     global _PEER_RATE_BUCKET
@@ -220,7 +230,23 @@ async def require_peer_auth(
         raise HTTPException(status_code=403, detail="token lacks peer.* scope")
     peer = await get_peer_by_token_id(repos.session, token.id, orch_header)
     if peer is None or peer.status != "accepted":
-        raise HTTPException(status_code=401, detail="peer is not accepted")
+        # NG8 grace fallback: a rotated-out token keeps authenticating
+        # for ``token_grace_seconds`` after the peer row rebinds to the
+        # new token, so (token_id, orch_id) no longer matches. Resolve
+        # via the peer-token naming convention instead — invite/accept/
+        # rotate all name the row ``peer:{orch_id}``. Requiring the
+        # parsed name to equal the claimed orch_id (plus the
+        # workspace-scoped lookup below) means a peer cannot borrow
+        # another peer's identity even inside the grace window.
+        parsed_orch = (
+            token.name[len("peer:"):]
+            if token.name.startswith("peer:")
+            else None
+        )
+        if peer is None and parsed_orch == orch_header:
+            peer = await get_peer(repos.session, token.workspace_id, orch_header)
+        if peer is None or peer.status != "accepted":
+            raise HTTPException(status_code=401, detail="peer is not accepted")
     if request.method == "POST" and (
         request.url.path.endswith("/invoke")
         or request.url.path.endswith("/sessions")

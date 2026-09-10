@@ -8,10 +8,11 @@ The §5 handshake maps onto these endpoints:
 4. ``POST /api/peer/invite/{peer_id}/reject``            — operator reject (hard delete)
 5. ``GET  /api/peer/peers``                              — operator list (workspace-scoped)
 6. ``DELETE /api/peer/peers/{orch_id}``                  — operator remove (AC8)
-7. ``POST /api/peer/peers/{orch_id}/invoke``             — peer INVOKE (AC6, D18/D19)
-8. ``POST /api/peer/peers/{orch_id}/sessions``           — cross-daemon session (D17)
-9. ``GET  /api/peer/peers/{orch_id}/events``             — SSE stream (AC7)
-10. ``GET/PUT /api/peer/config``                         — auto-schedule 开关 (NG4)
+7. ``POST /api/peer/peers/{orch_id}/rotate-token``       — operator rotate (D15/NG8 grace)
+8. ``POST /api/peer/peers/{orch_id}/invoke``             — peer INVOKE (AC6, D18/D19)
+9. ``POST /api/peer/peers/{orch_id}/sessions``           — cross-daemon session (D17)
+10. ``GET  /api/peer/peers/{orch_id}/events``            — SSE stream (AC7)
+11. ``GET/PUT /api/peer/config``                         — auto-schedule 开关 (NG4)
 
 Discovery is intentionally public — it precedes any shared token and
 carries no workspace data — so this router mounts without
@@ -28,7 +29,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -49,6 +50,7 @@ from orchestratord.peer.registry import (
     CLIENT_KIND_V2,
     STATUS_ACCEPTED,
     STATUS_PENDING,
+    get_peer,
     list_peers,
     remove_peer,
     set_peer_status,
@@ -258,6 +260,64 @@ async def delete_peer(
     if not removed:
         raise HTTPException(status_code=404, detail="peer not found")
     return {"status": "removed", "orch_id": orch_id}
+
+
+@router.post("/api/peer/peers/{orch_id}/rotate-token")
+async def post_rotate_peer_token(
+    orch_id: str,
+    workspace_id: UUID = Query(...),
+    repos: Repositories = Depends(get_repositories),
+    _token: object = Depends(require_auth),
+) -> dict:
+    """Rotate the per-peer bearer token with a grace period (D15/NG8).
+
+    Issues a fresh token (shown once in this response), rebinds the
+    peer row to it, and keeps the OLD token alive for
+    ``PeerConfig.token_grace_seconds`` (env
+    ``ORCHESTRATORD_PEER_TOKEN_GRACE_SECONDS``, default 300) so
+    in-flight remote connections drain instead of 401-ing mid-rotation.
+    After the grace window the old ``auth_tokens`` row expires via the
+    standard ``expires_at`` check in ``require_peer_auth`` — no extra
+    revocation machinery.
+    """
+    peer = await get_peer(repos.session, workspace_id, orch_id)
+    if peer is None or peer.status != STATUS_ACCEPTED:
+        raise HTTPException(
+            status_code=404, detail="accepted peer not found"
+        )
+    from orchestratord.config.schema import PeerConfig
+
+    grace_seconds = PeerConfig.from_env().token_grace_seconds
+    old_expires_at: datetime | None = None
+    if peer.token_id is not None:
+        old_token = await repos.session.get(orm.AuthToken, peer.token_id)
+        if old_token is not None:
+            old_expires_at = datetime.now(UTC) + timedelta(
+                seconds=grace_seconds
+            )
+            old_token.expires_at = old_expires_at
+    plaintext, token_hash = issue_api_token()
+    token_row = orm.AuthToken(
+        id=uuid.uuid4(),
+        workspace_id=peer.workspace_id,
+        name=f"peer:{peer.orch_id}",
+        token_hash=token_hash,
+        scopes=["peer.*"],
+        expires_at=None,
+        created_at=datetime.now(UTC),
+    )
+    await repos.auth_tokens.add(token_row)
+    peer.token_id = token_row.id
+    await repos.session.flush()
+    return {
+        "status": "rotated",
+        "orch_id": peer.orch_id,
+        "token": plaintext,
+        "grace_seconds": grace_seconds,
+        "old_token_expires_at": (
+            old_expires_at.isoformat() if old_expires_at else None
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

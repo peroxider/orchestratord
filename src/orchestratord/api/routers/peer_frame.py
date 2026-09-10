@@ -55,6 +55,12 @@ EVENT frames from the client are not consumed by the server (AC7 / D22
 relay is the cross-daemon event channel; the frame stream is
 request/response for now).
 
+PR-B5 D25: authentication runs once per stream, so rate limiting is
+applied per INVOKE frame against the same shared
+:func:`orchestratord.api.deps.peer_rate_bucket` the REST path uses —
+an over-limit frame is answered with a ``status=429`` RESULT carrying
+``{"error", "retry_after"}`` and the stream stays open.
+
 Reader and writer loops are decoupled by :class:`asyncio.Queue` so a
 stalled peer never wedges the chunked POST (deadlock prevention — see
 plan §C).
@@ -64,6 +70,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from typing import Any
 
@@ -71,7 +78,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from orchestratord.api.deps import require_peer_auth
+from orchestratord.api.deps import peer_rate_bucket, require_peer_auth
 from orchestratord.api.routers.peer import _get_dispatcher
 from orchestratord.peer import connections as peer_connections
 from orchestratord.peer.hmac_sig import PeerAuthError, verify
@@ -312,6 +319,30 @@ async def peer_frame_stream(
                         )
                         await inbound.send_frame(welcome)
                     elif frame.type is PeerFrameType.INVOKE:
+                        # PR-B5/D25: the stream path authenticates once on
+                        # the request line, so ``require_peer_auth``'s
+                        # path-based check never fires here. Acquire from
+                        # the same shared bucket per INVOKE frame; an
+                        # over-limit frame gets a 429 RESULT and the
+                        # connection stays up (REST parity: 429 +
+                        # Retry-After).
+                        retry_after = peer_rate_bucket().try_acquire(
+                            str(peer_row.id)
+                        )
+                        if retry_after is not None:
+                            await inbound.send_frame(
+                                PeerFrame.result(
+                                    orch_id=peer_row.orch_id,
+                                    request_id=frame.request_id or "",
+                                    status=429,
+                                    body={
+                                        "error": "peer rate limit exceeded",
+                                        "retry_after": math.ceil(retry_after),
+                                    },
+                                    msg_id=frame.msg_id or "",
+                                )
+                            )
+                            continue
                         inbound.entered()
                         try:
                             result = await _dispatch_invoke_frame(
