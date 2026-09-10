@@ -932,9 +932,25 @@ class Orchestrator:
         stale_records = self._registry.running_records()
         for record in stale_records:
             self._registry.mark_failed_with_reason(record.issue_id, reason)
-            await self._sync_tracker_issue_state(record.issue_id, "failed")
+            # 非破坏性恢复：不走 _sync_tracker_issue_state("failed") 关单，
+            # tracker issue 保持 open 以便重试可被拾取；把重试计划持久化到
+            # registry 记录（retry_count / next_retry_at），由随后的
+            # _recover_pending_retries 在同一启动序列中重建 retry queue
+            # （与普通失败路径 _schedule_retry 的持久化字段一致）。
+            recovered = self._registry.get(record.issue_id)
+            if recovered is not None:
+                delay_ms = compute_retry_delay(
+                    1,
+                    FAILURE_RETRY_BASE_MS,
+                    self.workflow.agent.max_retry_backoff_ms,
+                )
+                recovered.retry_count = 1
+                recovered.next_retry_at = time.time() + delay_ms / 1000.0
+                recovered.touch()
+                self._registry._save()
             logger.warning(
-                "Recovered stale running issue_id=%s on orchestrator startup",
+                "Recovered stale running issue_id=%s on orchestrator startup "
+                "(retry scheduled)",
                 record.issue_id,
             )
 
