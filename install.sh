@@ -148,6 +148,15 @@ ${BOLD}Options:${RESET}
   --reset                 (with --with-web) wipe the project's pnpm state
                           (node_modules, .pnpm store) before installing.
                           Use to recover from a broken install.
+  --update                Pull latest code (git pull --ff-only) and reinstall
+                          core + previously installed backend packages.
+                          Rebuilds the web client if it was built before.
+                          Combine with --with-db to also run DB migrations.
+  --uninstall             Remove orchestratord: pip packages (core + any
+                          backend plugins), the venv and activate.sh.
+                          Asks for confirmation before deleting anything.
+  --purge                 (with --uninstall) also delete web build artifacts
+                          (node_modules, apps/web/.next) from the source repo
   --dry-run               Show what would be done, don't execute
   --help                  Show this help message
 
@@ -162,6 +171,10 @@ EOF
     echo "  ./install.sh --backends clawcodex,codex   # specific backends"
     echo "  ./install.sh --no-backends                # core only"
     echo "  ./install.sh --all-backends --dry-run     # preview all"
+    echo "  ./install.sh --update                     # pull latest + reinstall"
+    echo "  ./install.sh --update --with-db           # update + migrate DB schema"
+    echo "  ./install.sh --uninstall                  # remove venv + pip packages"
+    echo "  ./install.sh --uninstall --purge          # also remove web build artifacts"
     echo
     echo "${BOLD}Environment:${RESET}"
     echo "  CLAWCODEX_SOURCE    path to clawcodex-ascend for the clawcodex backend"
@@ -491,12 +504,16 @@ setup_venv() {
     fi
 
     if [[ -d "$VENV_DIR" ]]; then
-        info "Virtual environment exists at ${VENV_DIR}"
-        read -r -p "  Recreate? [y/N] " recreate
-        if [[ "$recreate" =~ ^[Yy]$ ]]; then
-            rm -rf "$VENV_DIR"
-            "$PYTHON" -m venv "$VENV_DIR"
-            success "Recreated virtual environment"
+        if [[ "$UPDATE" == "true" ]]; then
+            info "Using existing virtual environment at ${VENV_DIR}"
+        else
+            info "Virtual environment exists at ${VENV_DIR}"
+            read -r -p "  Recreate? [y/N] " recreate
+            if [[ "$recreate" =~ ^[Yy]$ ]]; then
+                rm -rf "$VENV_DIR"
+                "$PYTHON" -m venv "$VENV_DIR"
+                success "Recreated virtual environment"
+            fi
         fi
     else
         info "Creating virtual environment at ${VENV_DIR}"
@@ -532,6 +549,19 @@ ACTIVATE
 }
 
 # ── Core installation ────────────────────────────────────────────────────────
+_detect_orch_src() {
+    # Locate the orchestratord source for --update/--uninstall. Unlike
+    # install_core, these commands operate on an EXISTING checkout and must
+    # never clone-on-miss — hence this read-only resolution.
+    if [[ -f "${SCRIPT_DIR}/pyproject.toml" ]] && grep -q 'name = "orchestratord"' "${SCRIPT_DIR}/pyproject.toml" 2>/dev/null; then
+        echo "${SCRIPT_DIR}"
+    elif [[ -n "${ORCHESTRATORD_REPO:-}" ]] && [[ -d "${ORCHESTRATORD_REPO}" ]]; then
+        echo "${ORCHESTRATORD_REPO}"
+    else
+        echo "${SCRIPT_DIR}"
+    fi
+}
+
 install_core() {
     header "Installing orchestratord Core"
 
@@ -792,21 +822,29 @@ for b in list_backends():
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 print_summary() {
-    header "Installation Complete"
+    local header_text="Installation Complete"
+    local core_word="installed"
+    if [[ "$UPDATE" == "true" ]]; then
+        header_text="Update Complete"
+        core_word="updated"
+    fi
+    header "$header_text"
 
     local total_duration=""
     if [[ -n "${TOTAL_START:-}" ]]; then
         total_duration="  $(_format_duration $(($(date +%s) - TOTAL_START)))"
     fi
 
-    echo "  ${BOLD}orchestratord core${RESET}  installed$(_step_time_str "${STEP_CORE_DURATION:-}")"
+    echo "  ${BOLD}orchestratord core${RESET}  ${core_word}$(_step_time_str "${STEP_CORE_DURATION:-}")"
     if [[ -n "${INSTALLED_BACKENDS:-}" ]]; then
         echo "  ${BOLD}Backends${RESET}          ${INSTALLED_BACKENDS// /, }$(_step_time_str "${STEP_BACKENDS_DURATION:-}")"
     else
         echo "  ${BOLD}Backends${RESET}          none (core only)"
     fi
     if [[ "$WITH_WEB" == "true" ]]; then
-        if [[ "$WEB_BUILT_OK" == "true" ]]; then
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "  ${BOLD}Web client${RESET}        skipped (dry run)"
+        elif [[ "$WEB_BUILT_OK" == "true" ]]; then
             echo "  ${BOLD}Web client${RESET}        built (apps/web/.next)$(_step_time_str "${STEP_WEB_DURATION:-}")"
         else
             echo "  ${BOLD}Web client${RESET}        FAILED (see errors above; run ./install.sh --with-web again)"
@@ -868,6 +906,9 @@ parse_args() {
     WITH_DB=false
     WEB_BUILT_OK=false
     RESET_NODE_MODULES=false
+    UNINSTALL=false
+    UPDATE=false
+    PURGE=false
     USER_BACKENDS=""
     USER_PREFIX=""
     USER_PYTHON=""
@@ -943,6 +984,18 @@ parse_args() {
                 RESET_NODE_MODULES=true
                 shift
                 ;;
+            --update)
+                UPDATE=true
+                shift
+                ;;
+            --uninstall)
+                UNINSTALL=true
+                shift
+                ;;
+            --purge)
+                PURGE=true
+                shift
+                ;;
             --with-db)
                 WITH_DB=true
                 shift
@@ -958,6 +1011,15 @@ parse_args() {
                 ;;
         esac
     done
+
+    if [[ "$UNINSTALL" == "true" ]] && [[ "$UPDATE" == "true" ]]; then
+        error "--uninstall and --update are mutually exclusive"
+        exit 1
+    fi
+    if [[ "$PURGE" == "true" ]] && [[ "$UNINSTALL" != "true" ]]; then
+        warn "--purge only applies to --uninstall — ignoring"
+        PURGE=false
+    fi
 
     if [[ -n "$USER_BACKENDS" ]]; then
         for b in $USER_BACKENDS; do
@@ -1068,6 +1130,188 @@ build_web_client() {
     WEB_BUILT_OK=true
 }
 
+# ── Uninstall (--uninstall) ──────────────────────────────────────────────────
+uninstall_all() {
+    header "Uninstalling orchestratord"
+
+    INSTALL_PREFIX="${USER_PREFIX:-$DEFAULT_INSTALL_PREFIX}"
+    VENV_DIR="${INSTALL_PREFIX}/venv"
+    ORCH_SRC="$(_detect_orch_src)"
+
+    # Resolve the pip environment holding the orchestratord packages:
+    # prefer the install venv, fall back to the current interpreter
+    # (covers installs done with --no-venv).
+    local pip_py=""
+    if [[ -f "${VENV_DIR}/bin/python" ]]; then
+        pip_py="${VENV_DIR}/bin/python"
+    elif [[ -f "${VENV_DIR}/Scripts/python.exe" ]]; then
+        pip_py="${VENV_DIR}/Scripts/python.exe"
+    else
+        pip_py="${USER_PYTHON:-$(command -v python3 || command -v python || echo '')}"
+    fi
+
+    # Freeze lines look like "orchestratord==1.2.3" (registry) or
+    # "orchestratord @ file:///path" (editable) — keep the leading name only.
+    local pkgs=""
+    if [[ -n "$pip_py" ]]; then
+        pkgs=$("$pip_py" -m pip list --format=freeze 2>/dev/null | grep '^orchestratord' | sed -E 's/^([A-Za-z0-9._-]+).*/\1/' || true)
+    fi
+
+    echo "  The following will be ${BOLD}permanently removed${RESET}:"
+    echo ""
+    if [[ -n "$pkgs" ]]; then
+        echo "    pip packages:"
+        local p
+        for p in $pkgs; do
+            echo "      - ${p}"
+        done
+    else
+        echo "    pip packages: none found"
+    fi
+    if [[ -d "$VENV_DIR" ]]; then
+        echo "    virtual environment: ${VENV_DIR}"
+    fi
+    if [[ -f "${INSTALL_PREFIX}/activate.sh" ]]; then
+        echo "    activation script:  ${INSTALL_PREFIX}/activate.sh"
+    fi
+    if [[ "$PURGE" == "true" ]]; then
+        echo "    web build artifacts (--purge):"
+        echo "      - ${ORCH_SRC}/node_modules"
+        echo "      - ${ORCH_SRC}/apps/*/node_modules + ${ORCH_SRC}/packages/*/node_modules"
+        echo "      - ${ORCH_SRC}/apps/web/.next"
+    fi
+    echo ""
+    echo "  The source repository at ${ORCH_SRC} and any workflow/DB state are left untouched."
+    echo ""
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "Dry run — nothing was removed"
+        return 0
+    fi
+
+    read -r -p "  Proceed with uninstall? This cannot be undone. [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Aborted — nothing was removed"
+        return 1
+    fi
+
+    if [[ -n "$pkgs" ]]; then
+        local p
+        for p in $pkgs; do
+            info "pip uninstall ${p}"
+            "$pip_py" -m pip uninstall -y "$p" >/dev/null 2>&1 || warn "Failed to uninstall ${p} (manual cleanup may be needed)"
+        done
+        success "orchestratord pip packages removed"
+    elif [[ -n "$pip_py" ]]; then
+        info "No orchestratord pip packages found — skipping pip step"
+    else
+        warn "No Python interpreter found — skipping pip step"
+    fi
+
+    if [[ -d "$VENV_DIR" ]]; then
+        rm -rf "$VENV_DIR"
+        success "Removed virtual environment: ${VENV_DIR}"
+    fi
+    if [[ -f "${INSTALL_PREFIX}/activate.sh" ]]; then
+        rm -f "${INSTALL_PREFIX}/activate.sh"
+        success "Removed ${INSTALL_PREFIX}/activate.sh"
+    fi
+
+    if [[ "$PURGE" == "true" ]]; then
+        info "Purging web build artifacts from ${ORCH_SRC}..."
+        rm -rf "${ORCH_SRC}/node_modules"
+        local sub
+        for sub in apps packages; do
+            if [[ -d "${ORCH_SRC}/${sub}" ]]; then
+                find "${ORCH_SRC}/${sub}" -type d -name node_modules -prune -exec rm -rf {} + 2>/dev/null || true
+            fi
+        done
+        rm -rf "${ORCH_SRC}/apps/web/.next"
+        success "Purged node_modules and apps/web/.next"
+    fi
+
+    echo ""
+    success "orchestratord uninstalled"
+}
+
+# ── Update (--update) ────────────────────────────────────────────────────────
+update_install() {
+    header "Updating orchestratord"
+
+    INSTALL_PREFIX="${USER_PREFIX:-$DEFAULT_INSTALL_PREFIX}"
+    VENV_DIR="${INSTALL_PREFIX}/venv"
+
+    # Reuse the existing venv when present; create one only if missing.
+    setup_venv
+
+    # 1. Pull latest code (git checkouts only)
+    ORCH_SRC="$(_detect_orch_src)"
+    info "Source: ${ORCH_SRC}"
+    if [[ -d "${ORCH_SRC}/.git" ]]; then
+        local branch
+        branch=$(git -C "$ORCH_SRC" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "HEAD")
+        if [[ -n "$(git -C "$ORCH_SRC" status --porcelain 2>/dev/null | head -1 || true)" ]]; then
+            warn "Working tree has uncommitted changes — pull may conflict"
+        fi
+        info "Pulling latest on branch '${branch}'..."
+        if [[ "$DRY_RUN" == "true" ]]; then
+            echo "  [DRY RUN] git -C ${ORCH_SRC} pull --ff-only"
+        elif ! git -C "$ORCH_SRC" pull --ff-only; then
+            error "git pull --ff-only failed (branch diverged or conflicts)."
+            echo "  Resolve manually, then re-run: ./install.sh --update"
+            return 1
+        fi
+    else
+        warn "Not a git checkout — skipping code update, reinstalling current source"
+    fi
+
+    # 2. Reinstall core (also re-resolves ORCH_SRC and verifies the CLI)
+    STEP_START=$(date +%s)
+    install_core
+    STEP_CORE_DURATION=$(($(date +%s) - STEP_START))
+
+    # 3. Reinstall previously installed backend packages (orchestratord-*)
+    STEP_START=$(date +%s)
+    local list_py="${PYTHON}"
+    if [[ "$USE_VENV" == "true" ]]; then
+        list_py="${VENV_PYTHON}"
+    fi
+    local pkgs
+    pkgs=$("${list_py}" -m pip list --format=freeze 2>/dev/null | grep '^orchestratord-' | sed -E 's/^([A-Za-z0-9._-]+).*/\1/' || true)
+    INSTALLED_BACKENDS=""
+    if [[ -n "$pkgs" ]]; then
+        local p
+        for p in $pkgs; do
+            install_backend_package "${p#orchestratord-}"
+            INSTALLED_BACKENDS="${INSTALLED_BACKENDS} ${p#orchestratord-}"
+        done
+        INSTALLED_BACKENDS="${INSTALLED_BACKENDS# }"
+    else
+        info "No backend packages previously installed — skipping"
+    fi
+    STEP_BACKENDS_DURATION=$(($(date +%s) - STEP_START))
+
+    # 4. Rebuild the web client only if it was built before
+    if [[ -d "${ORCH_SRC}/apps/web/.next" ]] || [[ -d "${ORCH_SRC}/node_modules" ]]; then
+        STEP_START=$(date +%s)
+        WITH_WEB=true
+        build_web_client || true
+        STEP_WEB_DURATION=$(($(date +%s) - STEP_START))
+    else
+        info "Web client not previously built — skipping (add it with --with-web)"
+    fi
+
+    # 5. Optional DB migration
+    if [[ "$WITH_DB" == "true" ]]; then
+        STEP_START=$(date +%s)
+        setup_database || true
+        STEP_DB_DURATION=$(($(date +%s) - STEP_START))
+    fi
+
+    verify_installation
+    print_summary
+}
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 main() {
     parse_args "$@"
@@ -1082,6 +1326,19 @@ main() {
 
     if [[ "$DRY_RUN" == "true" ]]; then
         echo -e "  ${YELLOW}[DRY RUN]${RESET} No changes will be made\n"
+    fi
+
+    if [[ "$UNINSTALL" == "true" ]]; then
+        uninstall_all || exit 1
+        exit 0
+    fi
+
+    if [[ "$UPDATE" == "true" ]]; then
+        STEP_START=$(date +%s)
+        check_prerequisites
+        STEP_PREREQ_DURATION=$(($(date +%s) - STEP_START))
+        update_install || exit 1
+        exit 0
     fi
 
     STEP_START=$(date +%s)

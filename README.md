@@ -88,6 +88,10 @@ cd orchestratord
 ./install.sh --with-web                   # also build the Next.js Web client
 ./install.sh --with-web --with-db         # web client + DB schema migration
 ./install.sh --with-web --reset           # wipe node_modules / .pnpm first, then rebuild
+./install.sh --update                     # pull latest + reinstall core & backends
+./install.sh --update --with-db           # update + migrate DB schema
+./install.sh --uninstall                  # remove venv, activate.sh and pip packages
+./install.sh --uninstall --purge          # also remove web build artifacts
 ./install.sh --dry-run                    # preview without changes
 ```
 
@@ -181,6 +185,30 @@ NO_COLOR=1                                                 # disable colored out
 ```
 
 See `./install.sh --help` for the full option list (custom prefix, specific Python interpreter, dry-run, etc.).
+
+### Update & uninstall
+
+```bash
+./install.sh --update            # git pull --ff-only + reinstall
+./install.sh --update --with-db  # also run DB migrations after the update
+```
+
+`--update` pulls the latest code (only for git checkouts; a tarball source is
+reinstalled as-is), reinstalls the core daemon, reinstalls every previously
+installed `orchestratord-*` backend package, and rebuilds the web client if
+it was built before (skipped otherwise — add it later with `--with-web`).
+The existing venv is reused, never recreated.
+
+```bash
+./install.sh --uninstall          # remove pip packages + venv + activate.sh
+./install.sh --uninstall --purge  # also delete node_modules and apps/web/.next
+```
+
+`--uninstall` shows exactly what will be removed (pip packages found via
+`pip list`, the venv, `activate.sh`) and asks for confirmation before
+deleting anything. `--purge` additionally wipes the web build artifacts from
+the source repository. The source checkout itself and any workflow/DB state
+are always left untouched. Both commands respect `--dry-run` for a preview.
 
 ### Manual install (PyPI)
 
