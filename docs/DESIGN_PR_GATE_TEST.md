@@ -256,17 +256,12 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
         env_gone_condition="P2 落地后撤销本条目",
         expires="2026-10-31",
     ),
-    GateExemption(
-        check_id="G2.migrations",
-        reason="真实缺陷：迁移 0009 对分区表 events 执行 CREATE INDEX "
-               "CONCURRENTLY，PG 拒绝（cannot create index on partitioned "
-               "table ... concurrently），全新库 alembic upgrade head 必败。"
-               "修复方向：去掉 CONCURRENTLY，或 CREATE INDEX ON ONLY + 各分区",
-        env_gone_condition="0009 修复后撤销本条目",
-        expires="2026-10-31",
-    ),
 )
 ```
+
+> 历史条目 `G2.migrations`（迁移 0009/0010 在分区表 events 上
+> CONCURRENTLY 必败）已于 2026-09-10 修复后撤销——豁免条目的生命周期
+> 即如此运转：登记 → 修复 → 撤销。
 
 规则与 `test_architecture.py` 完全同构：未登记的失败 FAIL，登记了但环境实际可用、或已过期、或在**非限定平台**上被引用 → 同样 FAIL。新检查上线时若现有代码无法满足，须在此登记并给出消除期限，而不是调低断言。
 
@@ -314,7 +309,7 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
 
 落地过程中捕获/确认的真实发现（门禁设计价值的直接证据）：
 
-1. **迁移 0009 真实缺陷**（§9 G2.migrations 豁免登记）：分区表 `events` 上 `CREATE INDEX CONCURRENTLY` 被 PG 拒绝，全新库 `alembic upgrade head` 必败——现有测试从不跑迁移，此缺陷长期潜伏。
+1. **迁移 0009/0010 真实缺陷（已修复 2026-09-10）**：分区表 `events` 上 `CREATE INDEX CONCURRENTLY` 被 PG 拒绝，全新库 `alembic upgrade head` 必败——现有测试从不跑迁移，此缺陷长期潜伏。修复：两条迁移改为普通 CREATE INDEX（迁移时父表零分区，瞬时完成；后续挂载的月分区自动继承索引），G2.migrations 豁免随之撤销，G2 三项转 PASS。
 2. **ruff 存量债 963 条**（§5.1）：仓库从未强制 lint，G0 收窄为 E9-only 并留季度收紧路线。
-3. **G3 stop 变体的僵尸进程伪影**：daemon 是 pytest 子进程，退出后成僵尸；`server stop`（独立进程）的 `_is_pid_alive` 用 signal 0 探测，僵尸仍报存活 → 误判超时 rc=1。真实用户场景 daemon 被 init 收割无此问题，测试侧以后台收割线程模拟 reap（`test_g3_startup.py`）。daemon 实测 SIGTERM 后 0.4s 优雅退出。此伪影同时暴露了 `_is_pid_alive` 的一个产品级弱点（Linux 上可读 `/proc/<pid>/stat` 区分 Z 状态），留待后续独立修复。
+3. **G3 stop 变体的僵尸进程伪影（产品侧已修复 2026-09-10）**：daemon 是 pytest 子进程，退出后成僵尸；`server stop`（独立进程）的 `_is_pid_alive` 用 signal 0 探测，僵尸仍报存活 → 误判超时 rc=1。真实用户场景 daemon 被 init 收割无此问题，测试侧以后台收割线程模拟 reap（`test_g3_startup.py`）。daemon 实测 SIGTERM 后 0.4s 优雅退出。产品修复：`_is_pid_alive` 在 Linux 上读 `/proc/<pid>/stat` 把 Z 状态判为已死亡（非 Linux 回退 signal 0 语义）。
 4. **uvicorn ≥0.52 信号语义**（§5.4）：serve 变体退出码判据据实放宽为 {0, -15}。

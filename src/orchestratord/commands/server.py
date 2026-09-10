@@ -112,12 +112,25 @@ def _slug_from_workspace(context: CommandContext, ws_str: str) -> str:
 
 
 def _is_pid_alive(context: CommandContext, pid: int) -> bool:
-    """Check whether a PID is still alive (no-side-effect signal 0 test)."""
+    """Check whether a PID is alive, treating Linux zombies as stopped.
+
+    Signal 0 reports zombies as alive, which can make ``server stop`` wait
+    until its timeout for a daemon that has already exited.  Linux exposes
+    the process state in ``/proc/<pid>/stat``; on other platforms we retain
+    the signal-0 semantics.
+    """
     try:
         os.kill(pid, 0)
-        return True
     except (OSError, ProcessLookupError):
         return False
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # state is the field after the comm in parens; comm may contain
+            # spaces, so take everything after the last ')'.
+            state = f.read().rsplit(b")", 1)[1].split()[0]
+        return state != b"Z"
+    except (OSError, IndexError):
+        return True
 
 
 def _format_uptime(context: CommandContext, started_at: float) -> str:

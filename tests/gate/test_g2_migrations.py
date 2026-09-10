@@ -61,12 +61,6 @@ def fresh_dbs(request: pytest.FixtureRequest):
 class TestG2:
     def test_upgrade_head(self, request, fresh_dbs) -> None:
         proc = _alembic(["upgrade", "head"], MIG_DSN)
-        g.waive_known_defect(
-            request,
-            "G2.migrations",
-            output=proc.stdout + proc.stderr,
-            signature="cannot create index on partitioned table",
-        )
         assert proc.returncode == 0, (
             f"alembic upgrade head rc={proc.returncode}\n"
             f"{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}"
@@ -74,20 +68,8 @@ class TestG2:
 
     def test_downgrade_base(self, request, fresh_dbs) -> None:
         up = _alembic(["upgrade", "head"], MIG_DSN)
-        g.waive_known_defect(
-            request,
-            "G2.migrations",
-            output=up.stdout + up.stderr,
-            signature="cannot create index on partitioned table",
-        )
         assert up.returncode == 0, up.stderr[-3000:]
         down = _alembic(["downgrade", "base"], MIG_DSN)
-        g.waive_known_defect(
-            request,
-            "G2.migrations",
-            output=down.stdout + down.stderr,
-            signature="cannot create index on partitioned table",
-        )
         assert down.returncode == 0, (
             f"alembic downgrade base rc={down.returncode}\n"
             f"{down.stdout[-3000:]}\n{down.stderr[-3000:]}"
@@ -98,12 +80,6 @@ class TestG2:
         import asyncio
 
         up = _alembic(["upgrade", "head"], MIG_DSN)
-        g.waive_known_defect(
-            request,
-            "G2.migrations",
-            output=up.stdout + up.stderr,
-            signature="cannot create index on partitioned table",
-        )
         assert up.returncode == 0, up.stderr[-3000:]
 
         # ORM 侧：create_schema 建第二份空库

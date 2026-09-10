@@ -67,17 +67,6 @@ GATE_EXEMPTIONS: tuple[GateExemption, ...] = (
         env_gone_condition="P2 落地后撤销本条目",
         expires="2026-10-31",
     ),
-    GateExemption(
-        check_id="G2.migrations",
-        reason=(
-            "真实缺陷：迁移 0009 对分区表 events 执行 CREATE INDEX "
-            "CONCURRENTLY，PG 拒绝（cannot create index on partitioned "
-            "table ... concurrently），全新库 alembic upgrade head 必败。"
-            "修复方向：去掉 CONCURRENTLY，或 CREATE INDEX ON ONLY + 各分区"
-        ),
-        env_gone_condition="0009 修复后撤销本条目",
-        expires="2026-10-31",
-    ),
 )
 
 
